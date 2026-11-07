@@ -126,6 +126,8 @@ pi          # TUI，已经带 life-world
 - 在线模型（如 `deepseek/deepseek-flash`）用 pi 内置目录 + `~/.pi/agent/auth.json` 的凭据；
 - 自建/本地模型（如 `basalt/abliterated-iq3_xxs`）先在 `~/.pi/agent/models.json` 里注册 provider（baseUrl / api / apiKey），再用 `provider/model` 引用。
 
+本地模型实测与推荐的优化参数见仓库根 README《本地模型实测》（RTX 5060 Ti + Basalt + Qwen3.8-Flash-Next IQ3_XXS 搭配 DeepSeek Flash）。
+
 `models.local` 留空则不启用热切换（机密抽屉也随之停用）；`autoFailover` 打开时，扩展在每轮开始前探活当前模型，挂了就自动切到另一个（冷却 `cooldownMs`，防止来回抖）。
 
 ### 机密抽屉

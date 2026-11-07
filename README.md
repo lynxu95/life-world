@@ -114,6 +114,49 @@ QQ ←→ OneBot v11 正向 WS（SnowLuma / NapCat …）
 - **模型热切换**：`switch_model` 让角色自己决定用本地还是在线模型；模型无响应立即切，工具连续失败两次切云端；脚本探活兜底，不依赖模型自己判断。切云端前，之前的对话与机密文件收进本地 `机密抽屉/`；云端模式禁止访问该目录（read/ls/grep/edit/bash 命中即拦），私密画像不预加载、本地需要时自己读；没配本地模型则抽屉不启用。`plan_next` 可为任务指定到点用哪个模型；
 - **联网搜索**：`web_search` 工具走 TinyFish 的 keyless 模式，不填 API Key 也能搜（opencode 版同源能力）。
 
+## 本地模型实测
+
+| 项 | 配置 |
+|---|---|
+| 显卡 | RTX 5060 Ti 16GB |
+| 本地推理 | Basalt（本地推理项目，OpenAI 兼容 `/v1`，默认 8081 端口） |
+| 本地模型 | Qwen3.8-Flash-Next，**IQ3_XXS** 量化（消融版） |
+| 在线模型 | DeepSeek Flash |
+| 结论 | 插件成功跑通，长时间运行稳定；日常聊天质量不错，世界探索交给在线模型 |
+
+### 打开的本地模型优化参数
+
+`~/.local/share/life-world/life-world.json`：
+
+```json
+{
+  "localModel": {
+    "enabled": true,
+    "keepRecent": 20,
+    "foldToolResults": 6,
+    "resultChars": 300,
+    "foldingThinkingTurns": 0,
+    "debugStats": false
+  },
+  "models": {
+    "local": "basalt/abliterated-iq3_xxs",
+    "cloud": "deepseek/deepseek-flash",
+    "autoFailover": true,
+    "localHealthUrl": "http://127.0.0.1:8081/health",
+    "cloudHealthUrl": "https://api.deepseek.com/models",
+    "probeTimeoutMs": 4000,
+    "cooldownMs": 60000
+  }
+}
+```
+
+- `keepRecent: 20`：新会话只注入最近 20 条历史；
+- `foldToolResults: 6` + `resultChars: 300`：旧工具结果只留最近 6 轮、每条 300 字；
+- `foldingThinkingTurns: 0`：旧轮思考全部折掉；
+- `debugStats: false`：上下文构成统计默认关（要看再开）；
+- 自动兜底：模型无响应立即切另一个；工具连续失败两次从本地切在线；冷却 60 秒；
+- QQ 桥接已**取消回复超时**，本地模型慢慢说也能等到。
+
 ## 和 main（opencode 版）的区别
 
 `main` 是 opencode 插件版，`pi-agent` 是 pi 原生扩展版，两边并存、互不影响。
