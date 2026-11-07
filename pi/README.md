@@ -30,11 +30,24 @@
 | 项 | 要求 |
 |---|---|
 | pi | **1.5.0+** |
-| Node | **22+**（桥接用全局 WebSocket；build-prompt 用 Node） |
-| OneBot | 任意 OneBot v11 正向 WS 服务端（SnowLuma / NapCat 等） |
+| Node | **22.19+**（桥接用全局 WebSocket；build-prompt 用 Node） |
+| OneBot | 任意 OneBot v11 正向 WS 服务端（SnowLuma / NapCat 等；只在跑 QQ 桥接时需要） |
 | 系统 | Linux（tmux 可选；TUI 不是必须） |
+| 可选 | `imagemagick` / `ffmpeg`（超 8MB 的 QQ 图片自动缩） |
 
 ## 安装
+
+### 0. 先装 pi
+
+```bash
+curl -fsSL https://pi.dev/install.sh | sh
+# 或：npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+pi --version   # 1.5.0+
+```
+
+如果 `pi` 不在 PATH（常见于 `~/.local/bin` 或 `~/.pi/agent/bin`），把它加进 shell 配置，或者在脚本里设 `PI_BIN=/绝对路径/pi`。
+
+### 1. 装 life-world
 
 ```bash
 git clone -b pi-agent https://github.com/lynxu95/life-world
@@ -148,6 +161,8 @@ pi -p --model deepseek-flash --no-skills --no-prompt-templates \
 ```
 
 `PI_BIN` / `LIFE_WORLD_EXT` / `LIFE_WORLD_PROMPT` / `LIFE_WORLD_MODEL` 都可用环境变量覆盖；默认从 `bin/` 相对定位扩展与提示词。
+
+> tmux 新窗口不读 `.zshrc`：`pi` 若在 `~/.local/bin`，启动命令里补 `PATH=$HOME/.local/bin:$PATH`，或显式设 `PI_BIN=$HOME/.local/bin/pi`。
 
 附件：图片超过 8MB 会自动缩到 1568px（需要 `imagemagick` 或 `ffmpeg`）；工作文件不设大小上限，流式落盘到 `worlds/default/tmp/` 后把路径交给模型。
 

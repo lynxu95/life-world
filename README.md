@@ -5,9 +5,31 @@
 
 给 [pi coding agent](https://github.com/earendil-works/pi) 里的陪伴角色一个会记得、会生活的世界：跨会话记忆与检索、自己的时间、每日回顾、心情、颜文字、QQ 桥接、语音、私聊余波、零第三方子代理，以及**本地 / 在线模型热切换**和**免费联网搜索**。
 
-## 快速开始
+## 安装
 
-要求：**pi 1.5.0+**；只有跑 QQ 桥接/家会话时需要 **Node 22+** 和 OneBot v11 服务端。
+**要求**
+
+| 项 | 说明 |
+|---|---|
+| pi | **1.5.0+** |
+| Node | **22.19+**（pi 自带安装器也会装；QQ 桥接 / 家会话用它） |
+| 系统 | Linux（tmux 可选，但常驻推荐） |
+| 可选 | `imagemagick` 或 `ffmpeg`（超 8MB 的 QQ 图片自动缩）；OneBot v11 服务端（SnowLuma / NapCat，跑 QQ 桥接才需要） |
+
+### 1. 装 pi
+
+```bash
+curl -fsSL https://pi.dev/install.sh | sh
+# 或：npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+```
+
+装完按提示把 `~/.pi/agent/bin` 或 `~/.local/bin` 加进 PATH（重新开 shell 也行）。验证：
+
+```bash
+pi --version   # 1.5.0+
+```
+
+### 2. 装 life-world
 
 ```bash
 git clone -b pi-agent https://github.com/lynxu95/life-world
@@ -18,6 +40,8 @@ cd life-world
 ./pi/install.sh --project   # 项目级：只在当前仓库目录生效
 ```
 
+脚本会：建世界目录、复制颜文字库、生成世界规则、软链扩展，并把 `browser-*` / `pi-qq-bridge.mjs` / `pi-home-rpc.mjs` 放进 `~/.local/share/life-world/bin/`，同时在 `~/.local/share/life-world/ext/` 放一份扩展软链（装到 bin 的桥接从那里找）。
+
 装完直接：
 
 ```bash
@@ -26,7 +50,37 @@ pi
 
 扩展会在每轮开始前确保世界规则在 system 里；不需要 `--append-system-prompt`，也不需要改 `APPEND_SYSTEM.md`。
 
-卸载：
+### 3. 配模型
+
+- **在线模型**：容器里跑 `pi` → `/login deepseek`（或设置 `DEEPSEEK_API_KEY`）；
+- **本地模型**：在 `~/.pi/agent/models.json` 注册 provider，例如 Basalt：
+
+```json
+{
+  "providers": {
+    "basalt": {
+      "baseUrl": "http://127.0.0.1:8081/v1",
+      "api": "openai-completions",
+      "apiKey": "liugongfu",
+      "models": [{ "id": "abliterated-iq3_xxs", "contextWindow": 262144, "maxTokens": 32768, "input": ["text","image"] }]
+    }
+  }
+}
+```
+
+然后在 `~/.local/share/life-world/life-world.json` 的 `models` 段写 `local` / `cloud`（见 `pi/config.example.json`）。
+
+### 4. 跑常驻（可选）
+
+```bash
+# 有 tmux 的话，两个窗口常驻
+tmux new-session -d -s life-world -n qq  'TZ=Asia/Shanghai LIFE_WORLD_MODEL=basalt/abliterated-iq3_xxs node pi/bin/qq-bridge.mjs'
+tmux new-window  -t life-world -n home  'TZ=Asia/Shanghai LIFE_WORLD_MODEL=basalt/abliterated-iq3_xxs node pi/bin/home-rpc.mjs'
+```
+
+> tmux 新窗口不读 `.zshrc`；如果 `pi` 装在 `~/.local/bin`，命令里先补 `PATH=$HOME/.local/bin:$PATH`，或设 `PI_BIN=$HOME/.local/bin/pi`。
+
+### 卸载
 
 ```bash
 ./pi/install.sh --uninstall
