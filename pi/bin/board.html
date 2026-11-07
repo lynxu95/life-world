@@ -76,6 +76,8 @@ section h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:va
 input[type=search],select{font:inherit;color:inherit;background:var(--panel-2);border:1px solid var(--line);
   border-radius:8px;padding:7px 10px;min-width:0}
 input[type=search]{flex:1;min-width:180px}
+.field{display:flex;align-items:center;gap:8px;flex:1;min-width:220px;font-size:12px;color:var(--muted)}
+.field select{flex:1;min-width:0}
 .results{list-style:none;margin:14px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
 .results li{border-left:3px solid var(--line);padding:6px 10px;background:var(--panel-2);border-radius:0 8px 8px 0;min-width:0}
 .results .meta{font-size:11px;color:var(--muted);font-family:var(--mono)}
@@ -104,8 +106,8 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
   <section>
     <h2>模型设置</h2>
     <div class="row">
-      <select id="m-local" aria-label="本地模型"></select>
-      <select id="m-cloud" aria-label="在线模型"></select>
+      <label class="field">本地模型<select id="m-local"></select></label>
+      <label class="field">在线模型<select id="m-cloud"></select></label>
       <button class="primary" id="m-save">保存</button>
       <span class="muted" id="m-hint"></span>
     </div>
@@ -196,8 +198,8 @@ async function loadOverview() {
     $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
     renderSessions(d.sessions, d.models)
     if (!mTouched) {
-      fillSelect($("m-local"), d.models.local || "", d.available || [])
-      fillSelect($("m-cloud"), d.models.cloud || "", d.available || [])
+      fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
+      fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
     }
     renderUsage(d.usage)
     $("backup-hint").textContent = d.backup ? `快照 ${d.backup.size} · ${d.backup.last[0] || "无"}` : ""
@@ -253,9 +255,11 @@ function renderUsage(u) {
 }
 
 let mTouched = false
-function fillSelect(el, current, list) {
+function fillSelect(el, current, list, noneLabel) {
   const seen = new Set()
   el.innerHTML = ""
+  const none = document.createElement("option")
+  none.value = ""; none.textContent = noneLabel; el.append(none); seen.add("")
   if (current) {
     const o = document.createElement("option")
     o.value = current; o.textContent = current + "（当前）"; el.append(o); seen.add(current)
@@ -265,7 +269,7 @@ function fillSelect(el, current, list) {
     const o = document.createElement("option")
     o.value = m.ref; o.textContent = m.ref; el.append(o)
   }
-  if (current) el.value = current
+  el.value = current || ""
 }
 $("m-local").addEventListener("change", () => { mTouched = true })
 $("m-cloud").addEventListener("change", () => { mTouched = true })
