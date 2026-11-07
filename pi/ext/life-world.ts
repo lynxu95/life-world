@@ -503,6 +503,8 @@ async function getEmbedder(): Promise<any> {
       // 从扩展真实文件位置解析依赖（pi 加载扩展时工作路径不可靠）
       const req = createRequire(SELF_PATH)
       const mod: any = req("@huggingface/transformers")
+      // 模型缓存放世界目录，npm 重装 node_modules 不会把模型冲掉
+      try { mod.env.cacheDir = `${join(ROOT, "models")}/` } catch { /* ignore */ }
       const pipe = await mod.pipeline("feature-extraction", sem.model, { dtype: sem.dtype })
       log(`semantic embedder ready · ${sem.model}`)
       return pipe
