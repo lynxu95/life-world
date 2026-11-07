@@ -14,6 +14,12 @@
 - [x] **用量面板**：token、云端调用次数、模型切换次数；并入 `lwctl`。
 - [x] **主动关怀（高优先级）**：随机想起、天气/日程触发、安静时段。
 
+## 已完成（续）
+
+- [x] **CPU 语义检索（可选）**：transformers.js + jina-embeddings-v2-base-zh（q8），向量存 `vec` 表，与 FTS 混合排序。
+- [x] **遗忘曲线**：`mem.strength` 命中加强、按半衰期每日衰减，只降权不删。
+- [x] **Web 看板**。
+
 ## 后备
 
 - [x] **worlds/backup/ 定期快照**：在 `worlds/` 下新增 `backup/`，用 git 仓库做增量快照（省空间），定期提交；恢复时 `git checkout`。

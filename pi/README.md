@@ -85,7 +85,23 @@ pi          # TUI，已经带 life-world
 
 > 不要用 `pi/config.example.json` 覆盖已有的 `~/.local/share/life-world/life-world.json`；只把 `bridge` 段和 `subagent` 段按需合并。
 
+## 记忆检索与遗忘曲线
+
+- **FTS5**：归档时写入 `memory-index.db`（trigram），`memory_search` 优先查索引：≥3 字 `MATCH/BM25`，2 字 `LIKE`。
+- **可选语义检索**：装依赖并在 `memory.semantic` 打开后，用 `transformers.js` 在 CPU 上跑 `Xenova/jina-embeddings-v2-base-zh`（768 维，q8）。文本截断 512 字，后台按 recent-first 批量回填向量；查询时 `0.75*cos + 0.25*FTS` 混合排序。
+- **遗忘曲线**：每条记忆带强度（初始 1.0）。被检索命中 +`hitBoost`（上限 `maxStrength`）；每天按 `halfLifeDays` 衰减（下限 `minStrength`），只降权不删除。排序权重 = `0.7 + 0.3*min(1, strength/2)`。
+
+```json
+"memory": {
+  "semantic": { "enabled": false, "model": "Xenova/jina-embeddings-v2-base-zh", "dtype": "q8", "backfillLimit": 5000 },
+  "decay": { "enabled": true, "halfLifeDays": 30, "hitBoost": 0.15, "maxStrength": 3, "minStrength": 0.1 }
+}
+```
+
+语义依赖需单独安装：`./pi/install.sh --semantic`（约 480MB，含 onnxruntime）。不装也能用 FTS5 + 遗忘曲线。
+
 ## 主动关怀
+
 
 `life-world.json` 的 `care` 段：
 

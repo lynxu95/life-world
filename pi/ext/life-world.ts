@@ -166,6 +166,31 @@ interface Config {
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
   guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number }
   cleanup: { tmpMaxAgeHours: number }
+  memory: { semantic: SemanticOptions; decay: DecayOptions }
+}
+
+/** 遗忘曲线：命中加强、随时间衰减（只降权，不删） */
+interface DecayOptions {
+  enabled: boolean
+  /** 半衰期（天） */
+  halfLifeDays: number
+  /** 每命中一次加多少强度 */
+  hitBoost: number
+  /** 强度上限 */
+  maxStrength: number
+  /** 强度下限 */
+  minStrength: number
+}
+
+/** 可选：CPU 语义检索（transformers.js + ONNX 模型） */
+interface SemanticOptions {
+  enabled: boolean
+  /** HuggingFace 模型 id（需带 ONNX） */
+  model: string
+  /** 量化：q8 更省内存 */
+  dtype: string
+  /** 首轮最多扫描多少条历史做向量化回填 */
+  backfillLimit: number
 }
 
 /** 主动关怀：随机想起、天气、安静时段 */
@@ -196,6 +221,10 @@ function config(): Config {
     backup: { enabled: true, hour: 4, includePrivate: false },
     guard: { enabled: true, staleSeconds: 180, cooldownMinutes: 10 },
     cleanup: { tmpMaxAgeHours: 72 },
+    memory: {
+      semantic: { enabled: false, model: "Xenova/jina-embeddings-v2-base-zh", dtype: "q8", backfillLimit: 5000 },
+      decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
+    },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
   return {
@@ -210,13 +239,17 @@ function config(): Config {
     backup: { ...base.backup, ...(raw.backup || {}) },
     guard: { ...base.guard, ...(raw.guard || {}) },
     cleanup: { ...base.cleanup, ...(raw.cleanup || {}) },
+    memory: {
+      semantic: { ...base.memory.semantic, ...((raw.memory || {}).semantic || {}) },
+      decay: { ...base.memory.decay, ...((raw.memory || {}).decay || {}) },
+    },
   }
 }
 
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastGuard?: string; lastCleanup?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -343,6 +376,9 @@ function openMemIndex(): any {
     memDb = new DatabaseSync(MEM_INDEX_FILE)
     memDb.exec("CREATE TABLE IF NOT EXISTS msg (id TEXT PRIMARY KEY, day TEXT, t TEXT, role TEXT, text TEXT)")
     memDb.exec("CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(id UNINDEXED, text, tokenize=trigram)")
+    memDb.exec("CREATE TABLE IF NOT EXISTS vec (id TEXT PRIMARY KEY, v BLOB)")
+    memDb.exec("CREATE TABLE IF NOT EXISTS mem (id TEXT PRIMARY KEY, strength REAL DEFAULT 1, uses INTEGER DEFAULT 0, last_used TEXT)")
+    memDb.exec("INSERT OR IGNORE INTO mem (id) SELECT id FROM msg")
     log("memory index opened")
   } catch (e) {
     log(`memory index unavailable ${String(e)}`)
@@ -351,12 +387,57 @@ function openMemIndex(): any {
   return memDb
 }
 
+function strengthMap(): Map<string, number> {
+  const out = new Map<string, number>()
+  try {
+    const db = openMemIndex()
+    if (!db) return out
+    for (const r of db.prepare("SELECT id, strength FROM mem").all()) out.set(String(r.id), Number(r.strength) || 1)
+  } catch { /* ignore */ }
+  return out
+}
+
+/** 被检索命中就加强（艾宾浩斯式复习） */
+function reinforce(ids: string[]): void {
+  const cfg = config().memory.decay
+  if (!cfg.enabled || !ids.length) return
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const stmt = db.prepare("UPDATE mem SET strength = min(?, strength + ?), uses = uses + 1, last_used = ? WHERE id = ?")
+    const now = new Date().toISOString()
+    for (const id of ids) { try { stmt.run(cfg.maxStrength, cfg.hitBoost, now, id) } catch { /* ignore */ } }
+  } catch (e) { log(`reinforce failed ${String(e)}`) }
+}
+
+/** 按半衰期整体衰减：只降强度，不删记录 */
+function decayStrengths(): void {
+  const cfg = config().memory.decay
+  if (!cfg.enabled) return
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const state = readWorld()
+    const now = Date.now()
+    const last = state.lastDecay ? Date.parse(state.lastDecay) : now
+    const days = (now - last) / 86_400_000
+    if (!Number.isFinite(days) || days < 0.25) return
+    const factor = Math.pow(0.5, days / Math.max(1, cfg.halfLifeDays))
+    db.prepare("UPDATE mem SET strength = max(?, strength * ?)").run(cfg.minStrength, factor)
+    writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
+    log(`decay applied ×${factor.toFixed(3)} · ${days.toFixed(1)}d`)
+  } catch (e) { log(`decay failed ${String(e)}`) }
+}
+
 function indexRecord(r: Record_): void {
   try {
     const db = openMemIndex()
     if (!db) return
     const info = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)").run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
-    if (Number(info?.changes || 0) > 0) db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
+    if (Number(info?.changes || 0) > 0) {
+      db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
+      enqueueEmbed(r.id, r.text)
+    }
   } catch (e) { log(`indexRecord failed ${String(e)}`) }
 }
 
@@ -405,6 +486,108 @@ function ftsChatIds(query: string, from: string | undefined, to: string | undefi
     log(`fts search failed ${String(e)}`)
     return []
   }
+}
+
+// ———————— 可选：CPU 语义检索（transformers.js） ————————
+let embedderPromise: any = undefined
+const embedQueue: Array<() => Promise<void>> = []
+let embedPumping = false
+
+async function getEmbedder(): Promise<any> {
+  const sem = config().memory.semantic
+  if (!sem.enabled) return null
+  if (embedderPromise !== undefined) return embedderPromise
+  embedderPromise = (async () => {
+    try {
+      if (!openMemIndex()) return null
+      // 从扩展真实文件位置解析依赖（pi 加载扩展时工作路径不可靠）
+      const req = createRequire(SELF_PATH)
+      const mod: any = req("@huggingface/transformers")
+      const pipe = await mod.pipeline("feature-extraction", sem.model, { dtype: sem.dtype })
+      log(`semantic embedder ready · ${sem.model}`)
+      return pipe
+    } catch (e) {
+      log(`semantic embedder unavailable · ${String(e)}`)
+      return null
+    }
+  })()
+  return embedderPromise
+}
+
+async function embedTexts(texts: string[]): Promise<Float32Array[]> {
+  const pipe = await getEmbedder()
+  if (!pipe || !texts.length) return []
+  try {
+    // 长文截断：语义检索看意思是够的，CPU 也快得多
+    const out: any = await pipe(texts.map((t) => String(t).slice(0, 512)), { pooling: "mean", normalize: true })
+    return out.tolist().map((a: any) => Float32Array.from(a))
+  } catch (e) { log(`embed failed ${String(e)}`); return [] }
+}
+
+function saveVec(id: string, v: Float32Array): void {
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    db.prepare("INSERT OR REPLACE INTO vec (id, v) VALUES (?,?)").run(id, Buffer.from(v.buffer))
+  } catch (e) { log(`saveVec failed ${String(e)}`) }
+}
+
+async function pumpEmbedQueue(): Promise<void> {
+  if (embedPumping) return
+  embedPumping = true
+  try {
+    while (embedQueue.length) {
+      const job = embedQueue.shift()!
+      try { await job() } catch { /* ignore */ }
+    }
+  } finally { embedPumping = false }
+}
+
+function enqueueEmbed(id: string, text: string): void {
+  if (!config().memory.semantic.enabled) return
+  embedQueue.push(async () => { const [v] = await embedTexts([text]); if (v) saveVec(id, v) })
+  void pumpEmbedQueue()
+}
+
+async function semanticIds(query: string, limit: number): Promise<Array<{ id: string; score: number }>> {
+  const sem = config().memory.semantic
+  if (!sem.enabled) return []
+  const db = openMemIndex()
+  if (!db) return []
+  const [qv] = await embedTexts([query])
+  if (!qv) return []
+  let rows: any[] = []
+  try { rows = db.prepare("SELECT id, v FROM vec").all() } catch { return [] }
+  const scored: Array<{ id: string; score: number }> = []
+  for (const r of rows) {
+    const buf = r.v
+    if (!buf || buf.length !== qv.length * 4) continue
+    const v = new Float32Array(buf.buffer, buf.byteOffset, qv.length)
+    let s = 0
+    for (let i = 0; i < qv.length; i++) s += qv[i] * v[i]
+    scored.push({ id: String(r.id), score: s })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, Math.max(limit, 60))
+}
+
+async function backfillVectors(): Promise<void> {
+  const sem = config().memory.semantic
+  if (!sem.enabled) return
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    let total = 0
+    while (total < sem.backfillLimit) {
+      const rows = db.prepare("SELECT m.id AS id, m.text AS text FROM msg m LEFT JOIN vec v ON v.id = m.id WHERE v.id IS NULL ORDER BY m.t DESC LIMIT 64").all()
+      if (!rows.length) break
+      const vecs = await embedTexts(rows.map((r: any) => String(r.text)))
+      if (!vecs.length) break
+      rows.forEach((r: any, i: number) => { if (vecs[i]) saveVec(String(r.id), vecs[i]) })
+      total += rows.length
+    }
+    if (total) log(`semantic backfill done ${total}`)
+  } catch (e) { log(`backfillVectors failed ${String(e)}`) }
 }
 
 function diaryTitle(day: string): string {
@@ -487,13 +670,26 @@ function snippet(text: string, q: ReturnType<typeof queryParts>, width = 80): st
   const s = Math.max(0, at - width), e = Math.min(text.length, at + width)
   return `${s > 0 ? "…" : ""}${text.slice(s, e).replace(/\s+/g, " ")}${e < text.length ? "…" : ""}`
 }
-function searchChat(query: string, from: string | undefined, to: string | undefined, role: string, limit: number, context: number): string[] {
+async function searchChat(query: string, from: string | undefined, to: string | undefined, role: string, limit: number, context: number): Promise<string[]> {
   const q = queryParts(query)
   const all = allRecords()
   const hits: Array<{ i: number; score: number; at: number }> = []
   const byId = new Map(all.map((r, i) => [r.id, i]))
   const ids = ftsChatIds(query, from, to, role, Math.max(limit * 6, 60))
-  if (ids.length) {
+  const sem = await semanticIds(query, Math.max(limit * 6, 60))
+  if (sem.length) {
+    // 语义命中 + FTS 命中加权
+    const ftsRank = new Map(ids.map((id, i) => [id, i]))
+    sem.map((s) => {
+      const rank = ftsRank.get(s.id)
+      const bonus = rank === undefined ? 0 : (1 - rank / Math.max(1, ids.length)) * 0.25
+      return { id: s.id, score: s.score * 0.75 + bonus }
+    }).sort((a, b) => b.score - a.score).slice(0, limit).forEach((m) => {
+      const i = byId.get(m.id)
+      if (i === undefined) return
+      hits.push({ i, score: m.score, at: Date.parse(all[i].t) || 0 })
+    })
+  } else if (ids.length) {
     // FTS5 命中，按 bm25 排名
     ids.forEach((id, rank) => {
       const i = byId.get(id)
@@ -511,6 +707,16 @@ function searchChat(query: string, from: string | undefined, to: string | undefi
       if (s > 0) hits.push({ i, score: s, at: Date.parse(r.t) || 0 })
     })
     hits.sort((a, b) => b.score - a.score || b.at - a.at)
+  }
+  // 遗忘曲线：强度高的排前面，命中本身算一次复习
+  if (config().memory.decay.enabled && hits.length) {
+    const strengths = strengthMap()
+    for (const h of hits) {
+      const s = Number(strengths.get(all[h.i].id) ?? 1)
+      h.score *= 0.7 + 0.3 * Math.min(1, Math.max(0, s / 2))
+    }
+    hits.sort((a, b) => b.score - a.score || b.at - a.at)
+    reinforce(hits.slice(0, limit).map((h) => all[h.i].id))
   }
   const lines: string[] = []
   for (const h of hits.slice(0, limit)) {
@@ -697,6 +903,8 @@ async function tick(): Promise<void> {
       cleanupTmp(c.cleanup.tmpMaxAgeHours)
       writeWorld({ ...readWorld(), lastCleanup: today })
     }
+    // 记忆衰减：每天一次
+    if (state.lastDecay !== today) decayStrengths()
     guardBridge()
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
@@ -1200,7 +1408,7 @@ export default function (pi: ExtensionAPI) {
   ensureDirs()
   loadArchived()
   // 索引回填放到后台，不挡启动
-  const backfillTimer = setTimeout(() => backfillMemoryIndex(), 3000)
+  const backfillTimer = setTimeout(() => { backfillMemoryIndex(); void backfillVectors() }, 3000)
   ;(backfillTimer as any).unref?.()
 
   // —— lwctl：会话心跳 + 远程切换模型 ——
@@ -1697,7 +1905,7 @@ export default function (pi: ExtensionAPI) {
       const scope = ["chat", "diary", "notes", "all"].includes(String(params.scope)) ? String(params.scope) : "chat"
       const out: string[] = []
       if (scope === "chat" || scope === "all") {
-        const lines = searchChat(query, from, to, role, limit, context)
+        const lines = await searchChat(query, from, to, role, limit, context)
         if (lines.length) out.push("—— 对话 ——", ...lines)
       }
       if (scope === "diary" || scope === "all") {
