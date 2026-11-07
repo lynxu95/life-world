@@ -71,8 +71,9 @@
   },
   "guard": {
     "enabled": true,
-    "staleSeconds": 180,
-    "cooldownMinutes": 10
+    "staleSeconds": 300,
+    "cooldownMinutes": 10,
+    "allowRestart": true
   },
   "cleanup": {
     "tmpMaxAgeHours": 72

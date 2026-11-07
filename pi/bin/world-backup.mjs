@@ -4,9 +4,10 @@
  * 每次把 worlds/default 的内容同步进 worlds/backup/default/，再 git commit；
  * git 只存有变化的 blob，重复内容不额外占空间。
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { fileURLToPath } from "node:url"
 import { spawnSync } from "node:child_process"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
@@ -62,4 +63,11 @@ export function backupSize() {
   }
   try { walk(DST) } catch { /* ignore */ }
   return `${(total / 1024 / 1024).toFixed(1)}MB`
+}
+
+// 作为脚本直接调用：node world-backup.mjs [--private]
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const r = backupWorld({ includePrivate: process.argv.includes("--private") })
+  console.log(r.msg)
+  process.exit(r.ok ? 0 : 2)
 }

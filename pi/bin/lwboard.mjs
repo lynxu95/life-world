@@ -8,12 +8,12 @@
  * 提供：会话/模型、模型热切换、用量、记忆检索、日记、日志、快照。
  */
 import http from "node:http"
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import { createRequire } from "node:module"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
 import { usageStats } from "./usage-stats.mjs"
 
@@ -29,35 +29,55 @@ const PORT = Number(process.env.LW_BOARD_PORT || 8099)
 const HOST = process.env.LW_BOARD_HOST || "127.0.0.1"
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+function writeAtomic(file, text) {
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, text, { mode: 0o600 })
+  renameSync(tmp, file)
+  try { chmodSync(file, 0o600) } catch { /* ignore */ }
+}
 
 let modelsCache = { at: 0, list: [] }
 function piBin() {
   const candidates = [process.env.PI_BIN, join(homedir(), ".local/bin/pi"), join(homedir(), ".pi/agent/bin/pi"), "/usr/local/bin/pi", "/usr/bin/pi"]
   return candidates.find((p) => p && existsSync(p)) || ""
 }
-function availableModels() {
-  if (modelsCache.list.length && Date.now() - modelsCache.at < 60_000) return modelsCache.list
+async function availableModels() {
+  if (Date.now() - modelsCache.at < 60_000) return modelsCache.list
   const bin = piBin()
-  if (!bin) return modelsCache.list
-  const env = { ...process.env, PATH: `${dirname(bin)}:/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ""}` }
-  const r = spawnSync(bin, ["--list-models"], { encoding: "utf8", timeout: 20_000, env })
-  if (r.status !== 0) return modelsCache.list
-  const list = []
-  for (const line of String(r.stdout || "").split("\n")) {
-    const cols = line.trim().split(/\s{2,}/)
-    if (cols.length < 2 || cols[0] === "provider") continue
-    list.push({ ref: `${cols[0]}/${cols[1]}`, provider: cols[0], model: cols[1] })
-  }
+  if (!bin) { modelsCache = { at: Date.now(), list: [] }; return [] }
+  const list = await new Promise((resolve) => {
+    let out = ""
+    const child = spawn(bin, ["--list-models"], {
+      env: { ...process.env, PATH: `${dirname(bin)}:/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ""}` },
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+    const timer = setTimeout(() => { try { child.kill() } catch { /* ignore */ } resolve([]) }, 20_000)
+    child.stdout.on("data", (d) => { out += String(d) })
+    child.on("close", () => {
+      clearTimeout(timer)
+      const rows = []
+      for (const line of out.split("\n")) {
+        const cols = line.trim().split(/\s{2,}/)
+        if (cols.length < 2 || cols[0] === "provider") continue
+        rows.push({ ref: `${cols[0]}/${cols[1]}`, provider: cols[0], model: cols[1] })
+      }
+      resolve(rows)
+    })
+    child.on("error", () => { clearTimeout(timer); resolve([]) })
+  })
   modelsCache = { at: Date.now(), list }
   return list
 }
-function pidAlive(pid) {
-  if (!pid) return false
-  try { process.kill(pid, 0); return true } catch { return false }
-}
+
+let overviewCache = { at: 0, data: null }
 const json = (res, code, data) => {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" })
   res.end(JSON.stringify(data))
+}
+
+function pidAlive(pid) {
+  if (!pid) return false
+  try { process.kill(pid, 0); return true } catch { return false }
 }
 function sessions() {
   if (!existsSync(STATUS_DIR)) return []
@@ -90,7 +110,8 @@ function memorySearch(q, limit) {
       const phrase = `"${query.replace(/"/g, '""')}"`
       return db.prepare("SELECT m.t AS t, m.role AS role, m.text AS text FROM msg_fts JOIN msg m ON m.id = msg_fts.id WHERE msg_fts MATCH ? ORDER BY bm25(msg_fts) LIMIT ?").all(phrase, limit)
     }
-    return db.prepare("SELECT t, role, text FROM msg WHERE text LIKE ? ORDER BY t DESC LIMIT ?").all(`%${query}%`, limit)
+    const like = `%${query.replace(/[\\%_]/g, "\\$&")}%`
+    return db.prepare("SELECT t, role, text FROM msg WHERE text LIKE ? ESCAPE '\\' ORDER BY t DESC LIMIT ?").all(like, limit)
   } catch { return [] }
 }
 function diaryList(days = 14) {
@@ -139,8 +160,15 @@ function waitAck(seq, timeoutMs = 10000) {
 function body(req) {
   return new Promise((resolve) => {
     let raw = ""
-    req.on("data", (c) => { raw += c; if (raw.length > 1e6) req.destroy() })
-    req.on("end", () => { try { resolve(JSON.parse(raw || "{}")) } catch { resolve({}) } })
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    req.on("data", (c) => {
+      raw += c
+      if (raw.length > 1e6) { finish({}); try { req.destroy() } catch { /* ignore */ } }
+    })
+    req.on("end", () => { try { finish(JSON.parse(raw || "{}")) } catch { finish({}) } })
+    req.on("close", () => finish({}))
+    req.on("error", () => finish({}))
   })
 }
 
@@ -149,19 +177,26 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       const file = join(HERE, "board.html")
+      const data = readFileSync(file)
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
-      res.end(readFileSync(file))
+      res.end(data)
       return
     }
     if (req.method === "GET" && url.pathname === "/api/overview") {
       const c = readJson(CONFIG_FILE, {})
+      if (!overviewCache.data || Date.now() - overviewCache.at > 10_000) {
+        overviewCache = {
+          at: Date.now(),
+          data: { usage: usageStats(7), backup: { size: backupSize(), last: backupLog(3) } },
+        }
+      }
       return json(res, 200, {
         sessions: sessions(),
         models: c.models || {},
         care: c.care || {},
-        usage: usageStats(7),
-        backup: { size: backupSize(), last: backupLog(3) },
-        available: availableModels(),
+        usage: overviewCache.data.usage,
+        backup: overviewCache.data.backup,
+        available: await availableModels(),
         now: new Date().toISOString(),
       })
     }
@@ -195,25 +230,52 @@ const server = http.createServer(async (req, res) => {
       const st = await waitAck(seq)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
     }
+    if (req.method === "POST" && url.pathname === "/api/care") {
+      const data = await body(req)
+      let cfg = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      cfg.care = cfg.care || {}
+      if (typeof data.randomEnabled === "boolean") cfg.care.randomEnabled = data.randomEnabled
+      if (typeof data.quietStart === "string") cfg.care.quietStart = data.quietStart.trim()
+      if (typeof data.quietEnd === "string") cfg.care.quietEnd = data.quietEnd.trim()
+      writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
+      return json(res, 200, { ok: true, care: cfg.care })
+    }
     if (req.method === "POST" && url.pathname === "/api/models") {
       const data = await body(req)
-      const cfg = readJson(CONFIG_FILE, {})
+      let cfg = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
       cfg.models = cfg.models || {}
       if (typeof data.local === "string") cfg.models.local = data.local.trim()
       if (typeof data.cloud === "string") cfg.models.cloud = data.cloud.trim()
-      writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2))
+      writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
       return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud } })
     }
     if (req.method === "POST" && url.pathname === "/api/backup") {
-      const r = backupWorld({})
-      return json(res, 200, { ok: r.ok, msg: r.msg })
+      const ok = await new Promise((resolve) => {
+        const child = spawn(process.execPath, [join(HERE, "world-backup.mjs")], {
+          env: { ...process.env, LIFE_WORLD_ROOT: ROOT }, stdio: "ignore",
+        })
+        const timer = setTimeout(() => { try { child.kill() } catch { /* ignore */ } resolve(false) }, 120_000)
+        child.on("close", (code) => { clearTimeout(timer); resolve(code === 0) })
+        child.on("error", () => { clearTimeout(timer); resolve(false) })
+      })
+      return json(res, 200, { ok, msg: ok ? "快照完成" : "快照失败" })
     }
     json(res, 404, { error: "not found" })
   } catch (e) {
+    if (res.headersSent) { try { res.end() } catch { /* ignore */ } return }
     json(res, 500, { error: String(e) })
   }
 })
 
+process.on("unhandledRejection", (e) => console.error("[lwboard] unhandled", e))
 server.listen(PORT, HOST, () => {
   console.log(`lwboard → http://${HOST}:${PORT}`)
 })

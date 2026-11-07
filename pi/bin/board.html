@@ -78,6 +78,8 @@ input[type=search],select{font:inherit;color:inherit;background:var(--panel-2);b
 input[type=search]{flex:1;min-width:180px}
 .field{display:flex;align-items:center;gap:8px;flex:1;min-width:220px;font-size:12px;color:var(--muted)}
 .field select{flex:1;min-width:0}
+.field input.time{width:76px}
+.field input[type=checkbox]{accent-color:var(--accent)}
 .results{list-style:none;margin:14px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
 .results li{border-left:3px solid var(--line);padding:6px 10px;background:var(--panel-2);border-radius:0 8px 8px 0;min-width:0}
 .results .meta{font-size:11px;color:var(--muted);font-family:var(--mono)}
@@ -112,6 +114,18 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
       <span class="muted" id="m-hint"></span>
     </div>
     <div class="hint">改完保存，后续切换和重启会使用新值；正在跑的会话要切一次才生效。</div>
+  </section>
+
+  <section>
+    <h2>主动关怀</h2>
+    <div class="row">
+      <label class="field"><input type="checkbox" id="care-random"> 随机想起</label>
+      <label class="field">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
+      <label class="field">安静结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
+      <button class="primary" id="care-save">保存</button>
+      <span class="muted" id="care-hint"></span>
+    </div>
+    <div class="hint">关掉「随机想起」= 全天安静：不会主动找你，闹钟和早上唤醒不受影响。</div>
   </section>
 
   <section>
@@ -197,6 +211,11 @@ async function loadOverview() {
     $("hb-dot").className = "dot"
     $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
     renderSessions(d.sessions, d.models)
+    if (!careTouched) {
+      $("care-random").checked = d.care?.randomEnabled !== false
+      $("care-qs").value = d.care?.quietStart || ""
+      $("care-qe").value = d.care?.quietEnd || ""
+    }
     if (!mTouched) {
       fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
       fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
@@ -252,6 +271,25 @@ function renderUsage(u) {
     return `<div class="bar" title="${r.day} · ${fmt(r.input + r.output)} tokens"><div class="b" style="height:${h}%"></div><div class="d">${r.day.slice(5)}</div></div>`
   }).join("") || '<div class="muted">最近没有用量</div>'
   $("usage-hint").textContent = `云端 ${t.cloud} 次 · 本地 ${t.local} 次 · 切换 ${u.switches} 次`
+}
+
+let careTouched = false
+for (const id of ["care-qs","care-qe"]) $(id).addEventListener("input", () => { careTouched = true })
+$("care-random").addEventListener("change", () => { careTouched = true })
+$("care-save").onclick = async () => {
+  const b = $("care-save"); b.disabled = true; b.textContent = "保存中…"
+  try {
+    const r = await getJson("/api/care", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({
+      randomEnabled: $("care-random").checked,
+      quietStart: $("care-qs").value.trim(),
+      quietEnd: $("care-qe").value.trim(),
+    }) })
+    $("care-hint").textContent = r.ok ? "已保存" : (r.msg || "保存失败")
+    careTouched = false
+  } catch (e) { $("care-hint").textContent = "保存失败：" + e.message }
+  b.disabled = false; b.textContent = "保存"
+  setTimeout(() => { $("care-hint").textContent = "" }, 3000)
+  loadOverview()
 }
 
 let mTouched = false

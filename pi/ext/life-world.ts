@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -164,7 +164,7 @@ interface Config {
   models: ModelSwitchOptions
   care: CareOptions
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
-  guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number }
+  guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number; allowRestart: boolean }
   cleanup: { tmpMaxAgeHours: number }
   memory: { semantic: SemanticOptions; decay: DecayOptions }
 }
@@ -219,7 +219,7 @@ function config(): Config {
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
     backup: { enabled: true, hour: 4, includePrivate: false },
-    guard: { enabled: true, staleSeconds: 180, cooldownMinutes: 10 },
+    guard: { enabled: true, staleSeconds: 300, cooldownMinutes: 10, allowRestart: true },
     cleanup: { tmpMaxAgeHours: 72 },
     memory: {
       semantic: { enabled: false, model: "Xenova/jina-embeddings-v2-base-zh", dtype: "q8", backfillLimit: 5000 },
@@ -374,11 +374,15 @@ function openMemIndex(): any {
     const req = createRequire(import.meta.url)
     const { DatabaseSync } = req("node:sqlite")
     memDb = new DatabaseSync(MEM_INDEX_FILE)
+    try { memDb.exec("PRAGMA journal_mode=WAL") } catch { /* ignore */ }
+    try { memDb.exec("PRAGMA busy_timeout=5000") } catch { /* ignore */ }
+    try { memDb.exec("PRAGMA synchronous=NORMAL") } catch { /* ignore */ }
+    try { chmodSync(MEM_INDEX_FILE, 0o600) } catch { /* ignore */ }
     memDb.exec("CREATE TABLE IF NOT EXISTS msg (id TEXT PRIMARY KEY, day TEXT, t TEXT, role TEXT, text TEXT)")
     memDb.exec("CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(id UNINDEXED, text, tokenize=trigram)")
     memDb.exec("CREATE TABLE IF NOT EXISTS vec (id TEXT PRIMARY KEY, v BLOB)")
     memDb.exec("CREATE TABLE IF NOT EXISTS mem (id TEXT PRIMARY KEY, strength REAL DEFAULT 1, uses INTEGER DEFAULT 0, last_used TEXT)")
-    memDb.exec("INSERT OR IGNORE INTO mem (id) SELECT id FROM msg")
+    memDb.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     log("memory index opened")
   } catch (e) {
     log(`memory index unavailable ${String(e)}`)
@@ -404,9 +408,19 @@ function reinforce(ids: string[]): void {
   try {
     const db = openMemIndex()
     if (!db) return
-    const stmt = db.prepare("UPDATE mem SET strength = min(?, strength + ?), uses = uses + 1, last_used = ? WHERE id = ?")
+    const list = [...new Set(ids)].slice(0, 50)
+    if (!list.length) return
+    const marks = list.map(() => "?").join(",")
     const now = new Date().toISOString()
-    for (const id of ids) { try { stmt.run(cfg.maxStrength, cfg.hitBoost, now, id) } catch { /* ignore */ } }
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      db.prepare(`UPDATE mem SET strength = min(?, strength + ?), uses = uses + 1, last_used = ? WHERE id IN (${marks})`)
+        .run(cfg.maxStrength, cfg.hitBoost, now, ...list)
+      db.exec("COMMIT")
+    } catch (e) {
+      try { db.exec("ROLLBACK") } catch { /* ignore */ }
+      throw e
+    }
   } catch (e) { log(`reinforce failed ${String(e)}`) }
 }
 
@@ -433,10 +447,18 @@ function indexRecord(r: Record_): void {
   try {
     const db = openMemIndex()
     if (!db) return
-    const info = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)").run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
-    if (Number(info?.changes || 0) > 0) {
-      db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
-      enqueueEmbed(r.id, r.text)
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      const info = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)").run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+      if (Number(info?.changes || 0) > 0) {
+        db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
+        db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)").run(r.id)
+        enqueueEmbed(r.id, r.text)
+      }
+      db.exec("COMMIT")
+    } catch (e) {
+      try { db.exec("ROLLBACK") } catch { /* ignore */ }
+      throw e
     }
   } catch (e) { log(`indexRecord failed ${String(e)}`) }
 }
@@ -444,19 +466,26 @@ function indexRecord(r: Record_): void {
 function backfillMemoryIndex(): void {
   if (memBackfilled) return
   memBackfilled = true
+  if (ROLE !== "home") return // 回填只在 home 进程做，避免多进程抢写锁
   try {
     const db = openMemIndex()
     if (!db) return
     const all = allRecords()
     let added = 0
-    db.exec("BEGIN")
-    const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)")
-    const insF = db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)")
-    for (const r of all) {
-      const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
-      if (Number(info?.changes || 0) > 0) { insF.run(r.id, r.text); added++ }
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)")
+      const insF = db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)")
+      const insM = db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)")
+      for (const r of all) {
+        const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+        if (Number(info?.changes || 0) > 0) { insF.run(r.id, r.text); insM.run(r.id); added++ }
+      }
+      db.exec("COMMIT")
+    } catch (e) {
+      try { db.exec("ROLLBACK") } catch { /* ignore */ }
+      throw e
     }
-    db.exec("COMMIT")
     if (added) log(`memory index backfilled ${added}`)
   } catch (e) { log(`backfill failed ${String(e)}`) }
 }
@@ -480,7 +509,8 @@ function ftsChatIds(query: string, from: string | undefined, to: string | undefi
       return rows.map((r: any) => String(r.id))
     }
     // 2 字：LIKE 回退（trigram 索引仍能帮上忙）
-    const rows = db.prepare(`SELECT m.id AS id FROM msg m WHERE m.text LIKE ?${where} ORDER BY m.t DESC LIMIT ?`).all(`%${q}%`, ...params, limit)
+    const like = `%${q.replace(/[\\%_]/g, "\\$&")}%`
+    const rows = db.prepare(`SELECT m.id AS id FROM msg m WHERE m.text LIKE ? ESCAPE '\\'${where} ORDER BY m.t DESC LIMIT ?`).all(like, ...params, limit)
     return rows.map((r: any) => String(r.id))
   } catch (e) {
     log(`fts search failed ${String(e)}`)
@@ -490,6 +520,7 @@ function ftsChatIds(query: string, from: string | undefined, to: string | undefi
 
 // ———————— 可选：CPU 语义检索（transformers.js） ————————
 let embedderPromise: any = undefined
+let embedderFailedAt = 0
 const embedQueue: Array<() => Promise<void>> = []
 let embedPumping = false
 
@@ -497,6 +528,7 @@ async function getEmbedder(): Promise<any> {
   const sem = config().memory.semantic
   if (!sem.enabled) return null
   if (embedderPromise !== undefined) return embedderPromise
+  if (embedderFailedAt && Date.now() - embedderFailedAt < 600_000) return null
   embedderPromise = (async () => {
     try {
       if (!openMemIndex()) return null
@@ -505,10 +537,25 @@ async function getEmbedder(): Promise<any> {
       const mod: any = req("@huggingface/transformers")
       // 模型缓存放世界目录，npm 重装 node_modules 不会把模型冲掉
       try { mod.env.cacheDir = `${join(ROOT, "models")}/` } catch { /* ignore */ }
-      const pipe = await mod.pipeline("feature-extraction", sem.model, { dtype: sem.dtype })
+      const pipe = await Promise.race([
+        mod.pipeline("feature-extraction", sem.model, { dtype: sem.dtype }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("embedder load timeout")), 120_000)),
+      ])
+      // 换模型就清空旧向量，避免维度不一致导致永久空结果
+      const db = openMemIndex()
+      if (db) {
+        const prev: any = db.prepare("SELECT value FROM meta WHERE key='vec_model'").get()
+        if (prev && String(prev.value) !== sem.model) {
+          db.exec("DELETE FROM vec")
+          log(`vec cleared · model changed ${prev.value} → ${sem.model}`)
+        }
+        db.prepare("INSERT OR REPLACE INTO meta (key,value) VALUES ('vec_model',?)").run(sem.model)
+      }
       log(`semantic embedder ready · ${sem.model}`)
       return pipe
     } catch (e) {
+      embedderFailedAt = Date.now()
+      embedderPromise = undefined
       log(`semantic embedder unavailable · ${String(e)}`)
       return null
     }
@@ -522,7 +569,8 @@ async function embedTexts(texts: string[]): Promise<Float32Array[]> {
   try {
     // 长文截断：语义检索看意思是够的，CPU 也快得多
     const out: any = await pipe(texts.map((t) => String(t).slice(0, 512)), { pooling: "mean", normalize: true })
-    return out.tolist().map((a: any) => Float32Array.from(a))
+    const rows = out.tolist().map((a: any) => Float32Array.from(a))
+    return rows
   } catch (e) { log(`embed failed ${String(e)}`); return [] }
 }
 
@@ -547,6 +595,7 @@ async function pumpEmbedQueue(): Promise<void> {
 
 function enqueueEmbed(id: string, text: string): void {
   if (!config().memory.semantic.enabled) return
+  if (embedQueue.length > 200) embedQueue.splice(0, embedQueue.length - 200)
   embedQueue.push(async () => { const [v] = await embedTexts([text]); if (v) saveVec(id, v) })
   void pumpEmbedQueue()
 }
@@ -564,6 +613,7 @@ async function semanticIds(query: string, limit: number): Promise<Array<{ id: st
   for (const r of rows) {
     const buf = r.v
     if (!buf || buf.length !== qv.length * 4) continue
+    if (buf.byteOffset % 4 !== 0) continue
     const v = new Float32Array(buf.buffer, buf.byteOffset, qv.length)
     let s = 0
     for (let i = 0; i < qv.length; i++) s += qv[i] * v[i]
@@ -575,7 +625,7 @@ async function semanticIds(query: string, limit: number): Promise<Array<{ id: st
 
 async function backfillVectors(): Promise<void> {
   const sem = config().memory.semantic
-  if (!sem.enabled) return
+  if (!sem.enabled || ROLE !== "home") return
   try {
     const db = openMemIndex()
     if (!db) return
@@ -678,7 +728,17 @@ async function searchChat(query: string, from: string | undefined, to: string | 
   const hits: Array<{ i: number; score: number; at: number }> = []
   const byId = new Map(all.map((r, i) => [r.id, i]))
   const ids = ftsChatIds(query, from, to, role, Math.max(limit * 6, 60))
-  const sem = await semanticIds(query, Math.max(limit * 6, 60))
+  const semRaw = await semanticIds(query, Math.max(limit * 6, 60))
+  const sem = semRaw.filter((h) => {
+    const i = byId.get(h.id)
+    if (i === undefined) return false
+    const r = all[i]
+    if (role !== "any" && r.role !== role) return false
+    const d = dayOf(new Date(r.t))
+    if (from && d < from) return false
+    if (to && d > to) return false
+    return true
+  })
   if (sem.length) {
     // 语义命中 + FTS 命中加权
     const ftsRank = new Map(ids.map((id, i) => [id, i]))
@@ -845,10 +905,17 @@ function sendTime(text: string): void {
 // ———————— 主动关怀：安静时段 / 天气 ————————
 function inQuietHours(now: Date, care: CareOptions): boolean {
   if (!care.quietStart || !care.quietEnd) return false
-  const toMin = (s: string) => { const [h, m] = String(s).split(":").map(Number); return (Number(h) || 0) * 60 + (Number(m) || 0) }
+  const toMin = (s: string) => {
+    const m = String(s).match(/^(\d{1,2}):(\d{2})$/)
+    if (!m) return NaN
+    const h = Number(m[1]); const mm = Number(m[2])
+    if (!Number.isFinite(h) || !Number.isFinite(mm) || h > 23 || mm > 59) return NaN
+    return h * 60 + mm
+  }
   const cur = now.getHours() * 60 + now.getMinutes()
   const a = toMin(care.quietStart)
   const b = toMin(care.quietEnd)
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false
   if (a === b) return false
   return a < b ? cur >= a && cur < b : cur >= a || cur < b
 }
@@ -877,8 +944,12 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
   log(`alarm model · ${result}`)
 }
 
+let ticking = false
 async function tick(): Promise<void> {
+  if (ticking) return
+  ticking = true
   try {
+    rotateLog(LOG_FILE)
     const c = config()
     if (!c.world.enabled || !c.world.running) return
     const state = readWorld()
@@ -888,25 +959,35 @@ async function tick(): Promise<void> {
     // 每日回顾
     if (hour >= c.world.reviewHour && state.lastReview !== today) {
       sendTime(`【每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。`)
-      writeWorld({ ...state, lastReview: today })
+      writeWorld({ ...readWorld(), lastReview: today })
       return
     }
-    // 每日快照（git 增量，存 worlds/backup）
+    // 每日快照：放到子进程跑，别阻塞主会话
     if (c.backup.enabled && hour >= c.backup.hour && state.lastBackup !== today) {
-      try {
-        const mod: any = await import("../bin/world-backup.mjs")
-        const r = mod.backupWorld({ includePrivate: c.backup.includePrivate })
-        log(`backup · ${r.ok ? "ok" : "fail"} · ${r.msg}`)
-        writeWorld({ ...readWorld(), lastBackup: today })
-      } catch (e) { log(`backup failed ${String(e)}`) }
+      const attempt = state.lastBackupAttempt ? Date.parse(state.lastBackupAttempt) : 0
+      if (!Number.isFinite(attempt) || Date.now() - attempt > 10 * 60_000) {
+        try {
+          const script = join(EXT_DIR, "../bin/world-backup.mjs")
+          if (existsSync(script)) {
+            writeWorld({ ...readWorld(), lastBackupAttempt: new Date().toISOString() })
+            const child = spawn(process.execPath, [script, ...(c.backup.includePrivate ? ["--private"] : [])], {
+              detached: true, stdio: "ignore", env: { ...process.env, LIFE_WORLD_ROOT: ROOT },
+            })
+            child.on("exit", (code) => {
+              if (code === 0) { writeWorld({ ...readWorld(), lastBackup: today }); log("backup · ok") }
+              else log(`backup · fail exit ${code}`)
+            })
+            child.unref()
+          }
+        } catch (e) { log(`backup spawn failed ${String(e)}`) }
+      }
     }
     // 每日清理 tmp；桥接心跳检查
     if (state.lastCleanup !== today) {
-      cleanupTmp(c.cleanup.tmpMaxAgeHours)
-      writeWorld({ ...readWorld(), lastCleanup: today })
+      if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) writeWorld({ ...readWorld(), lastCleanup: today })
     }
-    // 记忆衰减：每天一次
-    if (state.lastDecay !== today) decayStrengths()
+    // 记忆衰减：每天一次（lastDecay 是 ISO，按天判断）
+    if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) decayStrengths()
     guardBridge()
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
@@ -932,8 +1013,9 @@ async function tick(): Promise<void> {
     if (mins < fh * 60 + fm || mins >= fh * 60 + fm + 240) return
     const weather = c.care.enabled && c.care.weatherEnabled ? await fetchWeather(c.care.weatherCity) : ""
     sendTime(`【我的时间】早上了，新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
-    writeWorld({ ...state, lastWake: today })
+    writeWorld({ ...readWorld(), lastWake: today })
   } catch (e) { log(`tick failed ${String(e)}`) }
+  finally { ticking = false }
 }
 
 // ———————— 守护与清理 ————————
@@ -947,22 +1029,23 @@ function rotateLog(file: string, maxBytes = 5 * 1024 * 1024): void {
   } catch (e) { log(`rotateLog failed ${String(e)}`) }
 }
 
-function cleanupTmp(maxAgeHours: number): void {
+function cleanupTmp(maxAgeHours: number): boolean {
   try {
-    if (!existsSync(TMP_DIR)) return
+    if (!existsSync(TMP_DIR)) return true
     const cutoff = Date.now() - Math.max(1, maxAgeHours) * 3_600_000
     for (const f of readdirSync(TMP_DIR)) {
       const p = join(TMP_DIR, f)
       try { if (statSync(p).isFile() && statSync(p).mtimeMs < cutoff) unlinkSync(p) } catch { /* ignore */ }
     }
-  } catch (e) { log(`cleanupTmp failed ${String(e)}`) }
+    return true
+  } catch (e) { log(`cleanupTmp failed ${String(e)}`); return false }
 }
 
 /** QQ 桥接心跳超过 staleSeconds 就尝试拉起来（家会话负责守） */
 function guardBridge(): void {
   try {
     const c = config()
-    if (!c.guard.enabled || !c.bridge.enabled) return
+    if (!c.guard.enabled || !c.guard.allowRestart || !c.bridge.enabled) return
     const state = readWorld()
     const now = Date.now()
     const last = state.lastGuard ? Date.parse(state.lastGuard) : 0
@@ -979,7 +1062,8 @@ function guardBridge(): void {
     const lwctl = join(ROOT, "bin", "lwctl")
     if (!existsSync(lwctl)) return
     log("guard · qq bridge stale, restarting")
-    const child = spawn(lwctl, ["restart", "qq"], { detached: true, stdio: "ignore", env: { ...process.env } })
+    const child = spawn(lwctl, ["restart", "qq"], { detached: true, stdio: "ignore", env: { ...process.env }, cwd: ROOT })
+    child.on("error", (e) => log(`guard spawn failed · ${String(e)}`))
     child.unref()
   } catch (e) { log(`guardBridge failed ${String(e)}`) }
 }
@@ -994,9 +1078,12 @@ function maybeRandomCare(): void {
     if (inQuietHours(now, c.care)) return
     const state = readWorld()
     const last = state.lastRandom ? Date.parse(state.lastRandom) : 0
-    const gap = Math.max(1, Number(c.care.randomMinGapHours) || 3) * 3_600_000
+    const gapH = Number(c.care.randomMinGapHours)
+    const gap = (Number.isFinite(gapH) ? Math.max(0, gapH) : 3) * 3_600_000
     if (Date.now() - last < gap) return
-    if (Math.random() >= Math.max(0, Math.min(1, Number(c.care.randomChancePerTick) || 0.02))) return
+    const chance = Number(c.care.randomChancePerTick)
+    const p = Number.isFinite(chance) ? Math.max(0, Math.min(1, chance)) : 0.02
+    if (Math.random() >= p) return
     writeWorld({ ...state, lastRandom: now.toISOString() })
     sendTime("【想起你】这会儿没在聊天，但你忽然想起了对方。想发就写一两句，用 reach_out 发到 QQ；不想打扰就只回 [SILENT]。")
   } catch (e) { log(`random care failed ${String(e)}`) }
@@ -1416,17 +1503,26 @@ export default function (pi: ExtensionAPI) {
   // —— lwctl：会话心跳 + 远程切换模型 ——
   const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
   let lastControlSeq = 0
-  const statusPayload = () => ({
-    role: ROLE,
-    roleKey,
-    channel: CHANNEL,
-    groupId: GROUP_ID,
-    pid: process.pid,
-    model: lastCtx ? modelIdOf(lastCtx) : "",
-    sessionId: lastCtx?.sessionManager?.getSessionId?.() || "",
-    sessionFile: lastCtx?.sessionManager?.getSessionFile?.() || "",
-    updated: new Date().toISOString(),
-  })
+  const statusPayload = () => {
+    // ctx 在 newSession / 进程收尾后可能失效，逐项安全读取
+    let model = "", sessionId = "", sessionFile = ""
+    if (lastCtx) {
+      try { model = modelIdOf(lastCtx) } catch { /* stale ctx */ }
+      try { sessionId = lastCtx.sessionManager?.getSessionId?.() || "" } catch { /* stale ctx */ }
+      try { sessionFile = lastCtx.sessionManager?.getSessionFile?.() || "" } catch { /* stale ctx */ }
+    }
+    return {
+      role: ROLE,
+      roleKey,
+      channel: CHANNEL,
+      groupId: GROUP_ID,
+      pid: process.pid,
+      model,
+      sessionId,
+      sessionFile,
+      updated: new Date().toISOString(),
+    }
+  }
   const writeStatus = () => {
     try {
       mkdirSync(STATUS_DIR, { recursive: true, mode: 0o700 })
@@ -1437,7 +1533,10 @@ export default function (pi: ExtensionAPI) {
         if (!f.endsWith(".json")) continue
         try { if (statSync(join(STATUS_DIR, f)).mtimeMs < cutoff) unlinkSync(join(STATUS_DIR, f)) } catch { /* ignore */ }
       }
-    } catch (e) { log(`writeStatus failed ${String(e)}`) }
+    } catch (e) {
+      const msg = String(e)
+      if (!msg.includes("stale")) log(`writeStatus failed ${msg}`)
+    }
   }
   const pollControl = async () => {
     try {

@@ -87,7 +87,7 @@ pi          # TUI，已经带 life-world
 
 ## 记忆检索与遗忘曲线
 
-- **FTS5**：归档时写入 `memory-index.db`（trigram），`memory_search` 优先查索引：≥3 字 `MATCH/BM25`，2 字 `LIKE`。
+- **FTS5**：归档时写入 `memory-index.db`（trigram，WAL + busy_timeout），`memory_search` 优先查索引：≥3 字 `MATCH/BM25`，2 字 `LIKE`；历史回填只在 home 进程做，避免多进程抢锁。
 - **可选语义检索**：装依赖并在 `memory.semantic` 打开后，用 `transformers.js` 在 CPU 上跑 `Xenova/jina-embeddings-v2-base-zh`（768 维，q8）。文本截断 512 字，后台按 recent-first 批量回填向量；查询时 `0.75*cos + 0.25*FTS` 混合排序。
 - **遗忘曲线**：每条记忆带强度（初始 1.0）。被检索命中 +`hitBoost`（上限 `maxStrength`）；每天按 `halfLifeDays` 衰减（下限 `minStrength`），只降权不删除。排序权重 = `0.7 + 0.3*min(1, strength/2)`。
 
@@ -119,6 +119,7 @@ pi          # TUI，已经带 life-world
 ```
 
 - **安静时段**：`quietStart ~ quietEnd`（可跨午夜）内不发随机消息；
+- **看板可开关**：`lwctl board` 页面里勾掉「随机想起」即全天安静；
 - **随机想起**：安静时段外，距上次至少 `randomMinGapHours` 小时，每个 tick（30 秒）以 `randomChancePerTick` 概率触发一次「想起你」，角色自己决定 `reach_out` 还是 `[SILENT]`；
 - **天气**：早上兜底唤醒时用 `wttr.in` 取 `weatherCity` 的天气，附在唤醒文本里。
 
@@ -129,7 +130,7 @@ pi          # TUI，已经带 life-world
 - **日志轮转**：`debug.log`（5MB）、`qq-bridge.log`、`home-rpc.log` 超限自动切 `.1`。
 
 ```json
-"guard": { "enabled": true, "staleSeconds": 180, "cooldownMinutes": 10 },
+"guard": { "enabled": true, "staleSeconds": 300, "cooldownMinutes": 10, "allowRestart": true },
 "cleanup": { "tmpMaxAgeHours": 72 }
 ```
 
@@ -199,6 +200,8 @@ lwctl set home local
 lwctl set group:894742315 cloud
 
 lwctl backup [--private]           # 世界数据快照到 worlds/backup（git 增量）
+lwctl backup --gc                  # 压缩快照仓库
+lwctl backup --reset               # 彻底删掉快照目录（手动清理用）
 lwctl backups                      # 看最近快照
 lwctl tail [qq|home|debug] [行数]   # 看日志
 lwctl restart [qq|home|all]        # 重启常驻窗口
@@ -224,7 +227,7 @@ lwctl board stop
 
 `worlds/backup/` 是一个独立的 git 仓库，`lwctl backup` 把 `worlds/default` 的 identity / conversations / diary / plan / room / 表情包 / 语音 / world.json 同步进去再提交；`--private` 才带上 `机密抽屉/`。git 增量存储，重复内容不重复占空间。
 
-家会话每天 `backup.hour` 点后自动快照一次（`life-world.json` 的 `backup` 段，`includePrivate` 默认 false）。
+家会话每天 `backup.hour` 点后自动快照一次（`life-world.json` 的 `backup` 段，`includePrivate` 默认 false）；快照在子进程里跑，不阻塞主会话。**不做自动清理**：`lwctl backup --gc` 压缩、`lwctl backup --reset` 整个删除，由你决定。
 
 ### 闹钟带模型
 

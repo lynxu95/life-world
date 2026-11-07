@@ -7,7 +7,7 @@
  *   lwctl set <target> <local|cloud|provider/model> [原因]
  *   lwctl targets
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 import { createInterface } from "node:readline/promises"
@@ -125,7 +125,20 @@ async function interactive() {
 
 // —— 快照 / 日志 / 重启 ——
 function cmdBackup(args) {
+  const backupDir = join(ROOT, "worlds/backup")
+  if (args.includes("--reset")) {
+    rmSync(backupDir, { recursive: true, force: true })
+    console.log(`已删除快照目录：${backupDir}（下次 backup 会重新建）`)
+    return
+  }
+  if (args.includes("--gc")) {
+    if (!existsSync(join(backupDir, ".git"))) { console.log("还没有快照。"); return }
+    const r = spawnSync("git", ["gc", "--prune=now"], { cwd: backupDir, encoding: "utf8" })
+    console.log(r.status === 0 ? "✓ 已压缩快照仓库" : `✗ git gc 失败：${r.stderr || ""}`)
+    return
+  }
   const includePrivate = args.includes("--private")
+  if (includePrivate) console.log("注意：--private 会把 机密抽屉 写进 git 历史，之后删不掉")
   const r = backupWorld({ includePrivate })
   console.log(r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`)
   console.log(`  目录：${r.dir}  工作区：${backupSize()}`)
@@ -163,24 +176,37 @@ function cmdTail(which, n) {
   const lines = readFileSync(file, "utf8").trimEnd().split("\n")
   console.log(lines.slice(-(n || 30)).join("\n"))
 }
+const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`
 function cmdRestart(target) {
   const c = models()
   const model = process.env.LIFE_WORLD_MODEL || c.local || ""
+  if (model && !/^[A-Za-z0-9._/-]+$/.test(model)) {
+    console.error(`模型名不合法，拒绝执行：${model}`)
+    process.exit(1)
+  }
   const piBin = process.env.PI_BIN || ""
-  const pathPrefix = piBin ? `${join(piBin, "..")}:` : "$HOME/.local/bin:$HOME/.pi/agent/bin:"
+  const pathPrefix = piBin
+    ? `${shq(join(piBin, ".."))}:`
+    : `${shq(join(process.env.HOME || "", ".local/bin"))}:${shq(join(process.env.HOME || "", ".pi/agent/bin"))}:`
+  const results = []
   const run = (name, script) => {
-    const cmd = `cd ${ROOT} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${model} node ${join(ROOT, "bin", script)} 2>&1 | tee -a ${join(ROOT, `${name}.console.log`)}`
+    const cmd = `cd ${shq(ROOT)} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${shq(model)} node ${shq(join(ROOT, "bin", script))} 2>&1 | tee -a ${shq(join(ROOT, `${name}.console.log`))}`
     const has = spawnSync("tmux", ["has-session", "-t", "life-world"], { encoding: "utf8" })
+    let r
     if (has.status !== 0) {
-      spawnSync("tmux", ["new-session", "-d", "-s", "life-world", "-n", name, cmd], { encoding: "utf8" })
-      return
+      r = spawnSync("tmux", ["new-session", "-d", "-s", "life-world", "-n", name, cmd], { encoding: "utf8" })
+    } else {
+      spawnSync("tmux", ["kill-window", "-t", `life-world:${name}`], { encoding: "utf8" })
+      r = spawnSync("tmux", ["new-window", "-t", "life-world", "-n", name, cmd], { encoding: "utf8" })
     }
-    spawnSync("tmux", ["kill-window", "-t", `life-world:${name}`], { encoding: "utf8" })
-    spawnSync("tmux", ["new-window", "-t", "life-world", "-n", name, cmd], { encoding: "utf8" })
+    results.push({ name, ok: r.status === 0, err: String(r.stderr || "").trim() })
   }
   if (target === "qq" || target === "all") run("qq", "pi-qq-bridge.mjs")
   if (target === "home" || target === "all") run("home", "pi-home-rpc.mjs")
-  console.log(`✓ 已重启：${target === "all" ? "qq + home" : target}（模型 ${model || "默认"}）`)
+  for (const r of results) {
+    console.log(`${r.ok ? "✓" : "✗"} ${r.name}${r.ok ? "" : "：" + (r.err || "tmux 执行失败")}`)
+  }
+  if (!results.length) console.log("目标只能是 qq / home / all")
 }
 
 // —— Web 看板 ——
@@ -208,7 +234,13 @@ function cmdBoard(action = "start") {
   })
   child.unref()
   writeFileSync(pidFile, String(child.pid))
-  console.log(`看板已启动：http://127.0.0.1:${port}`)
+  spawnSync("sleep", ["0.8"])
+  if (!pidAlive(child.pid)) {
+    writeFileSync(pidFile, "")
+    console.error("看板启动失败（进程已退出），检查 lwboard.log")
+    process.exit(1)
+  }
+  console.log(`看板已启动：http://${process.env.LW_BOARD_HOST || "127.0.0.1"}:${port}`)
 }
 
 // —— 非交互子命令（脚本用）——
