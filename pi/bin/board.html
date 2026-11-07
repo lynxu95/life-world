@@ -104,8 +104,8 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
   <section>
     <h2>模型设置</h2>
     <div class="row">
-      <input type="search" id="m-local" placeholder="本地模型：provider/model">
-      <input type="search" id="m-cloud" placeholder="在线模型：provider/model">
+      <select id="m-local" aria-label="本地模型"></select>
+      <select id="m-cloud" aria-label="在线模型"></select>
       <button class="primary" id="m-save">保存</button>
       <span class="muted" id="m-hint"></span>
     </div>
@@ -195,8 +195,9 @@ async function loadOverview() {
     $("hb-dot").className = "dot"
     $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
     renderSessions(d.sessions, d.models)
-    if (!document.activeElement || !["m-local","m-cloud"].includes(document.activeElement.id)) {
-      if (!mTouched) { $("m-local").value = d.models.local || ""; $("m-cloud").value = d.models.cloud || "" }
+    if (!mTouched) {
+      fillSelect($("m-local"), d.models.local || "", d.available || [])
+      fillSelect($("m-cloud"), d.models.cloud || "", d.available || [])
     }
     renderUsage(d.usage)
     $("backup-hint").textContent = d.backup ? `快照 ${d.backup.size} · ${d.backup.last[0] || "无"}` : ""
@@ -252,8 +253,22 @@ function renderUsage(u) {
 }
 
 let mTouched = false
-$("m-local").addEventListener("input", () => { mTouched = true })
-$("m-cloud").addEventListener("input", () => { mTouched = true })
+function fillSelect(el, current, list) {
+  const seen = new Set()
+  el.innerHTML = ""
+  if (current) {
+    const o = document.createElement("option")
+    o.value = current; o.textContent = current + "（当前）"; el.append(o); seen.add(current)
+  }
+  for (const m of list) {
+    if (seen.has(m.ref)) continue
+    const o = document.createElement("option")
+    o.value = m.ref; o.textContent = m.ref; el.append(o)
+  }
+  if (current) el.value = current
+}
+$("m-local").addEventListener("change", () => { mTouched = true })
+$("m-cloud").addEventListener("change", () => { mTouched = true })
 $("m-save").onclick = async () => {
   const b = $("m-save"); b.disabled = true; b.textContent = "保存中…"
   try {

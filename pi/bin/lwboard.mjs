@@ -13,6 +13,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import { createRequire } from "node:module"
+import { spawnSync } from "node:child_process"
 import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
 import { usageStats } from "./usage-stats.mjs"
 
@@ -28,6 +29,28 @@ const PORT = Number(process.env.LW_BOARD_PORT || 8099)
 const HOST = process.env.LW_BOARD_HOST || "127.0.0.1"
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+
+let modelsCache = { at: 0, list: [] }
+function piBin() {
+  const candidates = [process.env.PI_BIN, join(homedir(), ".local/bin/pi"), join(homedir(), ".pi/agent/bin/pi"), "/usr/local/bin/pi", "/usr/bin/pi"]
+  return candidates.find((p) => p && existsSync(p)) || ""
+}
+function availableModels() {
+  if (modelsCache.list.length && Date.now() - modelsCache.at < 60_000) return modelsCache.list
+  const bin = piBin()
+  if (!bin) return modelsCache.list
+  const env = { ...process.env, PATH: `${dirname(bin)}:/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ""}` }
+  const r = spawnSync(bin, ["--list-models"], { encoding: "utf8", timeout: 20_000, env })
+  if (r.status !== 0) return modelsCache.list
+  const list = []
+  for (const line of String(r.stdout || "").split("\n")) {
+    const cols = line.trim().split(/\s{2,}/)
+    if (cols.length < 2 || cols[0] === "provider") continue
+    list.push({ ref: `${cols[0]}/${cols[1]}`, provider: cols[0], model: cols[1] })
+  }
+  modelsCache = { at: Date.now(), list }
+  return list
+}
 function pidAlive(pid) {
   if (!pid) return false
   try { process.kill(pid, 0); return true } catch { return false }
@@ -138,6 +161,7 @@ const server = http.createServer(async (req, res) => {
         care: c.care || {},
         usage: usageStats(7),
         backup: { size: backupSize(), last: backupLog(3) },
+        available: availableModels(),
         now: new Date().toISOString(),
       })
     }
