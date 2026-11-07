@@ -195,6 +195,15 @@ lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次
 
 `lwctl usage [天数]` 直接扫 `pi-sessions/*.jsonl` 里的 assistant usage：按天统计请求数、输入/输出/缓存读 token、费用、云端 vs 本地请求数，以及模型切换次数。
 
+### Web 看板
+
+```bash
+lwctl board          # 启动：http://127.0.0.1:8099
+lwctl board stop
+```
+
+页面提供：会话与模型（可直接点按钮热切换）、7 天用量、记忆检索（FTS5）、日记与某天对话、日志、手动快照。服务只绑 `127.0.0.1`，端口用 `LW_BOARD_PORT` 改。
+
 ### 世界快照
 
 `worlds/backup/` 是一个独立的 git 仓库，`lwctl backup` 把 `worlds/default` 的 identity / conversations / diary / plan / room / 表情包 / 语音 / world.json 同步进去再提交；`--private` 才带上 `机密抽屉/`。git 增量存储，重复内容不重复占空间。

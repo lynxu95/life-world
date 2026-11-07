@@ -12,8 +12,9 @@ import { join } from "node:path"
 import { homedir } from "node:os"
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
+import { usageStats } from "./usage-stats.mjs"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const STATUS_DIR = join(ROOT, "status")
@@ -142,49 +143,15 @@ const fmt = (n) => {
   return String(Math.round(v))
 }
 function cmdUsage(days = 7) {
-  const dir = join(ROOT, "pi-sessions")
-  if (!existsSync(dir)) { console.log("还没有会话文件。"); return }
-  const since = Date.now() - Math.max(1, days) * 86_400_000
-  const byDay = new Map()
-  let switches = 0
-  const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10)
-  for (const f of readdirSync(dir).filter((x) => x.endsWith(".jsonl"))) {
-    let content = ""
-    try { content = readFileSync(join(dir, f), "utf8") } catch { continue }
-    for (const line of content.split("\n")) {
-      if (!line.trim()) continue
-      let entry
-      try { entry = JSON.parse(line) } catch { continue }
-      if (entry.type === "model_change") { switches++; continue }
-      if (entry.type !== "message") continue
-      const m = entry.message || {}
-      if (m.role !== "assistant") continue
-      const ts = Date.parse(entry.timestamp || "") || Number(m.timestamp) || 0
-      if (!ts || ts < since) continue
-      const day = dayOf(ts)
-      const row = byDay.get(day) || { req: 0, input: 0, output: 0, cacheRead: 0, cost: 0, cloud: 0, local: 0 }
-      const u = m.usage || {}
-      row.req++
-      row.input += Number(u.input || 0)
-      row.output += Number(u.output || 0)
-      row.cacheRead += Number(u.cacheRead || 0)
-      row.cost += Number(u.cost?.total ?? u.cost ?? 0)
-      const provider = String(m.provider || "")
-      if (provider === "deepseek" || provider === "anthropic" || provider === "openai") row.cloud++
-      else row.local++
-      byDay.set(day, row)
-    }
-  }
-  if (!byDay.size) { console.log(`最近 ${days} 天没有用量记录。`); return }
-  console.log(`最近 ${days} 天用量（模型切换 ${switches} 次）\n`)
+  const st = usageStats(days)
+  if (!st.list.length) { console.log(`最近 ${days} 天没有用量记录。`); return }
+  console.log(`最近 ${days} 天用量（模型切换 ${st.switches} 次）\n`)
   console.log("日期        请求   输入     输出     缓存读    云端/本地     费用")
-  let total = { req: 0, input: 0, output: 0, cacheRead: 0, cost: 0 }
-  for (const day of [...byDay.keys()].sort()) {
-    const r = byDay.get(day)
-    total.req += r.req; total.input += r.input; total.output += r.output; total.cacheRead += r.cacheRead; total.cost += r.cost
-    console.log(`${day}  ${String(r.req).padStart(5)}  ${fmt(r.input).padStart(7)}  ${fmt(r.output).padStart(7)}  ${fmt(r.cacheRead).padStart(7)}  ${String(`${r.cloud}/${r.local}`).padStart(11)}  ${r.cost ? "$" + r.cost.toFixed(4) : "-"}`)
+  for (const r of st.list) {
+    console.log(`${r.day}  ${String(r.req).padStart(5)}  ${fmt(r.input).padStart(7)}  ${fmt(r.output).padStart(7)}  ${fmt(r.cacheRead).padStart(7)}  ${String(`${r.cloud}/${r.local}`).padStart(11)}  ${r.cost ? "$" + r.cost.toFixed(4) : "-"}`)
   }
-  console.log(`${"合计".padEnd(10)}  ${String(total.req).padStart(5)}  ${fmt(total.input).padStart(7)}  ${fmt(total.output).padStart(7)}  ${fmt(total.cacheRead).padStart(7)}`)
+  const t = st.total
+  console.log(`${"合计".padEnd(10)}  ${String(t.req).padStart(5)}  ${fmt(t.input).padStart(7)}  ${fmt(t.output).padStart(7)}  ${fmt(t.cacheRead).padStart(7)}`)
 }
 const LOG_FILES = { qq: "qq-bridge.log", home: "home-rpc.log", debug: "debug.log" }
 function cmdTail(which, n) {
@@ -214,6 +181,34 @@ function cmdRestart(target) {
   console.log(`✓ 已重启：${target === "all" ? "qq + home" : target}（模型 ${model || "默认"}）`)
 }
 
+// —— Web 看板 ——
+const BOARD_PID = join(ROOT, "lwboard.pid")
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+function cmdBoard(action = "start") {
+  const pidFile = BOARD_PID
+  if (action === "stop") {
+    if (!existsSync(pidFile)) { console.log("看板没在运行。"); return }
+    const pid = Number(readFileSync(pidFile, "utf8").trim())
+    try { process.kill(pid, "SIGTERM") } catch { /* ignore */ }
+    try { writeFileSync(pidFile, "") } catch { /* ignore */ }
+    console.log("已停止看板。")
+    return
+  }
+  if (existsSync(pidFile) && pidAlive(Number(readFileSync(pidFile, "utf8").trim()))) {
+    console.log("看板已在运行。")
+    return
+  }
+  const port = process.env.LW_BOARD_PORT || "8099"
+  const child = spawn(process.execPath, [join(ROOT, "bin", "lwboard.mjs")], {
+    detached: true, stdio: "ignore", env: { ...process.env, LW_BOARD_PORT: port },
+  })
+  child.unref()
+  writeFileSync(pidFile, String(child.pid))
+  console.log(`看板已启动：http://127.0.0.1:${port}`)
+}
+
 // —— 非交互子命令（脚本用）——
 const [cmd, ...arg] = process.argv.slice(2)
 if (!cmd && stdin.isTTY) {
@@ -241,6 +236,8 @@ if (!cmd && stdin.isTTY) {
   cmdTail(arg[0] || "qq", Number(arg[1]) || 30)
 } else if (cmd === "usage" || cmd === "stats") {
   cmdUsage(Number(arg[0]) || 7)
+} else if (cmd === "board" || cmd === "web") {
+  cmdBoard(arg[0] || "start")
 } else if (cmd === "restart") {
   cmdRestart(arg[0] || "all")
 } else {
@@ -256,6 +253,7 @@ if (!cmd && stdin.isTTY) {
   lwctl tail [qq|home|debug] [行数]  看日志
   lwctl restart [qq|home|all]        重启常驻窗口
   lwctl usage [天数]                 用量统计（token / 云端本地 / 切换）
+  lwctl board [start|stop]           Web 看板（http://127.0.0.1:8099）
 
   target：qq / home / group:<群号> / cli
   model ：local / cloud / provider/model`)

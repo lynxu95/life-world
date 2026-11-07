@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>life-world 控制台</title>
+<style>
+/* 设计计划：
+   配色：冷灰底 + 青绿强调（控制台/仪表），语义色只给状态；
+   字体：系统无衬线 + 等宽数字；
+   布局：单列 1180px 容器，卡片分区，摘要先于细节。 */
+:root{
+  --bg:#f4f6f7; --panel:#ffffff; --panel-2:#fafbfc;
+  --fg:#171b21; --muted:#5e6a78; --line:#dde3e9;
+  --accent:#0f766e; --accent-soft:#e4f2ef;
+  --ok:#15803d; --ok-soft:#e8f5ec; --warn:#b45309; --bad:#b91c1c;
+  --sans:system-ui,-apple-system,"Segoe UI","Noto Sans SC","PingFang SC",sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Consolas,monospace;
+  --radius:10px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1116; --panel:#151a21; --panel-2:#11161c;
+    --fg:#e6e9ee; --muted:#8b95a3; --line:#232b36;
+    --accent:#2dd4bf; --accent-soft:#12312e;
+    --ok:#4ade80; --ok-soft:#12251a; --warn:#fbbf24; --bad:#f87171;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1116; --panel:#151a21; --panel-2:#11161c;
+  --fg:#e6e9ee; --muted:#8b95a3; --line:#232b36;
+  --accent:#2dd4bf; --accent-soft:#12312e;
+  --ok:#4ade80; --ok-soft:#12251a; --warn:#fbbf24; --bad:#f87171;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:1.55;
+  padding:24px max(16px,env(safe-area-inset-left)) 48px max(16px,env(safe-area-inset-right))}
+.wrap{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px 20px}
+h1{font-size:22px;margin:0;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13px}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);
+  border:1px solid var(--line);border-radius:999px;padding:3px 10px;background:var(--panel)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.dot.off{background:var(--bad)}
+button{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:5px 10px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+:root[data-theme="dark"] button.primary{color:#062522}
+section{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+section h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 14px;font-weight:600}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.card{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel-2);min-width:0;
+  display:flex;flex-direction:column;gap:8px}
+.card .top{display:flex;align-items:baseline;gap:8px}
+.card .name{font-weight:600;font-family:var(--mono);font-size:13px}
+.card .age{color:var(--muted);font-size:12px;margin-left:auto}
+.model{font-family:var(--mono);font-size:12px;color:var(--accent);word-break:break-all}
+.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.actions button{font-size:12px;padding:3px 8px}
+.tiles{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin-bottom:16px}
+.tile{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--panel-2)}
+.tile .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.tile .v{font-family:var(--mono);font-size:20px;font-variant-numeric:tabular-nums;margin-top:2px}
+.tile .n{font-size:11px;color:var(--muted)}
+.bars{display:flex;align-items:flex-end;gap:8px;height:110px;padding-top:6px}
+.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:4px;min-width:0}
+.bar .b{background:var(--accent);border-radius:4px 4px 0 0;min-height:2px;opacity:.85}
+.bar .d{font-size:10px;color:var(--muted);text-align:center;font-family:var(--mono)}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+input[type=search],select{font:inherit;color:inherit;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:8px;padding:7px 10px;min-width:0}
+input[type=search]{flex:1;min-width:180px}
+.results{list-style:none;margin:14px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.results li{border-left:3px solid var(--line);padding:6px 10px;background:var(--panel-2);border-radius:0 8px 8px 0;min-width:0}
+.results .meta{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.results .txt{white-space:pre-wrap;word-break:break-word}
+.split{display:grid;gap:16px;grid-template-columns:minmax(160px,220px) minmax(0,1fr)}
+.dates{display:flex;flex-direction:column;gap:4px;max-height:260px;overflow:auto}
+.dates button{text-align:left;font-family:var(--mono);font-size:12px}
+.dates button.on{border-color:var(--accent);background:var(--accent-soft)}
+pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:8px;padding:10px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word}
+.muted{color:var(--muted)}
+.hint{font-size:12px;color:var(--muted);margin-top:8px}
+@media (max-width:640px){ .split{grid-template-columns:1fr} .bars{height:90px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>life-world</h1>
+    <span class="sub">会话 · 记忆 · 用量</span>
+    <span class="spacer"></span>
+    <span class="pill" id="heartbeat"><span class="dot" id="hb-dot"></span><span id="hb-text">连接中…</span></span>
+    <button id="theme" title="切换主题">主题</button>
+  </header>
+
+  <section>
+    <h2>会话</h2>
+    <div class="grid" id="sessions"><div class="muted">加载中…</div></div>
+    <div class="hint">切换模型会写 control.json，目标进程在 5 秒内响应；切到在线会同时打开该会话的机密抽屉。</div>
+  </section>
+
+  <section>
+    <h2>用量（最近 7 天）</h2>
+    <div class="tiles" id="tiles"></div>
+    <div class="bars" id="bars"></div>
+    <div class="hint" id="usage-hint"></div>
+  </section>
+
+  <section>
+    <h2>记忆检索</h2>
+    <div class="row">
+      <input type="search" id="q" placeholder="搜对话原文，例如：机密抽屉、法考、千问">
+      <button class="primary" id="search">搜索</button>
+    </div>
+    <ul class="results" id="results"></ul>
+  </section>
+
+  <section>
+    <h2>日记 / 某天</h2>
+    <div class="split">
+      <div class="dates" id="dates"></div>
+      <div>
+        <div class="row">
+          <span class="muted" id="day-label">选一天</span>
+          <span class="spacer"></span>
+          <button id="today">今天</button>
+        </div>
+        <pre class="log" id="day-content">（左侧选一天，或点「今天」）</pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>日志</h2>
+    <div class="row">
+      <select id="log-target">
+        <option value="qq">QQ 桥接</option>
+        <option value="home">家会话</option>
+        <option value="debug">调试</option>
+      </select>
+      <button id="log-refresh">刷新</button>
+      <span class="spacer"></span>
+      <button id="backup">打快照</button>
+      <span class="muted" id="backup-hint"></span>
+    </div>
+    <pre class="log" id="log">（加载中…）</pre>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const fmt = (n) => { n = Number(n) || 0; if (n >= 1e6) return (n/1e6).toFixed(2)+"M"; if (n >= 1e3) return (n/1e3).toFixed(1)+"k"; return String(Math.round(n)) }
+const ageText = (iso) => { const ms = Date.now() - Date.parse(iso); if (!Number.isFinite(ms)) return "?"; if (ms < 15000) return "刚刚"; if (ms < 60000) return Math.round(ms/1000)+"s 前"; return Math.round(ms/60000)+"m 前" }
+
+function applyTheme(t) {
+  if (t) document.documentElement.setAttribute("data-theme", t)
+  else document.documentElement.removeAttribute("data-theme")
+}
+try { const saved = localStorage.getItem("lw-theme"); if (saved) applyTheme(saved) } catch {}
+$("theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme")
+  const next = cur === "dark" ? "light" : cur === "light" ? "" : "dark"
+  applyTheme(next || null)
+  try { next ? localStorage.setItem("lw-theme", next) : localStorage.removeItem("lw-theme") } catch {}
+}
+
+async function getJson(url, opts) {
+  const r = await fetch(url, opts)
+  if (!r.ok) throw new Error((await r.text()) || r.status)
+  return r.json()
+}
+
+async function loadOverview() {
+  try {
+    const d = await getJson("/api/overview")
+    $("hb-dot").className = "dot"
+    $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
+    renderSessions(d.sessions, d.models)
+    renderUsage(d.usage)
+    $("backup-hint").textContent = d.backup ? `快照 ${d.backup.size} · ${d.backup.last[0] || "无"}` : ""
+  } catch (e) {
+    $("hb-dot").className = "dot off"
+    $("hb-text").textContent = "服务未连接"
+  }
+}
+
+function renderSessions(list, models) {
+  const el = $("sessions")
+  if (!list.length) { el.innerHTML = '<div class="muted">没有活跃会话。先起 pi / QQ 桥接 / 家会话。</div>'; return }
+  el.innerHTML = ""
+  for (const s of list) {
+    const card = document.createElement("div")
+    card.className = "card"
+    const top = document.createElement("div"); top.className = "top"
+    const name = document.createElement("span"); name.className = "name"; name.textContent = s.roleKey
+    const age = document.createElement("span"); age.className = "age"; age.textContent = ageText(s.updated)
+    top.append(name, age)
+    const model = document.createElement("div"); model.className = "model"; model.textContent = s.model || "（未就绪）"
+    const act = document.createElement("div"); act.className = "actions"
+    const mk = (label, value) => {
+      const b = document.createElement("button"); b.textContent = label
+      b.onclick = async () => {
+        b.disabled = true; b.textContent = "切换中…"
+        try { const r = await getJson("/api/model", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ target: s.roleKey, value }) }); b.textContent = r.ok ? "已切换" : "失败" }
+        catch { b.textContent = "失败" }
+        setTimeout(loadOverview, 1200)
+      }
+      return b
+    }
+    act.append(mk("本地", "local"), mk("在线", "cloud"))
+    card.append(top, model, act)
+    el.append(card)
+  }
+}
+
+function renderUsage(u) {
+  if (!u) return
+  const t = u.total
+  $("tiles").innerHTML = `
+    <div class="tile"><div class="k">请求</div><div class="v">${t.req}</div><div class="n">${u.days} 天</div></div>
+    <div class="tile"><div class="k">输入 tokens</div><div class="v">${fmt(t.input)}</div><div class="n">缓存读 ${fmt(t.cacheRead)}</div></div>
+    <div class="tile"><div class="k">输出 tokens</div><div class="v">${fmt(t.output)}</div><div class="n">模型切换 ${u.switches} 次</div></div>
+    <div class="tile"><div class="k">费用</div><div class="v">${t.cost ? "$" + t.cost.toFixed(4) : "-"}</div><div class="n">云端 ${t.cloud} / 本地 ${t.local}</div></div>`
+  const max = Math.max(1, ...u.list.map((r) => r.input + r.output))
+  $("bars").innerHTML = u.list.map((r) => {
+    const h = Math.round(((r.input + r.output) / max) * 100)
+    return `<div class="bar" title="${r.day} · ${fmt(r.input + r.output)} tokens"><div class="b" style="height:${h}%"></div><div class="d">${r.day.slice(5)}</div></div>`
+  }).join("") || '<div class="muted">最近没有用量</div>'
+  $("usage-hint").textContent = `云端 ${t.cloud} 次 · 本地 ${t.local} 次 · 切换 ${u.switches} 次`
+}
+
+async function search() {
+  const q = $("q").value.trim()
+  const el = $("results")
+  if (!q) { el.innerHTML = ""; return }
+  el.innerHTML = '<li class="muted">搜索中…</li>'
+  try {
+    const d = await getJson("/api/memory?q=" + encodeURIComponent(q) + "&limit=20")
+    el.innerHTML = ""
+    if (!d.rows.length) { el.innerHTML = '<li class="muted">没有命中。</li>'; return }
+    for (const r of d.rows) {
+      const li = document.createElement("li")
+      const meta = document.createElement("div"); meta.className = "meta"
+      meta.textContent = `${new Date(r.t).toLocaleString("zh-CN")} · ${r.role === "user" ? "对方" : "我"}`
+      const txt = document.createElement("div"); txt.className = "txt"; txt.textContent = r.text.slice(0, 500)
+      li.append(meta, txt); el.append(li)
+    }
+  } catch (e) { el.innerHTML = '<li class="muted">搜索失败：' + e.message + '</li>' }
+}
+$("search").onclick = search
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search() })
+
+async function loadDates() {
+  try {
+    const d = await getJson("/api/diary")
+    const el = $("dates"); el.innerHTML = ""
+    for (const item of d.list) {
+      const b = document.createElement("button")
+      b.textContent = `${item.date}${item.title ? " · " + item.title : ""}`
+      b.onclick = () => loadDay(item.date, b)
+      el.append(b)
+    }
+    if (!d.list.length) el.innerHTML = '<span class="muted">还没有日记。</span>'
+  } catch {}
+}
+async function loadDay(date, btn) {
+  document.querySelectorAll("#dates button").forEach((b) => b.classList.remove("on"))
+  if (btn) btn.classList.add("on")
+  $("day-label").textContent = date
+  try {
+    const d = await getJson("/api/day?date=" + encodeURIComponent(date))
+    const parts = []
+    if (d.diary) parts.push("—— 日记 ——\n" + d.diary)
+    if (d.chat.length) parts.push("—— 对话 ——\n" + d.chat.map((r) => `[${new Date(r.t).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit"})} ${r.role === "user" ? "对方" : "我"}] ${r.text}`).join("\n"))
+    $("day-content").textContent = parts.join("\n\n") || "这天没有记录。"
+  } catch (e) { $("day-content").textContent = "读取失败：" + e.message }
+}
+$("today").onclick = () => loadDay(new Date().toISOString().slice(0, 10))
+
+async function loadLog() {
+  const target = $("log-target").value
+  try {
+    const d = await getJson(`/api/logs?target=${target}&n=120`)
+    $("log").textContent = d.text || "（空）"
+    $("log").scrollTop = $("log").scrollHeight
+  } catch (e) { $("log").textContent = "读取失败：" + e.message }
+}
+$("log-refresh").onclick = loadLog
+$("log-target").onchange = loadLog
+$("backup").onclick = async () => {
+  const b = $("backup"); b.disabled = true; b.textContent = "快照中…"
+  try { const r = await getJson("/api/backup", { method: "POST" }); b.textContent = r.ok ? "已快照" : "失败" }
+  catch { b.textContent = "失败" }
+  setTimeout(() => { b.disabled = false; b.textContent = "打快照"; loadOverview() }, 1500)
+}
+
+loadOverview(); loadDates(); loadLog(); loadDay(new Date().toISOString().slice(0, 10))
+setInterval(loadOverview, 10000)
+setInterval(loadLog, 15000)
+</script>
+</body>
+</html>

@@ -28,6 +28,9 @@ ensure_world() {
   cp "$SRC"/bin/home-rpc.mjs "$ROOT/bin/pi-home-rpc.mjs" 2>/dev/null || true
   cp "$SRC"/bin/lwctl.mjs "$ROOT/bin/lwctl" 2>/dev/null || true
   cp "$SRC"/bin/world-backup.mjs "$ROOT/bin/world-backup.mjs" 2>/dev/null || true
+  cp "$SRC"/bin/usage-stats.mjs "$ROOT/bin/usage-stats.mjs" 2>/dev/null || true
+  cp "$SRC"/bin/lwboard.mjs "$ROOT/bin/lwboard.mjs" 2>/dev/null || true
+  cp "$SRC"/bin/board.html "$ROOT/bin/board.html" 2>/dev/null || true
   chmod +x "$ROOT/bin/lwctl" 2>/dev/null || true
   # 桥接/家会话默认从 ../ext 找扩展；装到 bin/ 后要有一份对应位置
   mkdir -p "$ROOT/ext"

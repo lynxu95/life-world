@@ -1,0 +1,181 @@
+#!/usr/bin/env node
+/**
+ * lwboard · life-world 本地 Web 看板（只监听 127.0.0.1）
+ *
+ *   node lwboard.mjs                 默认 http://127.0.0.1:8099
+ *   LW_BOARD_PORT=9000 node lwboard.mjs
+ *
+ * 提供：会话/模型、模型热切换、用量、记忆检索、日记、日志、快照。
+ */
+import http from "node:http"
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { homedir } from "node:os"
+import { createRequire } from "node:module"
+import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
+import { usageStats } from "./usage-stats.mjs"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
+const WORLD = join(ROOT, "worlds/default")
+const CONFIG_FILE = join(ROOT, "life-world.json")
+const STATUS_DIR = join(ROOT, "status")
+const CONTROL_FILE = join(ROOT, "control.json")
+const CONTROL_STATE = join(ROOT, "control-state.json")
+const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
+const PORT = Number(process.env.LW_BOARD_PORT || 8099)
+const HOST = process.env.LW_BOARD_HOST || "127.0.0.1"
+
+const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+const json = (res, code, data) => {
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" })
+  res.end(JSON.stringify(data))
+}
+function sessions() {
+  if (!existsSync(STATUS_DIR)) return []
+  return readdirSync(STATUS_DIR)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => readJson(join(STATUS_DIR, f), null))
+    .filter((s) => s && s.roleKey)
+    .map((s) => ({ roleKey: s.roleKey, model: s.model || "", updated: s.updated || "", pid: s.pid, sessionId: s.sessionId || "" }))
+    .sort((a, b) => String(a.roleKey).localeCompare(String(b.roleKey)))
+}
+
+let memDb
+function openMem() {
+  if (memDb !== undefined) return memDb
+  try {
+    const req = createRequire(import.meta.url)
+    const { DatabaseSync } = req("node:sqlite")
+    memDb = new DatabaseSync(MEM_INDEX_FILE, { readOnly: true })
+  } catch { memDb = null }
+  return memDb
+}
+function memorySearch(q, limit) {
+  const db = openMem()
+  if (!db) return []
+  const query = String(q || "").trim()
+  if (!query) return []
+  try {
+    if (query.replace(/\s+/g, "").length >= 3) {
+      const phrase = `"${query.replace(/"/g, '""')}"`
+      return db.prepare("SELECT m.t AS t, m.role AS role, m.text AS text FROM msg_fts JOIN msg m ON m.id = msg_fts.id WHERE msg_fts MATCH ? ORDER BY bm25(msg_fts) LIMIT ?").all(phrase, limit)
+    }
+    return db.prepare("SELECT t, role, text FROM msg WHERE text LIKE ? ORDER BY t DESC LIMIT ?").all(`%${query}%`, limit)
+  } catch { return [] }
+}
+function diaryList(days = 14) {
+  const dir = join(WORLD, "diary")
+  if (!existsSync(dir)) return []
+  return readdirSync(dir).filter((f) => f.endsWith(".md")).sort().reverse().slice(0, days).map((f) => {
+    const body = readFileSync(join(dir, f), "utf8")
+    const title = body.split("\n").map((l) => l.replace(/^[#>\s-]+/, "").trim()).find(Boolean) || ""
+    return { date: f.replace(/\.md$/, ""), title: title.slice(0, 40) }
+  })
+}
+function dayView(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { diary: "", chat: [] }
+  const diaryFile = join(WORLD, "diary", `${date}.md`)
+  const convFile = join(WORLD, "conversations", `${date}.jsonl`)
+  const diary = existsSync(diaryFile) ? readFileSync(diaryFile, "utf8") : ""
+  const chat = []
+  if (existsSync(convFile)) {
+    for (const line of readFileSync(convFile, "utf8").split("\n")) {
+      if (!line.trim()) continue
+      try { const r = JSON.parse(line); if (r.t && r.text) chat.push(r) } catch { /* ignore */ }
+    }
+  }
+  return { diary, chat }
+}
+const LOG_FILES = { qq: "qq-bridge.log", home: "home-rpc.log", debug: "debug.log" }
+function tail(target, n) {
+  const file = join(ROOT, LOG_FILES[target] || LOG_FILES.qq)
+  if (!existsSync(file)) return `（没有 ${file}）`
+  const lines = readFileSync(file, "utf8").trimEnd().split("\n")
+  return lines.slice(-Math.max(1, Math.min(500, n))).join("\n")
+}
+function waitAck(seq, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs
+    const tick = () => {
+      const st = readJson(CONTROL_STATE, null)
+      if (st && Number(st.seq) === seq) return resolve(st)
+      if (Date.now() > deadline) return resolve(null)
+      setTimeout(tick, 300)
+    }
+    tick()
+  })
+}
+
+function body(req) {
+  return new Promise((resolve) => {
+    let raw = ""
+    req.on("data", (c) => { raw += c; if (raw.length > 1e6) req.destroy() })
+    req.on("end", () => { try { resolve(JSON.parse(raw || "{}")) } catch { resolve({}) } })
+  })
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`)
+  try {
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+      const file = join(HERE, "board.html")
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
+      res.end(readFileSync(file))
+      return
+    }
+    if (req.method === "GET" && url.pathname === "/api/overview") {
+      const c = readJson(CONFIG_FILE, {})
+      return json(res, 200, {
+        sessions: sessions(),
+        models: c.models || {},
+        care: c.care || {},
+        usage: usageStats(7),
+        backup: { size: backupSize(), last: backupLog(3) },
+        now: new Date().toISOString(),
+      })
+    }
+    if (req.method === "GET" && url.pathname === "/api/memory") {
+      const q = url.searchParams.get("q") || ""
+      const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 20))
+      return json(res, 200, { rows: memorySearch(q, limit) })
+    }
+    if (req.method === "GET" && url.pathname === "/api/diary") {
+      return json(res, 200, { list: diaryList(14) })
+    }
+    if (req.method === "GET" && url.pathname === "/api/day") {
+      return json(res, 200, dayView(url.searchParams.get("date") || ""))
+    }
+    if (req.method === "GET" && url.pathname === "/api/logs") {
+      const target = url.searchParams.get("target") || "qq"
+      const n = Number(url.searchParams.get("n")) || 120
+      return json(res, 200, { text: tail(target, n) })
+    }
+    if (req.method === "POST" && url.pathname === "/api/model") {
+      const data = await body(req)
+      const target = String(data.target || "")
+      const value = String(data.value || "")
+      if (!target || !value) return json(res, 400, { ok: false, msg: "缺少 target / value" })
+      const c = readJson(CONFIG_FILE, {})
+      const m = c.models || {}
+      const resolved = value === "local" ? m.local : value === "cloud" ? m.cloud : value
+      if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
+      const seq = Date.now()
+      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
+      const st = await waitAck(seq)
+      return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/backup") {
+      const r = backupWorld({})
+      return json(res, 200, { ok: r.ok, msg: r.msg })
+    }
+    json(res, 404, { error: "not found" })
+  } catch (e) {
+    json(res, 500, { error: String(e) })
+  }
+})
+
+server.listen(PORT, HOST, () => {
+  console.log(`lwboard → http://${HOST}:${PORT}`)
+})
