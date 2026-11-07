@@ -186,9 +186,14 @@ lwctl backup [--private]           # 世界数据快照到 worlds/backup（git �
 lwctl backups                      # 看最近快照
 lwctl tail [qq|home|debug] [行数]   # 看日志
 lwctl restart [qq|home|all]        # 重启常驻窗口
+lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次数
 ```
 
 原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` 下发命令到 `control.json`，目标进程轮询后调用 `pi.setModel` 并回执到 `control-state.json`。切到在线时同样会打开该会话的机密抽屉。
+
+### 用量统计
+
+`lwctl usage [天数]` 直接扫 `pi-sessions/*.jsonl` 里的 assistant usage：按天统计请求数、输入/输出/缓存读 token、费用、云端 vs 本地请求数，以及模型切换次数。
 
 ### 世界快照
 
