@@ -7,6 +7,8 @@
 
 自包含插件，**零运行时依赖**；靠 opencode v2 的插件钩子、共享服务 HTTP API 和 tmux 工作。只支持 **Linux**（家会话自愈用 tmux，浏览器脚本依赖 Linux 的 Chrome / X）。
 
+> 另一条分支 **`pi-agent`** 是 pi 1.5 的移植版（本地/在线模型热切换、免费联网搜索、机密抽屉），安装方式见该分支的 README。
+
 ## 目录
 
 - [功能](#功能)
@@ -57,8 +59,19 @@
 
 > Node 版本不是随便写的：插件用 `node:sqlite`（22.13 起免 flag），桥接用全局 `WebSocket`（22 起）。Node 20 装得上但插件加载会直接失败。
 
+### 0. 先装 opencode
+
 ```bash
-git clone <本仓库> life-world && cd life-world
+curl -fsSL https://opencode.ai/install | bash
+opencode --version   # 需要 v2
+```
+
+装不上就看官方文档：<https://opencode.ai/docs>。装完确认 `opencode` 在 PATH 里。
+
+### 1. 装 life-world
+
+```bash
+git clone -b main https://github.com/lynxu95/life-world life-world && cd life-world
 ./install.sh --service      # 装好 + 重启服务 + 拉起 TUI
 ```
 
