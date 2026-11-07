@@ -85,6 +85,27 @@ pi          # TUI，已经带 life-world
 
 > 不要用 `pi/config.example.json` 覆盖已有的 `~/.local/share/life-world/life-world.json`；只把 `bridge` 段和 `subagent` 段按需合并。
 
+## 主动关怀
+
+`life-world.json` 的 `care` 段：
+
+```json
+"care": {
+  "enabled": true,
+  "quietStart": "23:30",
+  "quietEnd": "08:00",
+  "randomEnabled": true,
+  "randomMinGapHours": 3,
+  "randomChancePerTick": 0.02,
+  "weatherEnabled": true,
+  "weatherCity": "石家庄"
+}
+```
+
+- **安静时段**：`quietStart ~ quietEnd`（可跨午夜）内不发随机消息；
+- **随机想起**：安静时段外，距上次至少 `randomMinGapHours` 小时，每个 tick（30 秒）以 `randomChancePerTick` 概率触发一次「想起你」，角色自己决定 `reach_out` 还是 `[SILENT]`；
+- **天气**：早上兜底唤醒时用 `wttr.in` 取 `weatherCity` 的天气，附在唤醒文本里。
+
 ## 配置
 
 `~/.local/share/life-world/life-world.json`：

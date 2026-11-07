@@ -4,7 +4,11 @@
     "running": true,
     "reviewHour": 23,
     "fallbackWakeTime": "09:00",
-    "hydrate": { "hours": 48, "chars": 2000, "mapDays": 3 }
+    "hydrate": {
+      "hours": 48,
+      "chars": 2000,
+      "mapDays": 3
+    }
   },
   "bridge": {
     "enabled": true,
@@ -13,17 +17,26 @@
     "wsUrl": "ws://127.0.0.1:3001",
     "token": "",
     "privateSessionTitle": "qq-chat",
-    "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 },
+    "afterglow": {
+      "enabled": true,
+      "delayMs": 60000,
+      "maxRounds": 2
+    },
     "group": {
       "enabled": false,
-      "keywords": ["铃", "小铃"],
+      "keywords": [
+        "铃",
+        "小铃"
+      ],
       "interjectChance": 0.05,
       "cooldownMs": 8000,
       "maxPer10Min": 0,
       "bannedWords": []
     }
   },
-  "subagent": { "model": "deepseek-flash" },
+  "subagent": {
+    "model": "deepseek-flash"
+  },
   "localModel": {
     "enabled": false,
     "keepRecent": 20,
@@ -40,5 +53,15 @@
     "cloudHealthUrl": "https://api.deepseek.com/models",
     "probeTimeoutMs": 4000,
     "cooldownMs": 60000
+  },
+  "care": {
+    "enabled": true,
+    "quietStart": "23:30",
+    "quietEnd": "08:00",
+    "randomEnabled": true,
+    "randomMinGapHours": 3,
+    "randomChancePerTick": 0.02,
+    "weatherEnabled": true,
+    "weatherCity": ""
   }
 }

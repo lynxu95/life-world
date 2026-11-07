@@ -162,6 +162,24 @@ interface Config {
   subagent: { model: string }
   localModel: LocalModelOptions
   models: ModelSwitchOptions
+  care: CareOptions
+}
+
+/** 主动关怀：随机想起、天气、安静时段 */
+interface CareOptions {
+  enabled: boolean
+  /** 安静时段（跨午夜），如 23:30 ~ 08:00 */
+  quietStart: string
+  quietEnd: string
+  /** 随机想起对方 */
+  randomEnabled: boolean
+  /** 两次主动之间至少隔几小时 */
+  randomMinGapHours: number
+  /** 每个 tick（30 秒）触发概率，0.02 ≈ 25 分钟一次机会 */
+  randomChancePerTick: number
+  /** 早上叫你时带天气 */
+  weatherEnabled: boolean
+  weatherCity: string
 }
 
 function config(): Config {
@@ -171,6 +189,7 @@ function config(): Config {
     subagent: { model: "deepseek-flash" },
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
+    care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
   return {
@@ -181,13 +200,14 @@ function config(): Config {
     subagent: { ...base.subagent, ...(raw.subagent || {}) },
     localModel: { ...base.localModel, ...(raw.localModel || {}) },
     models: { ...base.models, ...(raw.models || {}) },
+    care: { ...base.care, ...(raw.care || {}) },
   }
 }
 
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -605,6 +625,30 @@ function sendTime(text: string): void {
   } catch (e) { log(`sendTime failed ${String(e)}`) }
 }
 
+// ———————— 主动关怀：安静时段 / 天气 ————————
+function inQuietHours(now: Date, care: CareOptions): boolean {
+  if (!care.quietStart || !care.quietEnd) return false
+  const toMin = (s: string) => { const [h, m] = String(s).split(":").map(Number); return (Number(h) || 0) * 60 + (Number(m) || 0) }
+  const cur = now.getHours() * 60 + now.getMinutes()
+  const a = toMin(care.quietStart)
+  const b = toMin(care.quietEnd)
+  if (a === b) return false
+  return a < b ? cur >= a && cur < b : cur >= a || cur < b
+}
+
+async function fetchWeather(city: string): Promise<string> {
+  if (!city) return ""
+  try {
+    const res = await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=j1`, { signal: AbortSignal.timeout(6000) })
+    if (!res.ok) return ""
+    const d: any = await res.json()
+    const cur = d?.current_condition?.[0]
+    if (!cur) return ""
+    const desc = cur.weatherDesc?.[0]?.value || ""
+    return `${desc}，${cur.temp_C}°C（体感 ${cur.FeelsLikeC}°C，湿度 ${cur.humidity}%）`
+  } catch { return "" }
+}
+
 /** 闹钟到点前，先切到任务指定的模型（local / cloud） */
 async function switchForAlarm(alarm: Alarm): Promise<void> {
   if (!alarm.model) return
@@ -616,7 +660,7 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
   log(`alarm model · ${result}`)
 }
 
-function tick(): void {
+async function tick(): Promise<void> {
   try {
     const c = config()
     if (!c.world.enabled || !c.world.running) return
@@ -642,6 +686,7 @@ function tick(): void {
       writeWorld(fresh)
     }
     if (due.length) return
+    maybeRandomCare()
     // 早上兜底
     if (state.lastWake === today) return
     if (hour >= c.world.reviewHour) return
@@ -651,9 +696,28 @@ function tick(): void {
     const [fh, fm] = c.world.fallbackWakeTime.split(":").map((x) => Number(x) || 0)
     const mins = hour * 60 + now.getMinutes()
     if (mins < fh * 60 + fm || mins >= fh * 60 + fm + 240) return
-    sendTime(`【我的时间】早上了，新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。`)
+    const weather = c.care.enabled && c.care.weatherEnabled ? await fetchWeather(c.care.weatherCity) : ""
+    sendTime(`【我的时间】早上了，新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
     writeWorld({ ...state, lastWake: today })
   } catch (e) { log(`tick failed ${String(e)}`) }
+}
+
+/** 主动关怀：安静时段之外，隔一阵随机想起对方 */
+function maybeRandomCare(): void {
+  try {
+    const c = config()
+    if (!c.care.enabled || !c.care.randomEnabled) return
+    if (!c.world.enabled || !c.world.running) return
+    const now = new Date()
+    if (inQuietHours(now, c.care)) return
+    const state = readWorld()
+    const last = state.lastRandom ? Date.parse(state.lastRandom) : 0
+    const gap = Math.max(1, Number(c.care.randomMinGapHours) || 3) * 3_600_000
+    if (Date.now() - last < gap) return
+    if (Math.random() >= Math.max(0, Math.min(1, Number(c.care.randomChancePerTick) || 0.02))) return
+    writeWorld({ ...state, lastRandom: now.toISOString() })
+    sendTime("【想起你】这会儿没在聊天，但你忽然想起了对方。想发就写一两句，用 reach_out 发到 QQ；不想打扰就只回 [SILENT]。")
+  } catch (e) { log(`random care failed ${String(e)}`) }
 }
 
 let piRef: unknown
