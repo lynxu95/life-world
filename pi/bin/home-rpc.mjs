@@ -10,7 +10,7 @@
  *   TZ=Asia/Shanghai node home-rpc.mjs
  *   TEST_MS=90000 node home-rpc.mjs    # 测试时自动退出
  */
-import { appendFileSync, mkdirSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
@@ -25,6 +25,13 @@ const MODEL = process.env.LIFE_WORLD_MODEL || "deepseek-flash"
 const TZ = process.env.TZ || "Asia/Shanghai"
 const SESSION_DIR = join(ROOT, "pi-sessions")
 mkdirSync(SESSION_DIR, { recursive: true })
+// 日志超过 5MB 就轮转
+try {
+  if (existsSync(LOG) && statSync(LOG).size > 5 * 1024 * 1024) {
+    try { if (existsSync(`${LOG}.1`)) renameSync(`${LOG}.1`, `${LOG}.2`) } catch { /* ignore */ }
+    renameSync(LOG, `${LOG}.1`)
+  }
+} catch { /* ignore */ }
 
 function log(...args) {
   const line = `[${new Date().toISOString()}] ${args.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")}`

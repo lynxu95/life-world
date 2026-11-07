@@ -68,5 +68,13 @@
     "enabled": true,
     "hour": 4,
     "includePrivate": false
+  },
+  "guard": {
+    "enabled": true,
+    "staleSeconds": 180,
+    "cooldownMinutes": 10
+  },
+  "cleanup": {
+    "tmpMaxAgeHours": 72
   }
 }

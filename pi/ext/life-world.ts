@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -164,6 +164,8 @@ interface Config {
   models: ModelSwitchOptions
   care: CareOptions
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
+  guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number }
+  cleanup: { tmpMaxAgeHours: number }
 }
 
 /** 主动关怀：随机想起、天气、安静时段 */
@@ -192,6 +194,8 @@ function config(): Config {
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
     backup: { enabled: true, hour: 4, includePrivate: false },
+    guard: { enabled: true, staleSeconds: 180, cooldownMinutes: 10 },
+    cleanup: { tmpMaxAgeHours: 72 },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
   return {
@@ -204,13 +208,15 @@ function config(): Config {
     models: { ...base.models, ...(raw.models || {}) },
     care: { ...base.care, ...(raw.care || {}) },
     backup: { ...base.backup, ...(raw.backup || {}) },
+    guard: { ...base.guard, ...(raw.guard || {}) },
+    cleanup: { ...base.cleanup, ...(raw.cleanup || {}) },
   }
 }
 
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastGuard?: string; lastCleanup?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -686,6 +692,12 @@ async function tick(): Promise<void> {
         writeWorld({ ...readWorld(), lastBackup: today })
       } catch (e) { log(`backup failed ${String(e)}`) }
     }
+    // 每日清理 tmp；桥接心跳检查
+    if (state.lastCleanup !== today) {
+      cleanupTmp(c.cleanup.tmpMaxAgeHours)
+      writeWorld({ ...readWorld(), lastCleanup: today })
+    }
+    guardBridge()
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
     for (const a of due) {
@@ -712,6 +724,54 @@ async function tick(): Promise<void> {
     sendTime(`【我的时间】早上了，新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
     writeWorld({ ...state, lastWake: today })
   } catch (e) { log(`tick failed ${String(e)}`) }
+}
+
+// ———————— 守护与清理 ————————
+function rotateLog(file: string, maxBytes = 5 * 1024 * 1024): void {
+  try {
+    if (!existsSync(file)) return
+    if (statSync(file).size <= maxBytes) return
+    const old = `${file}.1`
+    try { if (existsSync(old)) unlinkSync(old) } catch { /* ignore */ }
+    renameSync(file, old)
+  } catch (e) { log(`rotateLog failed ${String(e)}`) }
+}
+
+function cleanupTmp(maxAgeHours: number): void {
+  try {
+    if (!existsSync(TMP_DIR)) return
+    const cutoff = Date.now() - Math.max(1, maxAgeHours) * 3_600_000
+    for (const f of readdirSync(TMP_DIR)) {
+      const p = join(TMP_DIR, f)
+      try { if (statSync(p).isFile() && statSync(p).mtimeMs < cutoff) unlinkSync(p) } catch { /* ignore */ }
+    }
+  } catch (e) { log(`cleanupTmp failed ${String(e)}`) }
+}
+
+/** QQ 桥接心跳超过 staleSeconds 就尝试拉起来（家会话负责守） */
+function guardBridge(): void {
+  try {
+    const c = config()
+    if (!c.guard.enabled || !c.bridge.enabled) return
+    const state = readWorld()
+    const now = Date.now()
+    const last = state.lastGuard ? Date.parse(state.lastGuard) : 0
+    if (now - last < Math.max(1, c.guard.cooldownMinutes) * 60_000) return
+    if (!existsSync(STATUS_DIR)) return
+    const fresh = readdirSync(STATUS_DIR)
+      .filter((f) => f.startsWith("qq-") && f.endsWith(".json"))
+      .some((f) => {
+        const s = readJson<{ updated?: string }>(join(STATUS_DIR, f), {})
+        return s.updated && now - Date.parse(s.updated) < Math.max(30, c.guard.staleSeconds) * 1000
+      })
+    if (fresh) return
+    writeWorld({ ...state, lastGuard: new Date(now).toISOString() })
+    const lwctl = join(ROOT, "bin", "lwctl")
+    if (!existsSync(lwctl)) return
+    log("guard · qq bridge stale, restarting")
+    const child = spawn(lwctl, ["restart", "qq"], { detached: true, stdio: "ignore", env: { ...process.env } })
+    child.unref()
+  } catch (e) { log(`guardBridge failed ${String(e)}`) }
 }
 
 /** 主动关怀：安静时段之外，隔一阵随机想起对方 */
@@ -1136,6 +1196,7 @@ export default function (pi: ExtensionAPI) {
   piRef = pi
   if (JUDGE) return // 判官：不注入、不注册工具
   if (!config().world.enabled) { log("life-world disabled · world.enabled=false"); return }
+  rotateLog(LOG_FILE)
   ensureDirs()
   loadArchived()
   // 索引回填放到后台，不挡启动

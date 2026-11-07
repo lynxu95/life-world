@@ -106,6 +106,17 @@ pi          # TUI，已经带 life-world
 - **随机想起**：安静时段外，距上次至少 `randomMinGapHours` 小时，每个 tick（30 秒）以 `randomChancePerTick` 概率触发一次「想起你」，角色自己决定 `reach_out` 还是 `[SILENT]`；
 - **天气**：早上兜底唤醒时用 `wttr.in` 取 `weatherCity` 的天气，附在唤醒文本里。
 
+## 守护与清理
+
+- **桥接守护**：家会话每个 tick 检查 `status/qq-*.json` 心跳；超过 `guard.staleSeconds` 没更新就调 `lwctl restart qq` 拉起，冷却 `guard.cooldownMinutes`。
+- **tmp 清理**：每天一次，删除 `worlds/default/tmp/` 里超过 `cleanup.tmpMaxAgeHours` 的附件。
+- **日志轮转**：`debug.log`（5MB）、`qq-bridge.log`、`home-rpc.log` 超限自动切 `.1`。
+
+```json
+"guard": { "enabled": true, "staleSeconds": 180, "cooldownMinutes": 10 },
+"cleanup": { "tmpMaxAgeHours": 72 }
+```
+
 ## 配置
 
 `~/.local/share/life-world/life-world.json`：
