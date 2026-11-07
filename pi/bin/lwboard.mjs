@@ -28,6 +28,10 @@ const PORT = Number(process.env.LW_BOARD_PORT || 8099)
 const HOST = process.env.LW_BOARD_HOST || "127.0.0.1"
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+function pidAlive(pid) {
+  if (!pid) return false
+  try { process.kill(pid, 0); return true } catch { return false }
+}
 const json = (res, code, data) => {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" })
   res.end(JSON.stringify(data))
@@ -39,6 +43,7 @@ function sessions() {
     .map((f) => readJson(join(STATUS_DIR, f), null))
     .filter((s) => s && s.roleKey)
     .map((s) => ({ roleKey: s.roleKey, model: s.model || "", updated: s.updated || "", pid: s.pid, sessionId: s.sessionId || "" }))
+    .filter((s) => pidAlive(Number(s.pid)) && Date.now() - Date.parse(s.updated || 0) < 90_000)
     .sort((a, b) => String(a.roleKey).localeCompare(String(b.roleKey)))
 }
 
@@ -165,6 +170,15 @@ const server = http.createServer(async (req, res) => {
       writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
       const st = await waitAck(seq)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/models") {
+      const data = await body(req)
+      const cfg = readJson(CONFIG_FILE, {})
+      cfg.models = cfg.models || {}
+      if (typeof data.local === "string") cfg.models.local = data.local.trim()
+      if (typeof data.cloud === "string") cfg.models.cloud = data.cloud.trim()
+      writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2))
+      return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud } })
     }
     if (req.method === "POST" && url.pathname === "/api/backup") {
       const r = backupWorld({})

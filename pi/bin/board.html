@@ -102,6 +102,17 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
   </header>
 
   <section>
+    <h2>模型设置</h2>
+    <div class="row">
+      <input type="search" id="m-local" placeholder="本地模型：provider/model">
+      <input type="search" id="m-cloud" placeholder="在线模型：provider/model">
+      <button class="primary" id="m-save">保存</button>
+      <span class="muted" id="m-hint"></span>
+    </div>
+    <div class="hint">改完保存，后续切换和重启会使用新值；正在跑的会话要切一次才生效。</div>
+  </section>
+
+  <section>
     <h2>会话</h2>
     <div class="grid" id="sessions"><div class="muted">加载中…</div></div>
     <div class="hint">切换模型会写 control.json，目标进程在 5 秒内响应；切到在线会同时打开该会话的机密抽屉。</div>
@@ -184,6 +195,9 @@ async function loadOverview() {
     $("hb-dot").className = "dot"
     $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
     renderSessions(d.sessions, d.models)
+    if (!document.activeElement || !["m-local","m-cloud"].includes(document.activeElement.id)) {
+      if (!mTouched) { $("m-local").value = d.models.local || ""; $("m-cloud").value = d.models.cloud || "" }
+    }
     renderUsage(d.usage)
     $("backup-hint").textContent = d.backup ? `快照 ${d.backup.size} · ${d.backup.last[0] || "无"}` : ""
   } catch (e) {
@@ -235,6 +249,21 @@ function renderUsage(u) {
     return `<div class="bar" title="${r.day} · ${fmt(r.input + r.output)} tokens"><div class="b" style="height:${h}%"></div><div class="d">${r.day.slice(5)}</div></div>`
   }).join("") || '<div class="muted">最近没有用量</div>'
   $("usage-hint").textContent = `云端 ${t.cloud} 次 · 本地 ${t.local} 次 · 切换 ${u.switches} 次`
+}
+
+let mTouched = false
+$("m-local").addEventListener("input", () => { mTouched = true })
+$("m-cloud").addEventListener("input", () => { mTouched = true })
+$("m-save").onclick = async () => {
+  const b = $("m-save"); b.disabled = true; b.textContent = "保存中…"
+  try {
+    const r = await getJson("/api/models", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim() }) })
+    $("m-hint").textContent = r.ok ? "已保存" : "保存失败"
+    mTouched = false
+  } catch (e) { $("m-hint").textContent = "保存失败：" + e.message }
+  b.disabled = false; b.textContent = "保存"
+  setTimeout(() => { $("m-hint").textContent = "" }, 3000)
+  loadOverview()
 }
 
 async function search() {
