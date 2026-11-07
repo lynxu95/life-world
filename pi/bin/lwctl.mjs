@@ -7,9 +7,10 @@
  *   lwctl set <target> <local|cloud|provider/model> [原因]
  *   lwctl targets
  */
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import http from "node:http"
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
 import { spawn, spawnSync } from "node:child_process"
@@ -180,7 +181,7 @@ const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`
 function cmdRestart(target) {
   const c = models()
   const model = process.env.LIFE_WORLD_MODEL || c.local || ""
-  if (model && !/^[A-Za-z0-9._/-]+$/.test(model)) {
+  if (model && !/^[A-Za-z0-9._:/@-]+$/.test(model)) {
     console.error(`模型名不合法，拒绝执行：${model}`)
     process.exit(1)
   }
@@ -214,17 +215,35 @@ const BOARD_PID = join(ROOT, "lwboard.pid")
 function pidAlive(pid) {
   try { process.kill(pid, 0); return true } catch { return false }
 }
-function cmdBoard(action = "start") {
+function readPid(file) {
+  try {
+    const pid = Number(readFileSync(file, "utf8").trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : 0
+  } catch { return 0 }
+}
+function httpAlive(port) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${port}/api/overview`, (res) => { res.resume(); resolve(true) })
+    req.on("error", () => resolve(false))
+    req.setTimeout(1500, () => { req.destroy(); resolve(false) })
+  })
+}
+async function cmdBoard(action = "start") {
   const pidFile = BOARD_PID
   if (action === "stop") {
-    if (!existsSync(pidFile)) { console.log("看板没在运行。"); return }
-    const pid = Number(readFileSync(pidFile, "utf8").trim())
+    const pid = readPid(pidFile)
+    if (!pid || !pidAlive(pid)) {
+      try { unlinkSync(pidFile) } catch { /* ignore */ }
+      console.log("看板没在运行。")
+      return
+    }
     try { process.kill(pid, "SIGTERM") } catch { /* ignore */ }
-    try { writeFileSync(pidFile, "") } catch { /* ignore */ }
+    try { unlinkSync(pidFile) } catch { /* ignore */ }
     console.log("已停止看板。")
     return
   }
-  if (existsSync(pidFile) && pidAlive(Number(readFileSync(pidFile, "utf8").trim()))) {
+  const running = readPid(pidFile)
+  if (running && pidAlive(running)) {
     console.log("看板已在运行。")
     return
   }
@@ -234,10 +253,16 @@ function cmdBoard(action = "start") {
   })
   child.unref()
   writeFileSync(pidFile, String(child.pid))
-  spawnSync("sleep", ["0.8"])
-  if (!pidAlive(child.pid)) {
-    writeFileSync(pidFile, "")
-    console.error("看板启动失败（进程已退出），检查 lwboard.log")
+  let ok = false
+  for (let i = 0; i < 20; i++) {
+    if (!pidAlive(child.pid)) break
+    if (await httpAlive(port)) { ok = true; break }
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  if (!ok) {
+    try { process.kill(child.pid, "SIGTERM") } catch { /* ignore */ }
+    try { unlinkSync(pidFile) } catch { /* ignore */ }
+    console.error("看板启动失败（进程已退出或端口没响应），检查 lwboard.log")
     process.exit(1)
   }
   console.log(`看板已启动：http://${process.env.LW_BOARD_HOST || "127.0.0.1"}:${port}`)
@@ -271,7 +296,7 @@ if (!cmd && stdin.isTTY) {
 } else if (cmd === "usage" || cmd === "stats") {
   cmdUsage(Number(arg[0]) || 7)
 } else if (cmd === "board" || cmd === "web") {
-  cmdBoard(arg[0] || "start")
+  await cmdBoard(arg[0] || "start")
 } else if (cmd === "restart") {
   cmdRestart(arg[0] || "all")
 } else {

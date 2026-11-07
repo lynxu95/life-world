@@ -66,7 +66,11 @@ export function backupSize() {
 }
 
 // 作为脚本直接调用：node world-backup.mjs [--private]
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const invokedDirectly = (() => {
+  try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url) }
+  catch { return false }
+})()
+if (invokedDirectly) {
   const r = backupWorld({ includePrivate: process.argv.includes("--private") })
   console.log(r.msg)
   process.exit(r.ok ? 0 : 2)

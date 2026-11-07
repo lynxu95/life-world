@@ -13,7 +13,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import { createRequire } from "node:module"
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
 import { usageStats } from "./usage-stats.mjs"
 
@@ -37,14 +37,18 @@ function writeAtomic(file, text) {
 }
 
 let modelsCache = { at: 0, list: [] }
+let modelsInFlight = null
+const DEFAULT_CARE = { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" }
 function piBin() {
   const candidates = [process.env.PI_BIN, join(homedir(), ".local/bin/pi"), join(homedir(), ".pi/agent/bin/pi"), "/usr/local/bin/pi", "/usr/bin/pi"]
   return candidates.find((p) => p && existsSync(p)) || ""
 }
 async function availableModels() {
   if (Date.now() - modelsCache.at < 60_000) return modelsCache.list
+  if (modelsInFlight) return modelsInFlight
   const bin = piBin()
   if (!bin) { modelsCache = { at: Date.now(), list: [] }; return [] }
+  modelsInFlight = (async () => {
   const list = await new Promise((resolve) => {
     let out = ""
     const child = spawn(bin, ["--list-models"], {
@@ -67,6 +71,8 @@ async function availableModels() {
   })
   modelsCache = { at: Date.now(), list }
   return list
+  })().finally(() => { modelsInFlight = null })
+  return modelsInFlight
 }
 
 let overviewCache = { at: 0, data: null }
@@ -193,7 +199,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         sessions: sessions(),
         models: c.models || {},
-        care: c.care || {},
+        care: { ...DEFAULT_CARE, ...(c.care || {}) },
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
         available: await availableModels(),
@@ -237,7 +243,15 @@ const server = http.createServer(async (req, res) => {
         try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
         catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
       }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
       cfg.care = cfg.care || {}
+      for (const key of ["quietStart", "quietEnd"]) {
+        if (typeof data[key] !== "string") continue
+        const v = data[key].trim()
+        if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) {
+          return json(res, 400, { ok: false, msg: `时间格式不对：${v}（要 HH:MM，例如 23:30）` })
+        }
+      }
       if (typeof data.randomEnabled === "boolean") cfg.care.randomEnabled = data.randomEnabled
       if (typeof data.quietStart === "string") cfg.care.quietStart = data.quietStart.trim()
       if (typeof data.quietEnd === "string") cfg.care.quietEnd = data.quietEnd.trim()
@@ -251,6 +265,7 @@ const server = http.createServer(async (req, res) => {
         try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
         catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
       }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
       cfg.models = cfg.models || {}
       if (typeof data.local === "string") cfg.models.local = data.local.trim()
       if (typeof data.cloud === "string") cfg.models.cloud = data.cloud.trim()

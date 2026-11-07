@@ -249,7 +249,7 @@ function config(): Config {
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -463,31 +463,55 @@ function indexRecord(r: Record_): void {
   } catch (e) { log(`indexRecord failed ${String(e)}`) }
 }
 
+/** 回填锁：避免多个会话同时灌库；10 分钟视为过期 */
+function takeBackfillLock(name: string): boolean {
+  const lock = join(ROOT, `.${name}.lock`)
+  try {
+    if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs < 600_000) return false
+    writeFileSync(lock, String(process.pid), { mode: 0o600 })
+    return true
+  } catch { return false }
+}
+function releaseBackfillLock(name: string): void {
+  try { unlinkSync(join(ROOT, `.${name}.lock`)) } catch { /* ignore */ }
+}
+
 function backfillMemoryIndex(): void {
   if (memBackfilled) return
   memBackfilled = true
-  if (ROLE !== "home") return // 回填只在 home 进程做，避免多进程抢写锁
+  if (!takeBackfillLock("backfill")) {
+    // 别的进程在灌，稍后再看
+    setTimeout(() => { memBackfilled = false }, 60_000)
+    return
+  }
   try {
     const db = openMemIndex()
     if (!db) return
+    // 旧版本只有 msg 没有 mem，补一次
+    try { db.exec("INSERT OR IGNORE INTO mem (id) SELECT id FROM msg WHERE id NOT IN (SELECT id FROM mem)") } catch { /* ignore */ }
     const all = allRecords()
     let added = 0
-    db.exec("BEGIN IMMEDIATE")
-    try {
-      const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)")
-      const insF = db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)")
-      const insM = db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)")
-      for (const r of all) {
-        const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
-        if (Number(info?.changes || 0) > 0) { insF.run(r.id, r.text); insM.run(r.id); added++ }
+    const CHUNK = 500
+    for (let i = 0; i < all.length; i += CHUNK) {
+      const slice = all.slice(i, i + CHUNK)
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)")
+        const insF = db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)")
+        const insM = db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)")
+        for (const r of slice) {
+          const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+          if (Number(info?.changes || 0) > 0) { insF.run(r.id, r.text); insM.run(r.id); added++ }
+        }
+        db.exec("COMMIT")
+      } catch (e) {
+        try { db.exec("ROLLBACK") } catch { /* ignore */ }
+        throw e
       }
-      db.exec("COMMIT")
-    } catch (e) {
-      try { db.exec("ROLLBACK") } catch { /* ignore */ }
-      throw e
     }
     if (added) log(`memory index backfilled ${added}`)
   } catch (e) { log(`backfill failed ${String(e)}`) }
+  finally { releaseBackfillLock("backfill") }
 }
 
 function ftsChatIds(query: string, from: string | undefined, to: string | undefined, role: string, limit: number): string[] {
@@ -537,10 +561,16 @@ async function getEmbedder(): Promise<any> {
       const mod: any = req("@huggingface/transformers")
       // 模型缓存放世界目录，npm 重装 node_modules 不会把模型冲掉
       try { mod.env.cacheDir = `${join(ROOT, "models")}/` } catch { /* ignore */ }
+      let timer: any
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("embedder load timeout")), 120_000)
+        if (timer && typeof timer.unref === "function") timer.unref()
+      })
       const pipe = await Promise.race([
         mod.pipeline("feature-extraction", sem.model, { dtype: sem.dtype }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("embedder load timeout")), 120_000)),
+        timeout,
       ])
+      if (timer) clearTimeout(timer)
       // 换模型就清空旧向量，避免维度不一致导致永久空结果
       const db = openMemIndex()
       if (db) {
@@ -548,6 +578,7 @@ async function getEmbedder(): Promise<any> {
         if (prev && String(prev.value) !== sem.model) {
           db.exec("DELETE FROM vec")
           log(`vec cleared · model changed ${prev.value} → ${sem.model}`)
+          setTimeout(() => { void backfillVectors() }, 5000)
         }
         db.prepare("INSERT OR REPLACE INTO meta (key,value) VALUES ('vec_model',?)").run(sem.model)
       }
@@ -625,7 +656,8 @@ async function semanticIds(query: string, limit: number): Promise<Array<{ id: st
 
 async function backfillVectors(): Promise<void> {
   const sem = config().memory.semantic
-  if (!sem.enabled || ROLE !== "home") return
+  if (!sem.enabled) return
+  if (!takeBackfillLock("vec-backfill")) return
   try {
     const db = openMemIndex()
     if (!db) return
@@ -640,6 +672,7 @@ async function backfillVectors(): Promise<void> {
     }
     if (total) log(`semantic backfill done ${total}`)
   } catch (e) { log(`backfillVectors failed ${String(e)}`) }
+  finally { releaseBackfillLock("vec-backfill") }
 }
 
 function diaryTitle(day: string): string {
@@ -977,6 +1010,7 @@ async function tick(): Promise<void> {
               if (code === 0) { writeWorld({ ...readWorld(), lastBackup: today }); log("backup · ok") }
               else log(`backup · fail exit ${code}`)
             })
+            child.on("error", (e) => log(`backup spawn failed ${String(e)}`))
             child.unref()
           }
         } catch (e) { log(`backup spawn failed ${String(e)}`) }
