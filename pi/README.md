@@ -138,6 +138,21 @@ pi          # TUI，已经带 life-world
 
 触发自动切换的规则：模型无响应（`stopReason=error`）立即切；工具连续失败两次，从本地切到云端看看情况；`/model` 手动切换由 `model_select` 同步开关抽屉。
 
+### 会话查看与热切换（lwctl）
+
+`install.sh` 会把 `lwctl` 装到 `~/.local/share/life-world/bin/`：
+
+```bash
+lwctl          # 交互菜单：列出会话 → 选一个 → 选本地/在线/自定义模型
+lwctl status   # 直接打印：qq / home / cli / group:<群号> 现在各用什么模型
+lwctl targets  # 列出当前可切换目标
+lwctl set qq cloud        # 脚本方式：把 QQ 私聊切到在线
+lwctl set home local
+lwctl set group:894742315 cloud
+```
+
+原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` 下发命令到 `control.json`，目标进程轮询后调用 `pi.setModel` 并回执到 `control-state.json`。切到在线时同样会打开该会话的机密抽屉。
+
 ### 闹钟带模型
 
 `plan_next({ note, at|after_minutes, model: "local"|"cloud" })`：到点时定时器先切到指定模型再唤醒。《模型使用规范》建议定任务时就写清楚用哪个。

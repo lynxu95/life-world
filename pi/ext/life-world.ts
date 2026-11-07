@@ -36,6 +36,10 @@ const WORLD_FILE = join(WORLD, "world.json")
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const BRIDGE_STATE = join(ROOT, "qq-bridge-state.json")
 const LOG_FILE = join(ROOT, "debug.log")
+/** 会话心跳与控制：给 lwctl 用 */
+const STATUS_DIR = join(ROOT, "status")
+const CONTROL_FILE = join(ROOT, "control.json")
+const CONTROL_STATE = join(ROOT, "control-state.json")
 const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.json")
 const TIMER_LOCK = join(WORLD, ".pi-timer.lock")
 const ROLE = process.env.LIFE_WORLD_ROLE || "cli"
@@ -966,6 +970,55 @@ export default function (pi: ExtensionAPI) {
   if (!config().world.enabled) { log("life-world disabled · world.enabled=false"); return }
   ensureDirs()
   loadArchived()
+
+  // —— lwctl：会话心跳 + 远程切换模型 ——
+  const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
+  let lastControlSeq = 0
+  const statusPayload = () => ({
+    role: ROLE,
+    roleKey,
+    channel: CHANNEL,
+    groupId: GROUP_ID,
+    pid: process.pid,
+    model: lastCtx ? modelIdOf(lastCtx) : "",
+    sessionId: lastCtx?.sessionManager?.getSessionId?.() || "",
+    sessionFile: lastCtx?.sessionManager?.getSessionFile?.() || "",
+    updated: new Date().toISOString(),
+  })
+  const writeStatus = () => {
+    try {
+      mkdirSync(STATUS_DIR, { recursive: true, mode: 0o700 })
+      atomicWrite(join(STATUS_DIR, `${roleKey}-${process.pid}.json`), JSON.stringify(statusPayload(), null, 2))
+      // 清理 10 分钟没心跳的
+      const cutoff = Date.now() - 600_000
+      for (const f of readdirSync(STATUS_DIR)) {
+        if (!f.endsWith(".json")) continue
+        try { if (statSync(join(STATUS_DIR, f)).mtimeMs < cutoff) unlinkSync(join(STATUS_DIR, f)) } catch { /* ignore */ }
+      }
+    } catch (e) { log(`writeStatus failed ${String(e)}`) }
+  }
+  const pollControl = async () => {
+    try {
+      const c = readJson<{ seq?: number; target?: string; model?: string; reason?: string }>(CONTROL_FILE, {})
+      const seq = Number(c?.seq || 0)
+      if (!seq || seq <= lastControlSeq) return
+      lastControlSeq = seq
+      if (String(c?.target || "") !== roleKey) return
+      const o = config().models
+      const wanted = String(c?.model || "")
+      const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
+      if (!target || !lastCtx) {
+        atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: false, msg: "没有可切换的上下文或模型", at: new Date().toISOString() }, null, 2))
+        return
+      }
+      const result = modelIdOf(lastCtx) === target ? `已经是 ${target} 了` : await switchTo(lastCtx, target, c?.reason || "手动切换")
+      atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, model: target, ok: result.startsWith("已切到") || result.startsWith("已经是"), msg: result, at: new Date().toISOString() }, null, 2))
+      writeStatus()
+    } catch (e) { log(`pollControl failed ${String(e)}`) }
+  }
+  writeStatus()
+  const statusTimer = setInterval(() => { writeStatus(); void pollControl() }, 5000)
+  ;(statusTimer as any).unref?.()
 
   let hydrated = false
 
