@@ -12,6 +12,8 @@ import { join } from "node:path"
 import { homedir } from "node:os"
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
+import { spawnSync } from "node:child_process"
+import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const STATUS_DIR = join(ROOT, "status")
@@ -118,6 +120,48 @@ async function interactive() {
   }
 }
 
+// —— 快照 / 日志 / 重启 ——
+function cmdBackup(args) {
+  const includePrivate = args.includes("--private")
+  const r = backupWorld({ includePrivate })
+  console.log(r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`)
+  console.log(`  目录：${r.dir}  工作区：${backupSize()}`)
+  const log = backupLog(3)
+  if (log.length) console.log(`最近快照：\n  ${log.join("\n  ")}`)
+  process.exit(r.ok ? 0 : 2)
+}
+function cmdBackupLog() {
+  const log = backupLog(10)
+  console.log(log.length ? log.join("\n") : "还没有快照；先跑 lwctl backup")
+}
+const LOG_FILES = { qq: "qq-bridge.log", home: "home-rpc.log", debug: "debug.log" }
+function cmdTail(which, n) {
+  const name = LOG_FILES[which] || LOG_FILES.qq
+  const file = join(ROOT, name)
+  if (!existsSync(file)) { console.error(`没有日志：${file}`); process.exit(1) }
+  const lines = readFileSync(file, "utf8").trimEnd().split("\n")
+  console.log(lines.slice(-(n || 30)).join("\n"))
+}
+function cmdRestart(target) {
+  const c = models()
+  const model = process.env.LIFE_WORLD_MODEL || c.local || ""
+  const piBin = process.env.PI_BIN || ""
+  const pathPrefix = piBin ? `${join(piBin, "..")}:` : "$HOME/.local/bin:$HOME/.pi/agent/bin:"
+  const run = (name, script) => {
+    const cmd = `cd ${ROOT} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${model} node ${join(ROOT, "bin", script)} 2>&1 | tee -a ${join(ROOT, `${name}.console.log`)}`
+    const has = spawnSync("tmux", ["has-session", "-t", "life-world"], { encoding: "utf8" })
+    if (has.status !== 0) {
+      spawnSync("tmux", ["new-session", "-d", "-s", "life-world", "-n", name, cmd], { encoding: "utf8" })
+      return
+    }
+    spawnSync("tmux", ["kill-window", "-t", `life-world:${name}`], { encoding: "utf8" })
+    spawnSync("tmux", ["new-window", "-t", "life-world", "-n", name, cmd], { encoding: "utf8" })
+  }
+  if (target === "qq" || target === "all") run("qq", "pi-qq-bridge.mjs")
+  if (target === "home" || target === "all") run("home", "pi-home-rpc.mjs")
+  console.log(`✓ 已重启：${target === "all" ? "qq + home" : target}（模型 ${model || "默认"}）`)
+}
+
 // —— 非交互子命令（脚本用）——
 const [cmd, ...arg] = process.argv.slice(2)
 if (!cmd && stdin.isTTY) {
@@ -137,13 +181,26 @@ if (!cmd && stdin.isTTY) {
   if (!target || !value) { console.error("用法：lwctl set <target> <local|cloud|provider/model> [原因]"); process.exit(1) }
   const ok = await applySwitch(target, value, rest.join(" "))
   process.exit(ok ? 0 : 2)
+} else if (cmd === "backup") {
+  cmdBackup(arg)
+} else if (cmd === "backups" || cmd === "snapshots") {
+  cmdBackupLog()
+} else if (cmd === "tail" || cmd === "logs") {
+  cmdTail(arg[0] || "qq", Number(arg[1]) || 30)
+} else if (cmd === "restart") {
+  cmdRestart(arg[0] || "all")
 } else {
   console.log(`lwctl · life-world 会话工具
 
-  lwctl                              交互菜单（推荐）
+  lwctl                              交互菜单（切换模型）
   lwctl status                       打印会话与模型
   lwctl targets                      列出可切换目标
   lwctl set <target> <model> [原因]  直接切换
+
+  lwctl backup [--private]           打快照到 worlds/backup（git 增量）
+  lwctl backups                      看最近快照
+  lwctl tail [qq|home|debug] [行数]  看日志
+  lwctl restart [qq|home|all]        重启常驻窗口
 
   target：qq / home / group:<群号> / cli
   model ：local / cloud / provider/model`)

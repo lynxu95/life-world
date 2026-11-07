@@ -163,6 +163,7 @@ interface Config {
   localModel: LocalModelOptions
   models: ModelSwitchOptions
   care: CareOptions
+  backup: { enabled: boolean; hour: number; includePrivate: boolean }
 }
 
 /** 主动关怀：随机想起、天气、安静时段 */
@@ -190,6 +191,7 @@ function config(): Config {
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
+    backup: { enabled: true, hour: 4, includePrivate: false },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
   return {
@@ -201,13 +203,14 @@ function config(): Config {
     localModel: { ...base.localModel, ...(raw.localModel || {}) },
     models: { ...base.models, ...(raw.models || {}) },
     care: { ...base.care, ...(raw.care || {}) },
+    backup: { ...base.backup, ...(raw.backup || {}) },
   }
 }
 
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -673,6 +676,15 @@ async function tick(): Promise<void> {
       sendTime(`【每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。`)
       writeWorld({ ...state, lastReview: today })
       return
+    }
+    // 每日快照（git 增量，存 worlds/backup）
+    if (c.backup.enabled && hour >= c.backup.hour && state.lastBackup !== today) {
+      try {
+        const mod: any = await import("../bin/world-backup.mjs")
+        const r = mod.backupWorld({ includePrivate: c.backup.includePrivate })
+        log(`backup · ${r.ok ? "ok" : "fail"} · ${r.msg}`)
+        writeWorld({ ...readWorld(), lastBackup: today })
+      } catch (e) { log(`backup failed ${String(e)}`) }
     }
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())

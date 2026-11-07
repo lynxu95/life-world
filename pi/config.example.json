@@ -63,5 +63,10 @@
     "randomChancePerTick": 0.02,
     "weatherEnabled": true,
     "weatherCity": ""
+  },
+  "backup": {
+    "enabled": true,
+    "hour": 4,
+    "includePrivate": false
   }
 }

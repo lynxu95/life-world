@@ -170,9 +170,20 @@ lwctl targets  # 列出当前可切换目标
 lwctl set qq cloud        # 脚本方式：把 QQ 私聊切到在线
 lwctl set home local
 lwctl set group:894742315 cloud
+
+lwctl backup [--private]           # 世界数据快照到 worlds/backup（git 增量）
+lwctl backups                      # 看最近快照
+lwctl tail [qq|home|debug] [行数]   # 看日志
+lwctl restart [qq|home|all]        # 重启常驻窗口
 ```
 
 原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` 下发命令到 `control.json`，目标进程轮询后调用 `pi.setModel` 并回执到 `control-state.json`。切到在线时同样会打开该会话的机密抽屉。
+
+### 世界快照
+
+`worlds/backup/` 是一个独立的 git 仓库，`lwctl backup` 把 `worlds/default` 的 identity / conversations / diary / plan / room / 表情包 / 语音 / world.json 同步进去再提交；`--private` 才带上 `机密抽屉/`。git 增量存储，重复内容不重复占空间。
+
+家会话每天 `backup.hour` 点后自动快照一次（`life-world.json` 的 `backup` 段，`includePrivate` 默认 false）。
 
 ### 闹钟带模型
 
