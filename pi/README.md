@@ -17,7 +17,7 @@
 - **联网搜索**：`web_search` 走 TinyFish keyless，免 API Key
 - **每轮状态**：`input` 事件把时间、心情、桥接状态拼进当前用户消息（不改 system，保护缓存）
 - **归档**：`message_end` 写 `conversations/YYYY-MM-DD.jsonl`
-- **记忆**：新会话首轮注入最近 48h / 2000 字 + 3 天记忆地图 + 自述
+- **记忆**：新会话首轮注入最近 48h / 2000 字 + 3 天记忆地图 + 自述；检索走 FTS5（`memory-index.db`，trigram，≥3 字 MATCH / 2 字 LIKE 回退）
 - **定时器**：`LIFE_WORLD_ROLE=home` 的进程每 30 秒检查闹钟 / 每日回顾 / 早上兜底，用 `pi.sendMessage(triggerTurn)` 唤醒
 - **QQ 桥接**：OneBot v11 正向 WS ↔ `pi --mode rpc`；私聊、余波、outbox、图片/语音/文件、基础群聊
   - 配了 `models.cloud` 时，**群聊会话优先在线模型**（判官也用在线模型），私聊仍用 `LIFE_WORLD_MODEL`（通常本地）

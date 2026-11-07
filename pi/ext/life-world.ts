@@ -6,6 +6,7 @@ import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
+import { createRequire } from "node:module"
 
 /**
  * life-world · pi 版
@@ -36,6 +37,8 @@ const WORLD_FILE = join(WORLD, "world.json")
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const BRIDGE_STATE = join(ROOT, "qq-bridge-state.json")
 const LOG_FILE = join(ROOT, "debug.log")
+/** FTS5 记忆索引（node:sqlite，trigram 分词） */
+const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
 /** 会话心跳与控制：给 lwctl 用 */
 const STATUS_DIR = join(ROOT, "status")
 const CONTROL_FILE = join(ROOT, "control.json")
@@ -261,6 +264,7 @@ function archive(message: any): void {
     archived.add(id)
     mkdirSync(CONV_DIR, { recursive: true, mode: 0o700 })
     appendFileSync(join(CONV_DIR, `${dayOf(new Date(t))}.jsonl`), `${JSON.stringify({ id, t, role, text })}\n`, { mode: 0o600 })
+    indexRecord({ id, t, role, text })
   } catch (e) { log(`archive failed ${String(e)}`) }
 }
 
@@ -296,6 +300,82 @@ function allRecords(): Record_[] {
     byId.set(r.id, r)
   }
   return order.map((id) => byId.get(id) as Record_)
+}
+
+// ———————— FTS5 记忆索引 ————————
+let memDb: any = undefined
+let memBackfilled = false
+
+function openMemIndex(): any {
+  if (memDb !== undefined) return memDb
+  try {
+    const req = createRequire(import.meta.url)
+    const { DatabaseSync } = req("node:sqlite")
+    memDb = new DatabaseSync(MEM_INDEX_FILE)
+    memDb.exec("CREATE TABLE IF NOT EXISTS msg (id TEXT PRIMARY KEY, day TEXT, t TEXT, role TEXT, text TEXT)")
+    memDb.exec("CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(id UNINDEXED, text, tokenize=trigram)")
+    log("memory index opened")
+  } catch (e) {
+    log(`memory index unavailable ${String(e)}`)
+    memDb = null
+  }
+  return memDb
+}
+
+function indexRecord(r: Record_): void {
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const info = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)").run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+    if (Number(info?.changes || 0) > 0) db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
+  } catch (e) { log(`indexRecord failed ${String(e)}`) }
+}
+
+function backfillMemoryIndex(): void {
+  if (memBackfilled) return
+  memBackfilled = true
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const all = allRecords()
+    let added = 0
+    db.exec("BEGIN")
+    const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)")
+    const insF = db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)")
+    for (const r of all) {
+      const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+      if (Number(info?.changes || 0) > 0) { insF.run(r.id, r.text); added++ }
+    }
+    db.exec("COMMIT")
+    if (added) log(`memory index backfilled ${added}`)
+  } catch (e) { log(`backfill failed ${String(e)}`) }
+}
+
+function ftsChatIds(query: string, from: string | undefined, to: string | undefined, role: string, limit: number): string[] {
+  const db = openMemIndex()
+  if (!db) return []
+  const q = String(query || "").trim()
+  if (!q) return []
+  const filters: string[] = []
+  const params: any[] = []
+  if (from) { filters.push("m.day >= ?"); params.push(from) }
+  if (to) { filters.push("m.day <= ?"); params.push(to) }
+  if (role !== "any") { filters.push("m.role = ?"); params.push(role) }
+  const where = filters.length ? ` AND ${filters.join(" AND ")}` : ""
+  try {
+    if (q.replace(/\s+/g, "").length >= 3) {
+      // trigram：3 字以上走 MATCH，前缀/子串都能命中
+      const phrase = `"${q.replace(/"/g, '""')}"`
+      const rows = db.prepare(`SELECT m.id AS id FROM msg_fts JOIN msg m ON m.id = msg_fts.id WHERE msg_fts MATCH ?${where} ORDER BY bm25(msg_fts) LIMIT ?`).all(phrase, ...params, limit)
+      return rows.map((r: any) => String(r.id))
+    }
+    // 2 字：LIKE 回退（trigram 索引仍能帮上忙）
+    const rows = db.prepare(`SELECT m.id AS id FROM msg m WHERE m.text LIKE ?${where} ORDER BY m.t DESC LIMIT ?`).all(`%${q}%`, ...params, limit)
+    return rows.map((r: any) => String(r.id))
+  } catch (e) {
+    log(`fts search failed ${String(e)}`)
+    return []
+  }
 }
 
 function diaryTitle(day: string): string {
@@ -382,15 +462,27 @@ function searchChat(query: string, from: string | undefined, to: string | undefi
   const q = queryParts(query)
   const all = allRecords()
   const hits: Array<{ i: number; score: number; at: number }> = []
-  all.forEach((r, i) => {
-    if (role !== "any" && r.role !== role) return
-    const d = dayOf(new Date(r.t))
-    if (from && d < from) return
-    if (to && d > to) return
-    const s = score(r.text, q)
-    if (s > 0) hits.push({ i, score: s, at: Date.parse(r.t) || 0 })
-  })
-  hits.sort((a, b) => b.score - a.score || b.at - a.at)
+  const byId = new Map(all.map((r, i) => [r.id, i]))
+  const ids = ftsChatIds(query, from, to, role, Math.max(limit * 6, 60))
+  if (ids.length) {
+    // FTS5 命中，按 bm25 排名
+    ids.forEach((id, rank) => {
+      const i = byId.get(id)
+      if (i === undefined) return
+      hits.push({ i, score: 1000 - rank, at: Date.parse(all[i].t) || 0 })
+    })
+  } else {
+    // 索引没建好 / 罕见查询：退回原来的双字匹配
+    all.forEach((r, i) => {
+      if (role !== "any" && r.role !== role) return
+      const d = dayOf(new Date(r.t))
+      if (from && d < from) return
+      if (to && d > to) return
+      const s = score(r.text, q)
+      if (s > 0) hits.push({ i, score: s, at: Date.parse(r.t) || 0 })
+    })
+    hits.sort((a, b) => b.score - a.score || b.at - a.at)
+  }
   const lines: string[] = []
   for (const h of hits.slice(0, limit)) {
     for (let i = Math.max(0, h.i - context); i <= Math.min(all.length - 1, h.i + context); i++) {
@@ -970,6 +1062,9 @@ export default function (pi: ExtensionAPI) {
   if (!config().world.enabled) { log("life-world disabled · world.enabled=false"); return }
   ensureDirs()
   loadArchived()
+  // 索引回填放到后台，不挡启动
+  const backfillTimer = setTimeout(() => backfillMemoryIndex(), 3000)
+  ;(backfillTimer as any).unref?.()
 
   // —— lwctl：会话心跳 + 远程切换模型 ——
   const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
@@ -1457,7 +1552,8 @@ export default function (pi: ExtensionAPI) {
       const query = String(params.query || "").trim()
       if (!query) return ok("要搜什么？")
       const limit = Math.max(1, Math.min(30, Number(params.limit) || 8))
-      const context = Math.max(0, Math.min(3, Number(params.context) ?? 1))
+      const ctxNum = Number(params.context)
+      const context = Number.isFinite(ctxNum) ? Math.max(0, Math.min(3, ctxNum)) : 1
       const from = /^\d{4}-\d{2}-\d{2}$/.test(String(params.from || "")) ? String(params.from) : undefined
       const to = /^\d{4}-\d{2}-\d{2}$/.test(String(params.to || "")) ? String(params.to) : undefined
       const role = params.role === "user" || params.role === "assistant" ? params.role : "any"

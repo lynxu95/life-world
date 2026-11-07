@@ -4,7 +4,7 @@
 
 ## 进行中
 
-- [ ] **FTS5 记忆检索**：归档时写 `memory-index.db`（node:sqlite，trigram），`memory_search` 改查索引；3 字以上 `MATCH`、2 字 `LIKE` 回退；旧数据一次性导入。
+- [x] **FTS5 记忆检索**：归档时写 `memory-index.db`（node:sqlite，trigram），`memory_search` 改查索引；3 字以上 `MATCH`、2 字 `LIKE` 回退；旧数据一次性导入。
 
 ## 下一步（已定，按序做）
 
