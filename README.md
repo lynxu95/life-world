@@ -201,6 +201,40 @@ QQ ←→ OneBot v11 正向 WS（SnowLuma / NapCat …）
 
 完整示例见 `pi/config.example.json`。不要用它覆盖已有配置，只合并需要的段。
 
+## 会话查看与热切换（lwctl）
+
+`install.sh` 会把 `lwctl` 装到 `~/.local/share/life-world/bin/`。终端里直接运行进入交互菜单：
+
+```bash
+lwctl
+```
+
+```
+=== life-world 会话 ===
+   1. home   basalt/abliterated-iq3_xxs   刚刚
+   2. qq     basalt/abliterated-iq3_xxs   刚刚
+  0. 退出    回车. 刷新
+选择会话 > 2
+--- qq（当前 basalt/abliterated-iq3_xxs）---
+  1. 本地模型  basalt/abliterated-iq3_xxs
+  2. 在线模型  deepseek/deepseek-flash
+  3. 自定义 provider/model
+切到 > 2
+✓ 已切到 deepseek/deepseek-flash
+```
+
+也可以脚本调用：
+
+```bash
+lwctl status                        # 各会话现在用什么模型
+lwctl targets                       # qq / home / cli / group:<群号>
+lwctl set qq cloud
+lwctl set home local
+lwctl set group:894742315 cloud
+```
+
+原理：每个 pi 进程每 5 秒写心跳到 `~/.local/share/life-world/status/`；`lwctl` 把命令写进 `control.json`，目标进程轮询后调用 `pi.setModel`，回执写 `control-state.json`。切到在线时同样会打开该会话的机密抽屉。
+
 ## 界面整洁
 
 - **思考块**：在 `~/.pi/agent/settings.json` 加 `"hideThinkingBlock": true`，思考过程不再显示（仍会生成，只是不占屏幕）；
