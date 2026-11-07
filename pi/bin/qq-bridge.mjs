@@ -63,7 +63,16 @@ if (!ownerQQ) { log("ownerQQ missing, exit"); process.exit(1) }
 const wsUrl = bridge.wsUrl || "ws://127.0.0.1:3001"
 const wsToken = bridge.token || ""
 const afterglowCfg = Object.assign({ enabled: true, delayMs: 60000, maxRounds: 2 }, bridge.afterglow || {})
-const groupCfg = Object.assign({ enabled: false }, bridge.group || {})
+let groupCfgCache = { at: 0, cfg: null }
+/** 群聊配置热加载：最多缓存 2 秒，改 life-world.json 立即生效 */
+function groupCfg() {
+  const now = Date.now()
+  if (groupCfgCache.cfg && now - groupCfgCache.at < 2000) return groupCfgCache.cfg
+  const live = readJson(CONFIG_FILE, {})
+  const cfg = Object.assign({ enabled: false }, (live.bridge || {}).group || {})
+  groupCfgCache = { at: now, cfg }
+  return cfg
+}
 /** 群聊优先用在线模型（配了 models.cloud 才生效），私聊仍用 LIFE_WORLD_MODEL/本地 */
 const CLOUD_MODEL = String((config.models && config.models.cloud) || "")
 const TEST_USER = process.argv[2] === "--test-user" ? (process.argv[3] || "在吗") : ""
@@ -198,7 +207,7 @@ function sendPrivate(text) {
 }
 function sendGroup(groupId, text) {
   return enqueueSend(`group:${groupId}`, async () => {
-    const banned = (Array.isArray(groupCfg.bannedWords) ? groupCfg.bannedWords : []).map((x) => String(x || "").trim()).filter(Boolean)
+    const banned = (Array.isArray(groupCfg().bannedWords) ? groupCfg().bannedWords : []).map((x) => String(x || "").trim()).filter(Boolean)
     for (const line of splitMessages(text)) {
       if (/\[SILENT\]/i.test(line)) continue
       if (banned.some((w) => line.includes(w))) { log("group filter blocked", line.slice(0, 40)); continue }
@@ -622,7 +631,7 @@ function isAtBot(msg) {
   return messageParts(msg).some((p) => p?.type === "at" && String(p?.data?.qq) === String(msg.self_id))
 }
 function groupTrigger(msg, text) {
-  const kws = Array.isArray(groupCfg.keywords) ? groupCfg.keywords : []
+  const kws = Array.isArray(groupCfg().keywords) ? groupCfg().keywords : []
   return isAtBot(msg) || kws.some((k) => String(k).trim() && text.includes(String(k).trim())) || /小铃|铃儿|@铃/.test(text)
 }
 const groupStates = new Map()
@@ -632,7 +641,7 @@ function groupState(key) {
   return st
 }
 async function handleGroup(msg) {
-  if (!groupCfg.enabled) return
+  if (!groupCfg().enabled) return
   if (Number(msg.user_id) === Number(msg.self_id)) return
   const groupId = Number(msg.group_id)
   if (!groupId) return
@@ -652,12 +661,12 @@ async function handleGroup(msg) {
     const st = groupState(key)
     const now = Date.now()
     const triggered = batch.some((m) => m.trigger)
-    const cooldown = Number(groupCfg.cooldownMs ?? 8000)
+    const cooldown = Number(groupCfg().cooldownMs ?? 8000)
     if (!triggered && cooldown > 0 && now - st.lastReplyAt < cooldown) { log("group cooldown"); return }
-    const cap = Number(groupCfg.maxPer10Min ?? 0)
+    const cap = Number(groupCfg().maxPer10Min ?? 0)
     st.replies = st.replies.filter((t) => now - t < 600000)
     if (!triggered && cap > 0 && st.replies.length >= cap) { log("group rate limit"); return }
-    if (!triggered && Math.random() >= (groupCfg.interjectChance ?? 0.05)) { log("group skip probability"); return }
+    if (!triggered && Math.random() >= (groupCfg().interjectChance ?? 0.05)) { log("group skip probability"); return }
     const judge = await judgeGroup(key, batch)
     if (judge !== "REPLY") { log("judge SKIP"); return }
     const images = []
