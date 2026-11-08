@@ -243,11 +243,52 @@ function memoryGraph(limit = 400) {
   const maxDeg = Math.max(1, ...all.map((n) => n.degree))
   for (const n of all) n.score = (n.activation / maxAct) * 0.7 + (n.degree / maxDeg) * 0.3
   all.sort((a, b) => b.score - a.score)
-  const picked = all.slice(0, Math.max(50, Math.min(1000, limit)))
+  // 特殊节点：日记、印象（不参与 400 上限挤占）
+  const diaryDir = join(WORLD, "diary")
+  const diaries = []
+  if (existsSync(diaryDir)) {
+    for (const f of readdirSync(diaryDir).filter((x) => x.endsWith(".md")).sort().slice(-14)) {
+      const body = readFileSync(join(diaryDir, f), "utf8")
+      const title = body.split("\n").map((l) => l.replace(/^[#>\s-]+/, "").trim()).find(Boolean) || ""
+      diaries.push({ id: `diary-${f.replace(/\.md$/, "")}`, kind: "diary", t: `${f.replace(/\.md$/, "")}T20:00:00`, role: "diary", content: title.slice(0, 120), subject: f.replace(/\.md$/, ""), activation: 0, degree: 0, hits: 0, score: 0.6 })
+    }
+  }
+  const impressions = parseImpressions().items.map((it, i) => {
+    const dayMatch = String(it.meta || "").match(/最后验证：\s*(\d{4}-\d{2}-\d{2})/)
+    return { id: `imp-${i}`, kind: "impression", t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: 1.2 }
+  })
+  const specials = [...diaries, ...impressions]
+  const pickedMsgs = all.slice(0, Math.max(50, Math.min(1000, limit)))
+  const picked = [...pickedMsgs, ...specials]
   const ids = new Set(picked.map((n) => n.id))
   const links = edges
     .filter((e) => ids.has(String(e.a)) && ids.has(String(e.b)))
-    .map((e) => ({ source: String(e.a), target: String(e.b), w: Number(e.w) || 0 }))
+    .map((e) => ({ source: String(e.a), target: String(e.b), w: Number(e.w) || 0, kind: "recall" }))
+  // 日记 → 当天前 5 条消息
+  const byDayList = new Map()
+  for (const n of pickedMsgs) {
+    const d = String(n.t).slice(0, 10)
+    if (!byDayList.has(d)) byDayList.set(d, [])
+    byDayList.get(d).push(n)
+  }
+  for (const d of diaries) {
+    const day = d.subject
+    const targets = (byDayList.get(day) || []).slice().sort((a, b) => b.score - a.score).slice(0, 5)
+    for (const t of targets) links.push({ source: d.id, target: t.id, w: 0.35, kind: "diary" })
+  }
+  // 印象 → 来源日期内的前 5 条消息
+  for (const im of impressions) {
+    const days = [...new Set((String(im.meta || "").match(/\d{2}-\d{2}/g) || []))]
+    let targets = []
+    if (days.length) {
+      const years = [...new Set((String(im.meta || "").match(/\d{4}-\d{2}-\d{2}/g) || []).map((x) => x.slice(0, 4)))]
+      const year = years[0] || new Date().getFullYear()
+      const wanted = new Set(days.map((md) => `${year}-${md}`))
+      targets = pickedMsgs.filter((n) => wanted.has(String(n.t).slice(0, 10)))
+    }
+    if (!targets.length) targets = pickedMsgs.slice(0, 5)
+    for (const t of targets.sort((a, b) => b.score - a.score).slice(0, 5)) links.push({ source: im.id, target: t.id, w: 0.55, kind: "impression" })
+  }
   const avgAct = picked.length ? picked.reduce((s, n) => s + n.activation, 0) / picked.length : 0
   return {
     nodes: picked,

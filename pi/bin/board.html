@@ -102,7 +102,10 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
 .brain-bar input{flex:1;min-width:140px;background:#0d1117;border:1px solid #223042;color:#e6e9ee;border-radius:8px;padding:6px 10px;font:inherit;font-size:12px}
 .brain-bar button{background:#0d1117;border:1px solid #223042;color:#dbe4ee}
 .brain-wrap{display:grid;grid-template-columns:minmax(0,1fr) 260px;min-height:460px}
-#graph{height:520px;min-width:0}
+#graph{height:520px;min-width:0;position:relative;cursor:grab}
+#graph canvas{display:block;width:100%;height:100%;touch-action:none}
+.bf{display:inline-flex;align-items:center;gap:4px;color:#a9b4c2;font-size:12px}
+.bf input{accent-color:#2dd4bf;flex:none;width:14px;min-width:0}
 .brain-detail{border-left:1px solid #1a2330;padding:12px;color:#c8d2de;font-size:13px;overflow:auto;max-height:520px}
 .brain-detail h4{margin:0 0 8px;color:#2dd4bf;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
 .brain-detail .txt{white-space:pre-wrap;word-break:break-word;line-height:1.6}
@@ -172,6 +175,9 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
     <div class="brain">
       <div class="brain-bar">
         <div class="brain-stats" id="brain-stats">加载中…</div>
+        <label class="bf"><input type="checkbox" id="f-mem" checked> 记忆</label>
+        <label class="bf"><input type="checkbox" id="f-diary" checked> 日记</label>
+        <label class="bf"><input type="checkbox" id="f-imp" checked> 印象</label>
         <input id="brain-q" placeholder="在图中搜索…">
         <button id="brain-refresh">刷新</button>
       </div>
@@ -235,7 +241,6 @@ pre.log{margin:12px 0 0;max-height:300px;overflow:auto;background:var(--panel-2)
   </section>
 </div>
 
-<script src="https://unpkg.com/3d-force-graph@1.79.1/dist/3d-force-graph.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id)
 const fmt = (n) => { n = Number(n) || 0; if (n >= 1e6) return (n/1e6).toFixed(2)+"M"; if (n >= 1e3) return (n/1e3).toFixed(1)+"k"; return String(Math.round(n)) }
@@ -443,57 +448,221 @@ $("backup").onclick = async () => {
 }
 
 
-// —— 记忆脑图 / 印象 ——
-let brainGraph = null
-let brainSearch = ""
-const ROLE_COLORS = { user: "#4fc3f7", assistant: "#2dd4bf", system: "#a78bfa" }
-function roleColor(role) { return ROLE_COLORS[role] || "#94a3b8" }
-function esc(v) { const d = document.createElement("div"); d.textContent = String(v ?? ""); return d.innerHTML }
+// —— 记忆脑图（Canvas 3D）/ 印象 ——
+const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.6, pitch: -0.25, zoom: 1, drag: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true } }
+const brainCanvas = document.createElement("canvas")
+$("graph").appendChild(brainCanvas)
+const bctx = brainCanvas.getContext("2d")
+const stars = Array.from({ length: 220 }, (_, i) => ({ x: (i * 9301 + 49297) % 233280 / 233280, y: (i * 49297 + 233) % 233280 / 233280, a: 0.1 + ((i * 37) % 60) / 300 }))
+function nodeColor(n) {
+  if (n.kind === "impression") return "#fbbf24"
+  if (n.kind === "diary") return "#f59e0b"
+  return n.role === "user" ? "#4fc3f7" : "#2dd4bf"
+}
+function nodeVisible(n) {
+  if (n.kind === "impression") return BRAIN.filters.imp
+  if (n.kind === "diary") return BRAIN.filters.diary
+  return BRAIN.filters.mem
+}
+function esc2(v) { const d = document.createElement("div"); d.textContent = String(v ?? ""); return d.innerHTML }
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) } return h >>> 0 }
+function layoutBrain() {
+  const { nodes, links } = BRAIN
+  const pos = new Map()
+  nodes.forEach((n) => {
+    const h = hashStr(n.id)
+    const theta = ((h % 1000) / 1000) * Math.PI * 2
+    const phi = (((h >> 10) % 1000) / 1000) * Math.PI
+    const r = n.kind === "impression" ? 2.2 : n.kind === "diary" ? 5.5 : 9 + ((h >> 20) % 5)
+    pos.set(n.id, { x: Math.cos(theta) * Math.sin(phi) * r, y: Math.cos(phi) * r, z: Math.sin(theta) * Math.sin(phi) * r })
+  })
+  // 印象固定在中心一圈，避免互相挤叠
+  const imps = nodes.filter((n) => n.kind === "impression")
+  imps.forEach((n, i) => {
+    const a = (i / Math.max(1, imps.length)) * Math.PI * 2 - Math.PI / 2
+    pos.set(n.id, { x: Math.cos(a) * 6.5, y: (i % 2 === 0 ? 2.2 : -2.2), z: Math.sin(a) * 6.5 })
+  })
+  const idx = new Map(nodes.map((n, i) => [n.id, i]))
+  const arr = nodes.map((n) => pos.get(n.id))
+  for (let it = 0; it < 55; it++) {
+    const disp = arr.map(() => ({ x: 0, y: 0, z: 0 }))
+    for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+      let dx = arr[i].x - arr[j].x, dy = arr[i].y - arr[j].y, dz = arr[i].z - arr[j].z
+      const d2 = dx * dx + dy * dy + dz * dz || 0.01
+      if (d2 > 100) continue
+      const f = 0.35 / d2
+      dx *= f; dy *= f; dz *= f
+      disp[i].x += dx; disp[i].y += dy; disp[i].z += dz
+      disp[j].x -= dx; disp[j].y -= dy; disp[j].z -= dz
+    }
+    for (const l of links) {
+      const a = idx.get(l.source), b = idx.get(l.target)
+      if (a === undefined || b === undefined) continue
+      let dx = arr[b].x - arr[a].x, dy = arr[b].y - arr[a].y, dz = arr[b].z - arr[a].z
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.01
+      const f = (d - 2.2) * (l.kind === "recall" ? 0.004 : 0.002)
+      dx = dx / d * f; dy = dy / d * f; dz = dz / d * f
+      disp[a].x += dx; disp[a].y += dy; disp[a].z += dz
+      disp[b].x -= dx; disp[b].y -= dy; disp[b].z -= dz
+    }
+    for (let i = 0; i < arr.length; i++) {
+      if (nodes[i].kind === "impression") continue
+      arr[i].x = arr[i].x * 0.98 + disp[i].x
+      arr[i].y = arr[i].y * 0.98 + disp[i].y
+      arr[i].z = arr[i].z * 0.98 + disp[i].z
+    }
+  }
+  BRAIN.pos = arr
+}
+function projectPoint(p, w, h) {
+  const cy = Math.cos(BRAIN.yaw), sy = Math.sin(BRAIN.yaw)
+  const cp = Math.cos(BRAIN.pitch), sp = Math.sin(BRAIN.pitch)
+  const x1 = p.x * cy - p.z * sy
+  const z1 = p.x * sy + p.z * cy
+  const y1 = p.y * cp - z1 * sp
+  const z2 = p.y * sp + z1 * cp
+  const scale = 1 / (1 + z2 * 0.055)
+  const k = 26 * scale * BRAIN.zoom
+  return { x: w / 2 + x1 * k, y: h / 2 + y1 * k, z: z2, s: scale * BRAIN.zoom }
+}
+function resizeBrain() {
+  const el = $("graph"), dpr = window.devicePixelRatio || 1
+  brainCanvas.width = el.clientWidth * dpr; brainCanvas.height = el.clientHeight * dpr
+  brainCanvas.style.width = el.clientWidth + "px"; brainCanvas.style.height = el.clientHeight + "px"
+  bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+function drawBrain() {
+  const el = $("graph"), w = el.clientWidth, h = el.clientHeight
+  if (!w || !h) return
+  const ctx = bctx
+  ctx.clearRect(0, 0, w, h)
+  const bg = ctx.createRadialGradient(w / 2, h / 2, 20, w / 2, h / 2, Math.max(w, h) * 0.7)
+  bg.addColorStop(0, "#0b1020"); bg.addColorStop(1, "#05060b")
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h)
+  for (const st of stars) { ctx.globalAlpha = st.a; ctx.fillStyle = "#9fb4c9"; ctx.fillRect(st.x * w, st.y * h, 1, 1) }
+  ctx.globalAlpha = 1
+  const idx = new Map(BRAIN.nodes.map((n, i) => [n.id, i]))
+  const proj = BRAIN.pos.map((p) => projectPoint(p, w, h))
+  const query = BRAIN.search
+  // links
+  for (const l of BRAIN.links) {
+    const a = idx.get(l.source), b = idx.get(l.target)
+    if (a === undefined || b === undefined) continue
+    const na = BRAIN.nodes[a], nb = BRAIN.nodes[b]
+    if (!nodeVisible(na) || !nodeVisible(nb)) continue
+    const pa = proj[a], pb = proj[b]
+    const depth = Math.max(0, Math.min(1, (pa.z + pb.z) / 24 + 0.5))
+    let color
+    if (l.kind === "impression") color = `rgba(251,191,36,${0.25 + (1 - depth) * 0.25})`
+    else if (l.kind === "diary") color = `rgba(245,158,11,${0.1 + (1 - depth) * 0.15})`
+    else color = `rgba(45,212,191,${0.08 + (1 - depth) * 0.12})`
+    ctx.strokeStyle = color
+    ctx.lineWidth = l.kind === "impression" ? 0.9 : 0.5
+    if (l.kind === "impression") ctx.setLineDash([3, 4])
+    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke()
+    ctx.setLineDash([])
+  }
+  // nodes far to near
+  const order = BRAIN.nodes.map((n, i) => i).filter((i) => nodeVisible(BRAIN.nodes[i])).sort((a, b) => proj[b].z - proj[a].z)
+  let labels = 0
+  for (const i of order) {
+    const n = BRAIN.nodes[i], p = proj[i]
+    const hit = query && String(n.content).toLowerCase().includes(query)
+    const dim = query && !hit
+    const base = n.kind === "impression" ? 7 : n.kind === "diary" ? 4 : 1.8 + Math.min(3, (n.score || 0) * 2)
+    const r = Math.max(1.2, base * p.s)
+    ctx.globalAlpha = dim ? 0.18 : 1
+    if (n.kind === "impression") {
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 2.6)
+      g.addColorStop(0, "rgba(255,238,180,.95)"); g.addColorStop(0.45, "rgba(251,191,36,.55)"); g.addColorStop(1, "rgba(251,191,36,0)")
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 2.6, 0, Math.PI * 2); ctx.fill()
+      ctx.strokeStyle = "rgba(253,230,138,.9)"; ctx.lineWidth = 1.2
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.7, 0, Math.PI * 2); ctx.stroke()
+      ctx.fillStyle = "#fff3c4"; ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.75, 0, Math.PI * 2); ctx.fill()
+    } else if (n.kind === "diary") {
+      ctx.fillStyle = "rgba(245,158,11,.85)"; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill()
+      ctx.strokeStyle = "rgba(245,158,11,.35)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.8, 0, Math.PI * 2); ctx.stroke()
+    } else {
+      ctx.fillStyle = hit ? "#ffffff" : nodeColor(n)
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill()
+      if (hit) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(p.x, p.y, r + 2.5, 0, Math.PI * 2); ctx.stroke() }
+    }
+    const showLabel = n.kind === "impression" || hit || BRAIN.selected === n.id || (BRAIN.zoom > 1.3 && labels < 40 && (n.kind === "diary" || (n.score || 0) > 0.25))
+    if (showLabel && !dim) {
+      labels++
+      const text = n.kind === "impression" ? `印象·${n.subject}` : n.kind === "diary" ? `日记 ${String(n.t).slice(5, 10)}` : String(n.content).slice(0, 18)
+      ctx.font = n.kind === "impression" ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
+      let lx = p.x, ly = p.y - r - 6
+      if (n.kind === "impression") {
+        const dx = p.x - w / 2, dy = p.y - h / 2
+        const len = Math.hypot(dx, dy) || 1
+        lx = p.x + (dx / len) * (r * 2.2 + 10)
+        ly = p.y + (dy / len) * (r * 2.2 + 10)
+        ctx.textAlign = dx < 0 ? "right" : "left"
+      } else { ctx.textAlign = "center" }
+      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(5,6,11,.85)"; ctx.strokeText(text, lx, ly)
+      ctx.fillStyle = n.kind === "impression" ? "#fde68a" : n.kind === "diary" ? "#fbbf24" : "#cbd5e1"
+      ctx.fillText(text, lx, ly)
+    }
+    ctx.globalAlpha = 1
+  }
+  BRAIN.proj = proj
+}
+function brainLoop() { if (!BRAIN.drag) BRAIN.yaw += 0.0014; drawBrain(); requestAnimationFrame(brainLoop) }
 function showBrainDetail(n) {
   const el = $("brain-detail")
-  el.innerHTML = `<h4>记忆节点</h4><div class="txt">${esc(n.content)}</div>
-    <div class="meta">
-      <span>时间：${esc(new Date(n.t).toLocaleString("zh-CN"))}</span>
-      <span>角色：${n.role === "user" ? "对方" : "我"}</span>
-      <span>激活：${n.activation}</span>
-      <span>命中：${n.hits} 次 · 关联：${n.degree} 条</span>
-    </div>`
+  if (n.kind === "impression") {
+    el.innerHTML = `<h4>印象 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>${esc2(n.meta || "")}</span></div>`
+  } else if (n.kind === "diary") {
+    el.innerHTML = `<h4>日记 ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div>`
+  } else {
+    el.innerHTML = `<h4>记忆节点</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>时间：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span><span>角色：${n.role === "user" ? "对方" : "我"}</span><span>激活：${n.activation}</span><span>命中：${n.hits} 次 · 关联：${n.degree} 条</span></div>`
+  }
 }
+function hitBrain(x, y) {
+  let best = null, bd = 14
+  BRAIN.nodes.forEach((n, i) => {
+    if (!nodeVisible(n) || !BRAIN.proj[i]) return
+    const p = BRAIN.proj[i], d = Math.hypot(p.x - x, p.y - y)
+    if (d < bd) { bd = d; best = n }
+  })
+  return best
+}
+brainCanvas.addEventListener("pointerdown", (e) => { BRAIN.drag = { x: e.clientX, y: e.clientY, ox: e.clientX, oy: e.clientY, moved: 0 }; brainCanvas.setPointerCapture(e.pointerId) })
+brainCanvas.addEventListener("pointermove", (e) => {
+  if (!BRAIN.drag) return
+  const dx = e.clientX - BRAIN.drag.x, dy = e.clientY - BRAIN.drag.y
+  BRAIN.drag.moved += Math.abs(dx) + Math.abs(dy)
+  BRAIN.drag.x = e.clientX; BRAIN.drag.y = e.clientY
+  BRAIN.yaw += dx * 0.006; BRAIN.pitch = Math.max(-1.2, Math.min(1.2, BRAIN.pitch + dy * 0.006))
+})
+brainCanvas.addEventListener("pointerup", (e) => {
+  const d = BRAIN.drag; BRAIN.drag = null
+  if (!d || d.moved > 6) return
+  const r = brainCanvas.getBoundingClientRect()
+  const n = hitBrain(e.clientX - r.left, e.clientY - r.top)
+  if (n) { BRAIN.selected = n.id; showBrainDetail(n) }
+})
+brainCanvas.addEventListener("wheel", (e) => { e.preventDefault(); BRAIN.zoom = Math.max(0.45, Math.min(3.2, BRAIN.zoom * (e.deltaY > 0 ? 0.92 : 1.08))) }, { passive: false })
+function toggleFilter() {
+  BRAIN.filters = { mem: $("f-mem").checked, diary: $("f-diary").checked, imp: $("f-imp").checked }
+}
+for (const id of ["f-mem", "f-diary", "f-imp"]) $(id).addEventListener("change", toggleFilter)
 async function loadBrain() {
   try {
     const d = await getJson("/api/memory-graph?limit=400")
     const st = d.stats || {}
     $("brain-stats").innerHTML = `<span>节点 <b>${st.nodes ?? 0}</b></span><span>联想边 <b>${st.edges ?? 0}</b></span><span>今日命中 <b>${st.todayAccess ?? 0}</b></span><span>展示 <b>${st.shown ?? 0}</b></span><span>印象 <b>${st.impressions ?? 0}</b></span>`
-    if (!window.ForceGraph3D) {
-      $("graph").innerHTML = '<div style="padding:20px;color:#8b95a3">3D 库没加载（需要联网）。</div>'
-      return
-    }
-    if (!brainGraph) {
-      brainGraph = ForceGraph3D()($("graph"))
-        .backgroundColor("#06070c")
-        .nodeLabel((n) => `<div style="max-width:320px;white-space:normal;background:rgba(8,12,20,.95);border:1px solid #223042;border-radius:8px;padding:8px 10px;color:#dbe4ee;font-size:12px">${esc(n.content)}</div>`)
-        .nodeColor((n) => brainSearch && String(n.content).toLowerCase().includes(brainSearch) ? "#ffffff" : roleColor(n.role))
-        .nodeVal((n) => 1 + Math.min(3, (n.score || 0) * 3))
-        .nodeOpacity(0.92)
-        .linkColor((l) => `rgba(45,212,191,${Math.min(0.7, 0.22 + (l.w || 0) * 0.6)})`)
-        .linkWidth((l) => 0.6 + (l.w || 0) * 1.8)
-        .linkOpacity(0.55)
-        .onNodeClick((n) => showBrainDetail(n))
-        .warmupTicks(40)
-        .cooldownTicks(120)
-    }
-    const nodes = d.nodes.map((n) => ({ ...n, id: n.id }))
-    const links = d.links.map((l) => ({ source: l.source, target: l.target, w: l.w }))
-    brainGraph.graphData({ nodes, links })
-    const resize = () => { if (brainGraph && $("graph")) brainGraph.width($("graph").clientWidth).height($("graph").clientHeight) }
-    resize()
+    BRAIN.nodes = d.nodes
+    BRAIN.links = d.links
+    layoutBrain()
+    resizeBrain()
   } catch (e) { $("brain-stats").textContent = "加载失败：" + e.message }
 }
-$("brain-q").addEventListener("input", () => {
-  brainSearch = $("brain-q").value.trim().toLowerCase()
-  if (brainGraph) brainGraph.nodeColor(brainGraph.nodeColor())
-})
+$("brain-q").addEventListener("input", () => { BRAIN.search = $("brain-q").value.trim().toLowerCase() })
 $("brain-refresh").onclick = loadBrain
+window.addEventListener("resize", resizeBrain)
+requestAnimationFrame(brainLoop)
 
 async function loadImpressions() {
   try {
@@ -504,8 +673,8 @@ async function loadImpressions() {
       const conf = /置信度：\s*(高|中|低)/.exec(it.meta || "")
       const cls = conf ? (conf[1] === "高" ? "conf-high" : conf[1] === "中" ? "conf-mid" : "conf-low") : "conf-low"
       const card = document.createElement("div"); card.className = "imp-card"
-      card.innerHTML = `<div class="subj">[${esc(it.subject)}]</div><div class="body">${esc(it.text)}</div>
-        <div class="meta">${conf ? `<span class="conf ${cls}">${esc(conf[1])}</span>` : ""}${esc(it.meta || "")}</div>`
+      card.innerHTML = `<div class="subj">[${esc2(it.subject)}]</div><div class="body">${esc2(it.text)}</div>
+        <div class="meta">${conf ? `<span class="conf ${cls}">${esc2(conf[1])}</span>` : ""}${esc2(it.meta || "")}</div>`
       el.append(card)
     }
   } catch (e) { $("imp-list").textContent = "加载失败：" + e.message }
