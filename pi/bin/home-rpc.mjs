@@ -60,6 +60,9 @@ child.stdout.on("data", (d) => {
       if (text) log("assistant", text.slice(0, 300))
     } else if (msg.type === "agent_settled") {
       log("agent settled")
+    } else if (msg.type === "extension_ui_request") {
+      // 无头会话没人能点面板：立即回 cancelled，避免整轮 agent 卡死
+      try { child.stdin.write(JSON.stringify({ type: "extension_ui_response", id: msg.id, cancelled: true }) + "\n") } catch { /* ignore */ }
     }
   }
 })

@@ -2146,7 +2146,8 @@ export default function (pi: ExtensionAPI) {
   })
 
 
-  addTool(pi, {
+  // home 是无头 RPC 会话，没人能点面板：干脆不注册，模型连调用机会都没有
+  if (ROLE !== "home") addTool(pi, {
     name: "gal_choice",
     label: "Gal choice panel",
     description: "终端 gal 模式用：抛一个单选面板让用户选；系统会自动追加「其他（自己输入）」，用户可自由改写方向。QQ/群聊没有面板，别用；那边把选项写成正文。",
@@ -2159,7 +2160,10 @@ export default function (pi: ExtensionAPI) {
       required: ["question", "options"],
     },
     async execute(_id: string, params: any, _signal: any, _update: any, ctx: any) {
-      if (CHANNEL !== "cli" || JUDGE) return ok("这个会话没有选项面板；把选项写成正文，让用户按数字回复。")
+      // 只有真正的 TUI 才开面板；rpc / print 等无头模式直接回文字，绝不 await UI（否则整轮永远卡住）
+      if (CHANNEL !== "cli" || JUDGE || ctx?.mode !== "tui" || !ctx?.hasUI) {
+        return ok("这个会话没有选项面板；把选项写成正文，让用户按数字回复。")
+      }
       const ui = ctx?.ui
       if (!ui?.select) return ok("当前会话没有选项面板；把选项写成正文。")
       const options = Array.isArray(params.options) ? params.options.map((x: any) => String(x)).slice(0, 3) : []
