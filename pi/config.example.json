@@ -91,6 +91,26 @@
       "hitBoost": 0.15,
       "maxStrength": 3,
       "minStrength": 0.1
+    },
+    "actr": {
+      "enabled": true,
+      "decay": 0.5,
+      "weight": 0.2,
+      "maxAccess": 50
+    },
+    "association": {
+      "enabled": true,
+      "weight": 0.1,
+      "learnRate": 0.05,
+      "decayPerDay": 0.02,
+      "maxWeight": 1,
+      "maxNeighbors": 50
+    },
+    "impression": {
+      "enabled": true,
+      "hour": 5,
+      "days": 3,
+      "maxItems": 5
     }
   }
 }

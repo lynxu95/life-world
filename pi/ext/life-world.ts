@@ -28,6 +28,8 @@ const IDENTITY_DIR = join(WORLD, "identity")
 const SELF_FILE = join(IDENTITY_DIR, "我是谁.md")
 const PROFILE_FILE = join(IDENTITY_DIR, "用户画像.md")
 const MOOD_FILE = join(IDENTITY_DIR, "心情.md")
+const IMPRESSION_FILE = join(IDENTITY_DIR, "印象.md")
+const IMPRESSION_MARK = "## 我的印象"
 const ROOM_DIR = join(WORLD, "room")
 const STICKER_DIR = join(WORLD, "表情包")
 const VOICE_DIR = join(WORLD, "语音")
@@ -166,7 +168,42 @@ interface Config {
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
   guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number; allowRestart: boolean }
   cleanup: { tmpMaxAgeHours: number }
-  memory: { semantic: SemanticOptions; decay: DecayOptions }
+  memory: { semantic: SemanticOptions; decay: DecayOptions; actr: ActrOptions; association: AssociationOptions; impression: ImpressionOptions }
+}
+
+/** ACT-R 基级激活（频率 × 近因幂律） */
+interface ActrOptions {
+  enabled: boolean
+  /** 衰减指数 d，约 0.5 */
+  decay: number
+  /** 激活通道权重（0~1） */
+  weight: number
+  /** 每个记忆保留的访问时间条数 */
+  maxAccess: number
+}
+
+/** Hebbian 联想扩散 */
+interface AssociationOptions {
+  enabled: boolean
+  /** 扩散通道权重 */
+  weight: number
+  /** 每次共同召回给边加多少 */
+  learnRate: number
+  /** 边权重每天衰减比例 */
+  decayPerDay: number
+  maxWeight: number
+  maxNeighbors: number
+}
+
+/** 印象整理任务 */
+interface ImpressionOptions {
+  enabled: boolean
+  /** 本地模型时，到这个点后才跑 */
+  hour: number
+  /** 回看最近几天 */
+  days: number
+  /** 一次最多整理几条印象 */
+  maxItems: number
 }
 
 /** 遗忘曲线：命中加强、随时间衰减（只降权，不删） */
@@ -224,6 +261,9 @@ function config(): Config {
     memory: {
       semantic: { enabled: false, model: "Xenova/jina-embeddings-v2-base-zh", dtype: "q8", backfillLimit: 5000 },
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
+      actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
+      association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50 },
+      impression: { enabled: true, hour: 5, days: 3, maxItems: 5 },
     },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
@@ -242,6 +282,9 @@ function config(): Config {
     memory: {
       semantic: { ...base.memory.semantic, ...((raw.memory || {}).semantic || {}) },
       decay: { ...base.memory.decay, ...((raw.memory || {}).decay || {}) },
+      actr: { ...base.memory.actr, ...((raw.memory || {}).actr || {}) },
+      association: { ...base.memory.association, ...((raw.memory || {}).association || {}) },
+      impression: { ...base.memory.impression, ...((raw.memory || {}).impression || {}) },
     },
   }
 }
@@ -249,7 +292,7 @@ function config(): Config {
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string; lastImpression?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -383,6 +426,9 @@ function openMemIndex(): any {
     memDb.exec("CREATE TABLE IF NOT EXISTS vec (id TEXT PRIMARY KEY, v BLOB)")
     memDb.exec("CREATE TABLE IF NOT EXISTS mem (id TEXT PRIMARY KEY, strength REAL DEFAULT 1, uses INTEGER DEFAULT 0, last_used TEXT)")
     memDb.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    memDb.exec("CREATE TABLE IF NOT EXISTS access (id TEXT, t TEXT)")
+    memDb.exec("CREATE INDEX IF NOT EXISTS idx_access_id ON access(id)")
+    memDb.exec("CREATE TABLE IF NOT EXISTS edges (a TEXT, b TEXT, w REAL DEFAULT 0, last TEXT, PRIMARY KEY(a,b))")
     log("memory index opened")
   } catch (e) {
     log(`memory index unavailable ${String(e)}`)
@@ -445,6 +491,116 @@ function decayStrengths(): void {
     writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
     log(`decay applied ×${factor.toFixed(3)} · ${days.toFixed(1)}d`)
   } catch (e) { log(`decay failed ${String(e)}`) }
+}
+
+// ———————— ACT-R 激活 / Hebbian 联想 ————————
+function accessMap(): Map<string, number[]> {
+  const out = new Map<string, number[]>()
+  try {
+    const db = openMemIndex()
+    if (!db) return out
+    for (const r of db.prepare("SELECT id, t FROM access").all()) {
+      const t = Date.parse(String(r.t)) || 0
+      if (!t) continue
+      const key = String(r.id)
+      const arr = out.get(key) || []
+      arr.push(t)
+      out.set(key, arr)
+    }
+  } catch { /* ignore */ }
+  return out
+}
+
+/** ACT-R 基级激活：B = ln(Σ age^-d)；没有访问记录返回 -Infinity */
+function actrBase(times: number[], now: number, d: number): number {
+  if (!times.length) return Number.NEGATIVE_INFINITY
+  let sum = 0
+  for (const t of times) sum += Math.pow(Math.max(0.001, (now - t) / 1000), -d)
+  return sum > 0 ? Math.log(sum) : Number.NEGATIVE_INFINITY
+}
+
+function recordAccess(ids: string[]): void {
+  if (!ids.length) return
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const cfg = config().memory.actr
+    const now = new Date().toISOString()
+    const ins = db.prepare("INSERT INTO access (id, t) VALUES (?,?)")
+    const prune = db.prepare("DELETE FROM access WHERE id = ? AND rowid NOT IN (SELECT rowid FROM access WHERE id = ? ORDER BY t DESC LIMIT ?)")
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      for (const id of [...new Set(ids)]) { ins.run(id, now); prune.run(id, id, cfg.maxAccess) }
+      db.exec("COMMIT")
+    } catch (e) {
+      try { db.exec("ROLLBACK") } catch { /* ignore */ }
+      throw e
+    }
+  } catch (e) { log(`recordAccess failed ${String(e)}`) }
+}
+
+function learnEdges(ids: string[]): void {
+  const cfg = config().memory.association
+  if (!cfg.enabled) return
+  const list = [...new Set(ids)].slice(0, 5)
+  if (list.length < 2) return
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const now = new Date().toISOString()
+    const up = db.prepare("INSERT INTO edges (a,b,w,last) VALUES (?,?,?,?) ON CONFLICT(a,b) DO UPDATE SET w = min(?, w + ?), last = excluded.last")
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i]
+          const b = list[j]
+          up.run(a, b, cfg.learnRate, now, cfg.maxWeight, cfg.learnRate)
+        }
+      }
+      db.exec("COMMIT")
+    } catch (e) {
+      try { db.exec("ROLLBACK") } catch { /* ignore */ }
+      throw e
+    }
+  } catch (e) { log(`learnEdges failed ${String(e)}`) }
+}
+
+/** 一跳扩散：从种子出发，按（衰减后的）边权给邻居加分 */
+function spreadScores(seeds: string[], cfg: AssociationOptions): Map<string, number> {
+  const out = new Map<string, number>()
+  if (!cfg.enabled || !seeds.length) return out
+  try {
+    const db = openMemIndex()
+    if (!db) return out
+    const marks = seeds.map(() => "?").join(",")
+    const rows = db.prepare(`SELECT a, b, w, last FROM edges WHERE a IN (${marks}) OR b IN (${marks})`).all(...seeds, ...seeds)
+    const seedSet = new Set(seeds)
+    const now = Date.now()
+    for (const r of rows) {
+      const days = Math.max(0, (now - (Date.parse(String(r.last)) || now)) / 86_400_000)
+      const w = Number(r.w) * Math.exp(-cfg.decayPerDay * days)
+      if (!(w > 0)) continue
+      const a = String(r.a)
+      const b = String(r.b)
+      if (seedSet.has(a)) out.set(b, (out.get(b) || 0) + w)
+      if (seedSet.has(b)) out.set(a, (out.get(a) || 0) + w)
+    }
+  } catch (e) { log(`spreadScores failed ${String(e)}`) }
+  return new Map([...out.entries()].sort((x, y) => y[1] - x[1]).slice(0, cfg.maxNeighbors))
+}
+
+/** 每日边衰减 + 清理弱边 */
+function decayEdges(): void {
+  const cfg = config().memory.association
+  if (!cfg.enabled) return
+  try {
+    const db = openMemIndex()
+    if (!db) return
+    const now = new Date().toISOString()
+    db.prepare("UPDATE edges SET w = w * max(0.01, exp(-? * max(0, julianday(?) - julianday(last)))), last = ?").run(cfg.decayPerDay, now, now)
+    db.exec("DELETE FROM edges WHERE w < 0.02")
+  } catch (e) { log(`decayEdges failed ${String(e)}`) }
 }
 
 function indexRecord(r: Record_): void {
@@ -824,8 +980,48 @@ async function searchChat(query: string, from: string | undefined, to: string | 
     })
     hits.sort((a, b) => b.score - a.score || b.at - a.at)
   }
-  // 遗忘曲线：强度高的排前面，命中本身算一次复习
-  if (config().memory.decay.enabled && hits.length) {
+  // ACT-R 激活 + Hebbian 联想；关闭时退回旧的强度衰减
+  const memCfg = config().memory
+  if (memCfg.actr.enabled && hits.length) {
+    const now = Date.now()
+    const acc = accessMap()
+    const maxBase = Math.max(...hits.map((h) => h.score), 1)
+    const seeds = [...hits].sort((a, b) => b.score - a.score).slice(0, 10).map((h) => all[h.i].id)
+    const spread = spreadScores(seeds, memCfg.association)
+    const seen = new Set(hits.map((h) => h.i))
+    const candidates: Array<{ i: number; base: number; act: number; spread: number; at: number }> = hits.map((h) => ({
+      i: h.i,
+      base: h.score / maxBase,
+      act: actrBase(acc.get(all[h.i].id) || [], now, memCfg.actr.decay),
+      spread: spread.get(all[h.i].id) || 0,
+      at: h.at,
+    }))
+    for (const [id, sc] of spread) {
+      const i = byId.get(id)
+      if (i === undefined || seen.has(i)) continue
+      const r = all[i]
+      if (role !== "any" && r.role !== role) continue
+      const d = dayOf(new Date(r.t))
+      if ((from && d < from) || (to && d > to)) continue
+      candidates.push({ i, base: 0, act: actrBase(acc.get(id) || [], now, memCfg.actr.decay), spread: sc, at: Date.parse(r.t) || 0 })
+    }
+    const finiteActs = candidates.map((c) => c.act).filter((x) => Number.isFinite(x))
+    const minA = finiteActs.length ? Math.min(...finiteActs) : 0
+    const maxA = finiteActs.length ? Math.max(...finiteActs) : 1
+    const maxSpread = Math.max(1e-9, ...candidates.map((c) => c.spread))
+    const baseW = Math.max(0, 1 - memCfg.actr.weight - memCfg.association.weight)
+    for (const c of candidates) {
+      const actNorm = Number.isFinite(c.act) ? (maxA === minA ? 0.5 : (c.act - minA) / (maxA - minA)) : 0
+      const spreadNorm = c.spread / maxSpread
+      c.base = baseW * c.base + memCfg.actr.weight * actNorm + memCfg.association.weight * spreadNorm
+    }
+    candidates.sort((a, b) => b.base - a.base || b.at - a.at)
+    const top = candidates.slice(0, limit)
+    recordAccess(top.map((c) => all[c.i].id))
+    learnEdges(top.slice(0, 5).map((c) => all[c.i].id))
+    hits.length = 0
+    for (const c of top) hits.push({ i: c.i, score: c.base, at: c.at })
+  } else if (memCfg.decay.enabled && hits.length) {
     const strengths = strengthMap()
     for (const h of hits) {
       const s = Number(strengths.get(all[h.i].id) ?? 1)
@@ -1045,7 +1241,7 @@ async function tick(): Promise<void> {
       if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) writeWorld({ ...readWorld(), lastCleanup: today })
     }
     // 记忆衰减：每天一次（lastDecay 是 ISO，按天判断）
-    if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) decayStrengths()
+    if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) { decayStrengths(); decayEdges() }
     guardBridge()
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
@@ -1060,6 +1256,18 @@ async function tick(): Promise<void> {
     }
     if (due.length) return
     maybeRandomCare()
+    // 印象整理：云端随时可跑；本地模型等到设定时间（默认 05:00）
+    const impCfg = c.memory.impression
+    if (impCfg.enabled && state.lastImpression !== today) {
+      const cur = lastCtx ? modelIdOf(lastCtx) : ""
+      const isLocal = !!c.models.local && cur === c.models.local
+      const isCloud = !!c.models.cloud && cur === c.models.cloud
+      const timeOk = isCloud || !isLocal || hour >= impCfg.hour
+      if (timeOk) {
+        sendTime(`【印象整理】用 memory_timeline / memory_search 回看最近 ${impCfg.days} 天（对话、日记、房间笔记），整理最多 ${impCfg.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明；总数不超过 ${impCfg.maxItems} 条，旧的、不再成立的删掉。\n只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`)
+        writeWorld({ ...readWorld(), lastImpression: today })
+      }
+    }
     // 早上兜底
     if (state.lastWake === today) return
     if (hour >= c.world.reviewHour) return
@@ -1717,6 +1925,11 @@ export default function (pi: ExtensionAPI) {
     // 模型使用规范：和心情一样注入（identity/模型使用规范.md，控制在 500 字内）
     const rules = readText(MODEL_RULES_FILE)
     if (rules && !prompt.includes(MODEL_RULES_MARK)) prompt = `${prompt}\n\n${MODEL_RULES_MARK}\n${rules}`
+    // 印象：只在本地/非云端注入（可能含私密内容）
+    if (!cloudActive) {
+      const imp = readText(IMPRESSION_FILE)
+      if (imp && !prompt.includes(IMPRESSION_MARK)) prompt = `${prompt}\n\n${IMPRESSION_MARK}\n${imp}`
+    }
     // 私密资料：不预加载内容，只告诉它在哪；云端模式明确别碰
     if (o.local && !prompt.includes(PRIVATE_HINT_MARK)) {
       const hint = cloudActive

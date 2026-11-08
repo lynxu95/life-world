@@ -185,6 +185,20 @@ git fetch origin && git checkout pi-agent-v2 && git pull
 - **遗忘曲线**：`mem` 表存 strength/uses/last_used；检索命中 +`hitBoost`，每天按 `halfLifeDays` 衰减；排序权重 `0.7 + 0.3*min(1, strength/2)`，只降权不删。
 - **记忆工具**：`memory_search`（关键词/时间/角色/范围/前后文）、`memory_day`（某天）、`memory_timeline`（一段时间的摘要）。
 
+### ACT-R 激活与联想扩散（adv 新增）
+
+- **ACT-R 基级激活**：每条记忆记录被检索命中的次数与时间，排序用 `B = ln(Σ (now−tₖ)^(−d))`（d≈0.5），同时体现近因与频率；关闭 `memory.actr.enabled` 则退回旧的强度衰减。
+- **Hebbian 联想**：同一次检索的前几名会两两连边，权重按 `learnRate` 增强、每日按 `decayPerDay` 衰减；检索时从种子做一跳扩散，把关联记忆带上来。
+- 只记录 `memory_search` 真正召回的记忆；每轮强制注入历史不算“访问”。
+
+### 印象整理（adv 新增）
+
+每天一次，把最近 `impression.days` 天的对话/日记/笔记交给模型归纳成最多 `impression.maxItems` 条“印象”，写进 `identity/印象.md`（带来源、置信度、最后验证）。合并更新，不重复、不写私密细节。
+
+- 当前是**云端模型**：随时可跑；
+- 当前是**本地模型**：等到 `impression.hour`（默认 05:00）之后才跑，避免白天抢算力；
+- 印象只在**非云端**会话注入（可能含私密判断）。
+
 实测配置（RTX 5060 Ti 16G + Basalt + Qwen3.8-Flash-Next IQ3_XXS，搭配 DeepSeek Flash）：插件稳定运行，日常聊天质量不错，世界探索交给在线模型。
 
 ## 本地 / 在线模型
