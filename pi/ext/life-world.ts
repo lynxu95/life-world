@@ -193,6 +193,8 @@ interface AssociationOptions {
   decayPerDay: number
   maxWeight: number
   maxNeighbors: number
+  /** 首次建图时用同一天相邻对话生成弱共现边 */
+  bootstrap: boolean
 }
 
 /** 印象整理任务 */
@@ -262,7 +264,7 @@ function config(): Config {
       semantic: { enabled: false, model: "Xenova/jina-embeddings-v2-base-zh", dtype: "q8", backfillLimit: 5000 },
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
-      association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50 },
+      association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50, bootstrap: true },
       impression: { enabled: true, hour: 5, days: 3, maxItems: 5 },
     },
   }
@@ -553,8 +555,8 @@ function learnEdges(ids: string[]): void {
     try {
       for (let i = 0; i < list.length; i++) {
         for (let j = i + 1; j < list.length; j++) {
-          const a = list[i]
-          const b = list[j]
+          const a = list[i] < list[j] ? list[i] : list[j]
+          const b = list[i] < list[j] ? list[j] : list[i]
           up.run(a, b, cfg.learnRate, now, cfg.maxWeight, cfg.learnRate)
         }
       }
@@ -601,6 +603,40 @@ function decayEdges(): void {
     db.prepare("UPDATE edges SET w = w * max(0.01, exp(-? * max(0, julianday(?) - julianday(last)))), last = ?").run(cfg.decayPerDay, now, now)
     db.exec("DELETE FROM edges WHERE w < 0.02")
   } catch (e) { log(`decayEdges failed ${String(e)}`) }
+}
+
+/** 用同一天相邻的对话生成弱共现边（Hebbian 的“先后出现”版本） */
+function bootstrapCooccurrence(db: any, all: Record_[]): void {
+  if (!config().memory.association.bootstrap) return
+  try {
+    const byDay = new Map<string, Record_[]>()
+    for (const r of all) {
+      const d = dayOf(new Date(r.t))
+      if (!byDay.has(d)) byDay.set(d, [])
+      byDay.get(d)!.push(r)
+    }
+    const ins = db.prepare("INSERT OR IGNORE INTO edges (a,b,w,last) VALUES (?,?,?,?)")
+    let added = 0
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      for (const list of byDay.values()) {
+        list.sort((a, b) => Date.parse(a.t) - Date.parse(b.t))
+        for (let i = 1; i < list.length; i++) {
+          const p = list[i - 1]
+          const c = list[i]
+          const a = p.id < c.id ? p.id : c.id
+          const b = p.id < c.id ? c.id : p.id
+          const info = ins.run(a, b, 0.02, c.t)
+          if (Number(info?.changes || 0) > 0) added++
+        }
+      }
+      db.exec("COMMIT")
+    } catch (e) {
+      try { db.exec("ROLLBACK") } catch { /* ignore */ }
+      throw e
+    }
+    if (added) log(`association bootstrap · ${added} edges`)
+  } catch (e) { log(`bootstrapCooccurrence failed ${String(e)}`) }
 }
 
 function indexRecord(r: Record_): void {
@@ -683,6 +719,7 @@ function backfillMemoryIndex(): void {
       }
     }
     if (added) log(`memory index backfilled ${added}`)
+    bootstrapCooccurrence(db, all)
   } catch (e) { log(`backfill failed ${String(e)}`) }
   finally { releaseBackfillLock("backfill") }
 }
@@ -1194,6 +1231,10 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
   log(`alarm model · ${result}`)
 }
 
+function impressionPrompt(imp: ImpressionOptions): string {
+  return `【印象整理】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明；总数不超过 ${imp.maxItems} 条，旧的、不再成立的删掉。\n只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
+}
+
 let ticking = false
 async function tick(): Promise<void> {
   if (ticking) return
@@ -1264,7 +1305,7 @@ async function tick(): Promise<void> {
         const r = await switchTo(lastCtx, o.local, "每日印象整理")
         log(`impression · switch model · ${r}`)
       }
-      sendTime(`【印象整理】用 memory_timeline / memory_search 回看最近 ${impCfg.days} 天（对话、日记、房间笔记），整理最多 ${impCfg.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明；总数不超过 ${impCfg.maxItems} 条，旧的、不再成立的删掉。\n只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`)
+      sendTime(impressionPrompt(impCfg))
       writeWorld({ ...readWorld(), lastImpression: today })
     }
     // 早上兜底
@@ -1808,12 +1849,24 @@ export default function (pi: ExtensionAPI) {
   }
   const pollControl = async () => {
     try {
-      const c = readJson<{ seq?: number; target?: string; model?: string; reason?: string }>(CONTROL_FILE, {})
+      const c = readJson<{ seq?: number; target?: string; model?: string; reason?: string; action?: string }>(CONTROL_FILE, {})
       const seq = Number(c?.seq || 0)
       if (!seq || seq <= lastControlSeq) return
       lastControlSeq = seq
       if (String(c?.target || "") !== roleKey) return
       const o = config().models
+      if (String(c?.action || "") === "impression") {
+        if (!lastCtx) {
+          atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: false, msg: "还没有可用的会话上下文", at: new Date().toISOString() }, null, 2))
+          return
+        }
+        const imp = config().memory.impression
+        if (o.local && modelIdOf(lastCtx) !== o.local) await switchTo(lastCtx, o.local, "手动印象整理")
+        sendTime(impressionPrompt(imp))
+        atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: true, msg: "印象整理已触发", at: new Date().toISOString() }, null, 2))
+        writeStatus()
+        return
+      }
       const wanted = String(c?.model || "")
       const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
       if (!target || !lastCtx) {

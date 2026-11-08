@@ -104,7 +104,8 @@
       "learnRate": 0.05,
       "decayPerDay": 0.02,
       "maxWeight": 1,
-      "maxNeighbors": 50
+      "maxNeighbors": 50,
+      "bootstrap": true
     },
     "impression": {
       "enabled": true,

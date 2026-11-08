@@ -178,6 +178,91 @@ function body(req) {
   })
 }
 
+function parseImpressions() {
+  const file = join(WORLD, "identity", "印象.md")
+  if (!existsSync(file)) return { raw: "", items: [] }
+  const raw = readFileSync(file, "utf8")
+  const items = []
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^-\s*\[([^\]]+)\]\s*(.+)$/)
+    if (!m) continue
+    const body = m[2]
+    items.push({
+      subject: m[1].trim(),
+      text: body.replace(/（[^）]*）\s*$/, "").trim(),
+      meta: (body.match(/（([^）]*)）\s*$/) || [])[1] || "",
+    })
+  }
+  return { raw, items }
+}
+
+function memoryGraph(limit = 400) {
+  const db = openMem()
+  if (!db) return { nodes: [], links: [], stats: {} }
+  const now = Date.now()
+  const d = 0.5
+  const access = new Map()
+  const todayStr = new Date().toISOString().slice(0, 10)
+  let todayAccess = 0
+  try {
+    for (const r of db.prepare("SELECT id, t FROM access").all()) {
+      const t = Date.parse(String(r.t)) || 0
+      if (!t) continue
+      const key = String(r.id)
+      if (!access.has(key)) access.set(key, [])
+      access.get(key).push(t)
+      if (String(r.t).slice(0, 10) === todayStr) todayAccess++
+    }
+  } catch { /* ignore */ }
+  const edges = (() => { try { return db.prepare("SELECT a, b, w FROM edges").all() } catch { return [] } })()
+  const degree = new Map()
+  for (const e of edges) {
+    degree.set(String(e.a), (degree.get(String(e.a)) || 0) + 1)
+    degree.set(String(e.b), (degree.get(String(e.b)) || 0) + 1)
+  }
+  const rows = (() => { try { return db.prepare("SELECT id, t, role, text FROM msg").all() } catch { return [] } })()
+  const actOf = (times) => {
+    if (!times || !times.length) return 0
+    let sum = 0
+    for (const t of times) sum += Math.pow(Math.max(0.001, (now - t) / 1000), -d)
+    return sum > 0 ? Math.log(sum) : 0
+  }
+  const all = rows.map((r) => {
+    const id = String(r.id)
+    return {
+      id,
+      t: String(r.t || ""),
+      role: String(r.role || ""),
+      content: String(r.text || "").slice(0, 240),
+      activation: Number(actOf(access.get(id)).toFixed(3)),
+      degree: degree.get(id) || 0,
+      hits: (access.get(id) || []).length,
+    }
+  })
+  const maxAct = Math.max(1e-6, ...all.map((n) => n.activation))
+  const maxDeg = Math.max(1, ...all.map((n) => n.degree))
+  for (const n of all) n.score = (n.activation / maxAct) * 0.7 + (n.degree / maxDeg) * 0.3
+  all.sort((a, b) => b.score - a.score)
+  const picked = all.slice(0, Math.max(50, Math.min(1000, limit)))
+  const ids = new Set(picked.map((n) => n.id))
+  const links = edges
+    .filter((e) => ids.has(String(e.a)) && ids.has(String(e.b)))
+    .map((e) => ({ source: String(e.a), target: String(e.b), w: Number(e.w) || 0 }))
+  const avgAct = picked.length ? picked.reduce((s, n) => s + n.activation, 0) / picked.length : 0
+  return {
+    nodes: picked,
+    links,
+    stats: {
+      nodes: rows.length,
+      edges: edges.length,
+      todayAccess,
+      avgActivation: Number(avgAct.toFixed(3)),
+      shown: picked.length,
+      impressions: parseImpressions().items.length,
+    },
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`)
   try {
@@ -258,6 +343,19 @@ const server = http.createServer(async (req, res) => {
       if (typeof data.quietEnd === "string") cfg.care.quietEnd = data.quietEnd.trim()
       writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
       return json(res, 200, { ok: true, care: cfg.care })
+    }
+    if (req.method === "GET" && url.pathname === "/api/impressions") {
+      return json(res, 200, parseImpressions())
+    }
+    if (req.method === "POST" && url.pathname === "/api/impressions/run") {
+      const seq = Date.now()
+      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target: "home", action: "impression", reason: "看板手动整理" }, null, 2))
+      const st = await waitAck(seq, 15000)
+      return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（可能没在跑）" })
+    }
+    if (req.method === "GET" && url.pathname === "/api/memory-graph") {
+      const limit = Number(url.searchParams.get("limit")) || 400
+      return json(res, 200, memoryGraph(limit))
     }
     if (req.method === "POST" && url.pathname === "/api/models") {
       const data = await body(req)
