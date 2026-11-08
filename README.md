@@ -1,7 +1,7 @@
 # life-world · pi agent adv
 
-> **这是 `adv` 分支（第 3 条 pi 分支）的 README。**
-> 分支顺序：`main` = opencode 插件版；`pi-agent` = 轻量稳定版；`pi-agent-v2` = 增强版（记忆索引 / 语义检索 / 遗忘曲线 / 模型热切换 / 机密抽屉 / 主动关怀 / 看板 / 快照与守护）；`adv` = 在 v2 上继续做实验（ACT-R 激活、Hebbian 联想、印象整理、3D 记忆星图）。adv 暂未合回 v2。
+> **这是 `pi-agent-adv` 分支（第 3 条 pi 分支）的 README。**
+> 分支顺序：`main` = opencode 插件版；`pi-agent` = 轻量稳定版；`pi-agent-v2` = 增强版（记忆索引 / 语义检索 / 遗忘曲线 / 模型热切换 / 机密抽屉 / 主动关怀 / 看板 / 快照与守护）；`pi-agent-adv` = 在 v2 上继续做实验（ACT-R 激活、Hebbian 联想、印象整理、3D 记忆星图）。`pi-agent-adv` 暂未合回 v2。
 
 给 [pi coding agent](https://github.com/earendil-works/pi) 里的陪伴角色一个会记得、会生活的世界。所有能力都跑在**本地文件 + 本地进程**上，聊天默认用本地模型，需要时借在线模型的算力。
 
@@ -70,7 +70,7 @@ pi --version   # 1.5.0+
 ### 2. 装 life-world
 
 ```bash
-git clone -b adv https://github.com/lynxu95/life-world
+git clone -b pi-agent-adv https://github.com/lynxu95/life-world
 cd life-world
 ./pi/install.sh --global     # 所有 pi 会话加载；只想在仓库目录用改成 --project
 ```
@@ -124,10 +124,10 @@ lwctl board                              # Web 看板
 
 ## 升级 / 迁移
 
-从 `pi-agent-v2` 升到 `adv`（数据目录不变）：
+从 `pi-agent-v2` 升到 `pi-agent-adv`（数据目录不变）：
 
 ```bash
-git fetch origin && git checkout adv && git pull
+git fetch origin && git checkout pi-agent-adv && git pull
 ./pi/install.sh --global
 ```
 
@@ -192,14 +192,14 @@ git fetch origin && git checkout adv && git pull
 - **遗忘曲线**：`mem` 表存 strength/uses/last_used；检索命中 +`hitBoost`，每天按 `halfLifeDays` 衰减；排序权重 `0.7 + 0.3*min(1, strength/2)`，只降权不删。
 - **记忆工具**：`memory_search`（关键词/时间/角色/范围/前后文）、`memory_day`（某天）、`memory_timeline`（一段时间的摘要）。
 
-### ACT-R 激活与联想扩散（adv 新增）
+### ACT-R 激活与联想扩散（pi-agent-adv 新增）
 
 - **ACT-R 基级激活**：每条记忆记录被检索命中的次数与时间（`access` 表），排序用 `B = ln(Σ (now−tₖ)^(−d))`（d≈0.5），同时体现近因与频率；关闭 `memory.actr.enabled` 则退回旧的强度衰减。
 - **共现自举**：首次建图时，同一天相邻的对话先生成弱边（0.03，略高于每日清理阈值 0.02），之后谁先被一起召回谁就变强；
 - **Hebbian 联想**：同一次检索的前几名会两两连边（`edges` 表），权重按 `learnRate` 增强、每日按 `decayPerDay` 衰减；检索时从种子做一跳扩散，把关联记忆带上来。
 - 只记录 `memory_search` 真正召回的记忆；每轮强制注入历史不算“访问”。看板的记忆星图直接读 `access`/`edges`，远近与亮度就是激活/关联。
 
-### 印象整理（adv 新增）
+### 印象整理（pi-agent-adv 新增）
 
 每天一次，把最近 `impression.days` 天的对话/日记/笔记交给模型归纳成最多 `impression.maxItems` 条“印象”，写进 `identity/印象.md`（带来源、置信度、最后验证）。合并更新，不重复、不写私密细节。
 
@@ -317,7 +317,7 @@ LW_BOARD_HOST=0.0.0.0 lwctl board   # 允许局域网访问
 
 ## 和其它三个分支的区别
 
-| | `main`（opencode） | `pi-agent`（轻量） | `pi-agent-v2`（增强） | `adv`（本分支，实验） |
+| | `main`（opencode） | `pi-agent`（轻量） | `pi-agent-v2`（增强） | `pi-agent-adv`（本分支，实验） |
 |---|---|---|---|---|
 | 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 | pi 1.5 扩展 |
 | 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 | 同上 + ACT-R 激活 + Hebbian 联想 |
@@ -331,7 +331,7 @@ LW_BOARD_HOST=0.0.0.0 lwctl board   # 允许局域网访问
 
 ## 已知限制
 
-- `adv` 是实验分支，暂未合回 `pi-agent-v2`；检索权重、印象调度、星图布局还可能继续调；
+- `pi-agent-adv` 是实验分支，暂未合回 `pi-agent-v2`；检索权重、印象调度、星图布局还可能继续调；
 - 记忆星图背景图是 `pi/bin/nebula.jpg`，由 lwboard 的 `/nebula.jpg` 路由提供；换图只换文件，覆盖倍数在 `board.html` 里调；
 - 语义检索是**可选**功能：依赖 480MB、模型 157MB，首次加载约 17 秒；CPU 回填历史较慢，进程需常驻一会儿才补全；
 - 语义质量取决于语料与模型，纯关键词查询仍以 FTS5 为准；
