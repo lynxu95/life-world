@@ -223,7 +223,7 @@ lwctl board status
 lwctl board stop
 ```
 
-页面提供：会话与模型（可直接点按钮热切换）、7 天用量、**记忆星图**（Canvas 3D、全屏、星云背景）、FTS5 记忆检索、日记与某天对话、日志、手动快照。印象墙仅 `pi-agent-adv` 有，本分支自动隐藏；监听地址/端口写在 `life-world.json` 的 `board` 段。
+页面提供：会话与模型（可直接点按钮热切换）、7 天用量、**AI 日程**（`plan_next` 的闹钟，随机想起不显示）、**记忆星图**（Canvas 3D、全屏、星云背景）、FTS5 记忆检索、日记与某天对话、日志、手动快照。印象墙仅 `pi-agent-adv` 有，本分支自动隐藏；监听地址/端口写在 `life-world.json` 的 `board` 段。
 
 ### 世界快照
 
