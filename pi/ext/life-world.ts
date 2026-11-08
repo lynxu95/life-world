@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -467,10 +467,22 @@ function indexRecord(r: Record_): void {
 function takeBackfillLock(name: string): boolean {
   const lock = join(ROOT, `.${name}.lock`)
   try {
-    if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs < 600_000) return false
-    writeFileSync(lock, String(process.pid), { mode: 0o600 })
+    const fd = openSync(lock, "wx", 0o600) // 原子创建，TOCTOU 交给内核
+    writeFileSync(fd, String(process.pid))
+    closeSync(fd)
     return true
-  } catch { return false }
+  } catch {
+    try {
+      if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs >= 600_000) {
+        unlinkSync(lock)
+        const fd = openSync(lock, "wx", 0o600)
+        writeFileSync(fd, String(process.pid))
+        closeSync(fd)
+        return true
+      }
+    } catch { /* ignore */ }
+    return false
+  }
 }
 function releaseBackfillLock(name: string): void {
   try { unlinkSync(join(ROOT, `.${name}.lock`)) } catch { /* ignore */ }
@@ -480,8 +492,9 @@ function backfillMemoryIndex(): void {
   if (memBackfilled) return
   memBackfilled = true
   if (!takeBackfillLock("backfill")) {
-    // 别的进程在灌，稍后再看
-    setTimeout(() => { memBackfilled = false }, 60_000)
+    // 别的进程在灌，60 秒后再试（必须重新调用，否则本进程永远不回填）
+    const t = setTimeout(() => { memBackfilled = false; backfillMemoryIndex() }, 60_000)
+    ;(t as any).unref?.()
     return
   }
   try {
@@ -578,7 +591,7 @@ async function getEmbedder(): Promise<any> {
         if (prev && String(prev.value) !== sem.model) {
           db.exec("DELETE FROM vec")
           log(`vec cleared · model changed ${prev.value} → ${sem.model}`)
-          setTimeout(() => { void backfillVectors() }, 5000)
+          { const t = setTimeout(() => { void backfillVectors() }, 5000); (t as any).unref?.() }
         }
         db.prepare("INSERT OR REPLACE INTO meta (key,value) VALUES ('vec_model',?)").run(sem.model)
       }
@@ -657,7 +670,11 @@ async function semanticIds(query: string, limit: number): Promise<Array<{ id: st
 async function backfillVectors(): Promise<void> {
   const sem = config().memory.semantic
   if (!sem.enabled) return
-  if (!takeBackfillLock("vec-backfill")) return
+  if (!takeBackfillLock("vec-backfill")) {
+    const t = setTimeout(() => { void backfillVectors() }, 60_000)
+    ;(t as any).unref?.()
+    return
+  }
   try {
     const db = openMemIndex()
     if (!db) return
@@ -1002,7 +1019,10 @@ async function tick(): Promise<void> {
         try {
           const script = join(EXT_DIR, "../bin/world-backup.mjs")
           if (existsSync(script)) {
-            writeWorld({ ...readWorld(), lastBackupAttempt: new Date().toISOString() })
+            if (!writeWorld({ ...readWorld(), lastBackupAttempt: new Date().toISOString() })) {
+              log("backup · skip (world.json not writable)")
+              return
+            }
             const child = spawn(process.execPath, [script, ...(c.backup.includePrivate ? ["--private"] : [])], {
               detached: true, stdio: "ignore", env: { ...process.env, LIFE_WORLD_ROOT: ROOT },
             })

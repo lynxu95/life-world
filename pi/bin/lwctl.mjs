@@ -221,11 +221,21 @@ function readPid(file) {
     return Number.isInteger(pid) && pid > 0 ? pid : 0
   } catch { return 0 }
 }
-function httpAlive(port) {
+function probeHost() {
+  const h = process.env.LW_BOARD_HOST || ""
+  return !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h
+}
+function httpPid(port) {
   return new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${port}/api/overview`, (res) => { res.resume(); resolve(true) })
-    req.on("error", () => resolve(false))
-    req.setTimeout(1500, () => { req.destroy(); resolve(false) })
+    const req = http.get(`http://${probeHost()}:${port}/api/overview`, (res) => {
+      let raw = ""
+      res.on("data", (d) => { raw += d })
+      res.on("end", () => {
+        try { resolve(JSON.parse(raw).pid || 0) } catch { resolve(0) }
+      })
+    })
+    req.on("error", () => resolve(-1))
+    req.setTimeout(2500, () => { req.destroy(); resolve(-1) })
   })
 }
 async function cmdBoard(action = "start") {
@@ -238,6 +248,7 @@ async function cmdBoard(action = "start") {
       return
     }
     try { process.kill(pid, "SIGTERM") } catch { /* ignore */ }
+    for (let i = 0; i < 20 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 200))
     try { unlinkSync(pidFile) } catch { /* ignore */ }
     console.log("已停止看板。")
     return
@@ -256,7 +267,9 @@ async function cmdBoard(action = "start") {
   let ok = false
   for (let i = 0; i < 20; i++) {
     if (!pidAlive(child.pid)) break
-    if (await httpAlive(port)) { ok = true; break }
+    const answerPid = await httpPid(port)
+    if (answerPid === child.pid) { ok = true; break }
+    if (answerPid !== -1 && answerPid !== 0) break // 端口被别的进程占着
     await new Promise((r) => setTimeout(r, 300))
   }
   if (!ok) {

@@ -203,6 +203,7 @@ const server = http.createServer(async (req, res) => {
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
         available: await availableModels(),
+        pid: process.pid,
         now: new Date().toISOString(),
       })
     }
@@ -291,6 +292,7 @@ const server = http.createServer(async (req, res) => {
 })
 
 process.on("unhandledRejection", (e) => console.error("[lwboard] unhandled", e))
+server.on("error", (e) => { console.error(`[lwboard] server error: ${String(e)}`) })
 server.listen(PORT, HOST, () => {
   console.log(`lwboard → http://${HOST}:${PORT}`)
 })
