@@ -222,7 +222,9 @@ lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次
 ### Web 看板
 
 ```bash
-lwctl board          # 启动：http://127.0.0.1:8099
+lwctl board                      # 启动：默认 http://127.0.0.1:8099
+lwctl board set 0.0.0.0 8099     # 保存监听地址/端口并重启
+lwctl board status               # 运行状态、地址、接口
 lwctl board stop
 ```
 

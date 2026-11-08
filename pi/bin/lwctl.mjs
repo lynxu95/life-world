@@ -7,7 +7,7 @@
  *   lwctl set <target> <local|cloud|provider/model> [原因]
  *   lwctl targets
  */
-import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 import http from "node:http"
@@ -221,13 +221,42 @@ function readPid(file) {
     return Number.isInteger(pid) && pid > 0 ? pid : 0
   } catch { return 0 }
 }
-function probeHost() {
-  const h = process.env.LW_BOARD_HOST || ""
+function boardSettings() {
+  const c = readJson(CONFIG_FILE, {})
+  const b = c && typeof c.board === "object" && c.board ? c.board : {}
+  const port = Number(process.env.LW_BOARD_PORT || b.port || 8099)
+  return {
+    host: String(process.env.LW_BOARD_HOST || b.host || "127.0.0.1"),
+    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 8099,
+  }
+}
+function writeBoardSettings(host, port) {
+  const c = readJson(CONFIG_FILE, {})
+  if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("life-world.json 不是对象，拒绝写入")
+  const b = c.board && typeof c.board === "object" ? c.board : {}
+  if (host !== undefined) b.host = host
+  if (port !== undefined) b.port = port
+  c.board = b
+  const tmp = `${CONFIG_FILE}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(c, null, 2), { mode: 0o600 })
+  renameSync(tmp, CONFIG_FILE)
+}
+function validHost(value) {
+  const h = String(value || "").trim()
+  if (!h || h.length > 253 || !/^[A-Za-z0-9_.:-]+$/.test(h)) return ""
+  return h
+}
+function validPort(value) {
+  const n = Number(value)
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0
+}
+function probeHost(host) {
+  const h = host || boardSettings().host
   return !h || h === "0.0.0.0" || h === "::" ? "127.0.0.1" : h
 }
-function httpPid(port) {
+function httpPid(port, host) {
   return new Promise((resolve) => {
-    const req = http.get(`http://${probeHost()}:${port}/api/overview`, (res) => {
+    const req = http.get(`http://${probeHost(host)}:${port}/api/overview`, (res) => {
       let raw = ""
       res.on("data", (d) => { raw += d })
       res.on("end", () => {
@@ -238,47 +267,106 @@ function httpPid(port) {
     req.setTimeout(2500, () => { req.destroy(); resolve(-1) })
   })
 }
-async function cmdBoard(action = "start") {
-  const pidFile = BOARD_PID
-  if (action === "stop") {
-    const pid = readPid(pidFile)
-    if (!pid || !pidAlive(pid)) {
-      try { unlinkSync(pidFile) } catch { /* ignore */ }
-      console.log("看板没在运行。")
-      return
-    }
-    try { process.kill(pid, "SIGTERM") } catch { /* ignore */ }
-    for (let i = 0; i < 20 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 200))
-    try { unlinkSync(pidFile) } catch { /* ignore */ }
-    console.log("已停止看板。")
-    return
+function boardUrl(host, port) { return `http://${host}:${port}` }
+async function stopBoard(quiet = false) {
+  const pid = readPid(BOARD_PID)
+  if (!pid || !pidAlive(pid)) {
+    try { unlinkSync(BOARD_PID) } catch { /* ignore */ }
+    if (!quiet) console.log("看板没在运行。")
+    return false
   }
-  const running = readPid(pidFile)
+  try { process.kill(pid, "SIGTERM") } catch { /* ignore */ }
+  for (let i = 0; i < 25 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 200))
+  if (pidAlive(pid)) { try { process.kill(pid, "SIGKILL") } catch { /* ignore */ } }
+  try { unlinkSync(BOARD_PID) } catch { /* ignore */ }
+  if (!quiet) console.log(`已停止看板（PID ${pid}）。`)
+  return true
+}
+async function startBoard() {
+  const { host, port } = boardSettings()
+  const running = readPid(BOARD_PID)
   if (running && pidAlive(running)) {
-    console.log("看板已在运行。")
-    return
+    const answer = await httpPid(port, host)
+    if (answer === running) {
+      console.log(`看板已在运行：${boardUrl(host, port)}（PID ${running}）`)
+      return true
+    }
+    await stopBoard(true)
   }
-  const port = process.env.LW_BOARD_PORT || "8099"
   const child = spawn(process.execPath, [join(ROOT, "bin", "lwboard.mjs")], {
-    detached: true, stdio: "ignore", env: { ...process.env, LW_BOARD_PORT: port },
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, LW_BOARD_HOST: host, LW_BOARD_PORT: String(port) },
   })
   child.unref()
-  writeFileSync(pidFile, String(child.pid))
+  writeFileSync(BOARD_PID, String(child.pid))
   let ok = false
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 25; i++) {
     if (!pidAlive(child.pid)) break
-    const answerPid = await httpPid(port)
-    if (answerPid === child.pid) { ok = true; break }
-    if (answerPid !== -1 && answerPid !== 0) break // 端口被别的进程占着
+    const answer = await httpPid(port, host)
+    if (answer === child.pid) { ok = true; break }
+    if (answer !== -1 && answer !== 0) break
     await new Promise((r) => setTimeout(r, 300))
   }
   if (!ok) {
     try { process.kill(child.pid, "SIGTERM") } catch { /* ignore */ }
-    try { unlinkSync(pidFile) } catch { /* ignore */ }
-    console.error("看板启动失败（进程已退出或端口没响应），检查 lwboard.log")
-    process.exit(1)
+    try { unlinkSync(BOARD_PID) } catch { /* ignore */ }
+    console.error(`看板启动失败（${boardUrl(host, port)} 没响应）；检查端口占用或监听地址是否存在`)
+    return false
   }
-  console.log(`看板已启动：http://${process.env.LW_BOARD_HOST || "127.0.0.1"}:${port}`)
+  console.log(`看板已启动：${boardUrl(host, port)}（PID ${child.pid}）`)
+  if (host === "0.0.0.0" || host === "::") console.log("  监听所有网卡，局域网可访问；看板没有登录鉴权，注意网络环境。")
+  return true
+}
+async function boardStatus() {
+  const { host, port } = boardSettings()
+  const pid = readPid(BOARD_PID)
+  const alive = !!pid && pidAlive(pid)
+  console.log(`看板：${alive ? "运行中" : "未运行"}`)
+  console.log(`  地址：${boardUrl(host, port)}`)
+  if (pid) console.log(`  PID：${pid}${alive ? "" : "（已失效）"}`)
+  if (alive) {
+    const answer = await httpPid(port, host)
+    if (answer === pid) console.log("  接口：正常（/api/overview 有响应）")
+    else console.log(`  接口：异常（${answer === -1 ? "连接失败" : `响应 PID ${answer}`}）`)
+  }
+  return alive
+}
+async function cmdBoard(action = "start", arg = []) {
+  if (action === "stop" || action === "off") { await stopBoard(false); return }
+  if (action === "restart") { await stopBoard(true); await startBoard(); return }
+  if (action === "status") { await boardStatus(); return }
+  if (action === "host" || action === "port" || action === "set") {
+    let host, port
+    if (action === "host") {
+      host = validHost(arg[0])
+      if (!host) { console.error("地址不合法，例如 127.0.0.1 / 0.0.0.0 / 192.168.0.195"); process.exit(1) }
+    } else if (action === "port") {
+      port = validPort(arg[0])
+      if (!port) { console.error("端口不合法，范围 1-65535"); process.exit(1) }
+    } else {
+      host = validHost(arg[0])
+      port = validPort(arg[1])
+      if (!host || !port) { console.error("用法：lwctl board set <地址> <端口>"); process.exit(1) }
+    }
+    try { writeBoardSettings(host, port) }
+    catch (e) { console.error(`写入配置失败：${String(e)}`); process.exit(1) }
+    const cur = boardSettings()
+    console.log(`已保存看板设置：${boardUrl(cur.host, cur.port)}`)
+    if (process.env.LW_BOARD_HOST || process.env.LW_BOARD_PORT) {
+      console.log("  注意：环境变量 LW_BOARD_HOST / LW_BOARD_PORT 优先级更高，当前仍可能被环境变量覆盖。")
+    }
+    const pid = readPid(BOARD_PID)
+    if (pid && pidAlive(pid)) {
+      console.log("  看板正在运行，按新设置重启…")
+      await stopBoard(true)
+      await startBoard()
+    } else {
+      console.log("  看板没在运行；下次 lwctl board start 会用新设置。")
+    }
+    return
+  }
+  await startBoard()
 }
 
 // —— 非交互子命令（脚本用）——
@@ -309,7 +397,7 @@ if (!cmd && stdin.isTTY) {
 } else if (cmd === "usage" || cmd === "stats") {
   cmdUsage(Number(arg[0]) || 7)
 } else if (cmd === "board" || cmd === "web") {
-  await cmdBoard(arg[0] || "start")
+  await cmdBoard(arg[0] || "start", arg.slice(1))
 } else if (cmd === "restart") {
   cmdRestart(arg[0] || "all")
 } else {
@@ -325,7 +413,10 @@ if (!cmd && stdin.isTTY) {
   lwctl tail [qq|home|debug] [行数]  看日志
   lwctl restart [qq|home|all]        重启常驻窗口
   lwctl usage [天数]                 用量统计（token / 云端本地 / 切换）
-  lwctl board [start|stop]           Web 看板（http://127.0.0.1:8099）
+  lwctl board [start|stop|restart|status]  Web 看板
+  lwctl board set <地址> <端口>      保存监听设置并重启（如 0.0.0.0 8099）
+  lwctl board host <地址>            只改监听地址（0.0.0.0 = 局域网可访问）
+  lwctl board port <端口>            只改监听端口
 
   target：qq / home / group:<群号> / cli
   model ：local / cloud / provider/model`)

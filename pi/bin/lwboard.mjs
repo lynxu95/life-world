@@ -25,8 +25,14 @@ const STATUS_DIR = join(ROOT, "status")
 const CONTROL_FILE = join(ROOT, "control.json")
 const CONTROL_STATE = join(ROOT, "control-state.json")
 const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
-const PORT = Number(process.env.LW_BOARD_PORT || 8099)
-const HOST = process.env.LW_BOARD_HOST || "127.0.0.1"
+const boardCfg = (() => {
+  try {
+    const c = JSON.parse(readFileSync(CONFIG_FILE, "utf8"))
+    return c && typeof c.board === "object" && c.board ? c.board : {}
+  } catch { return {} }
+})()
+const PORT = Number(process.env.LW_BOARD_PORT || boardCfg.port || 8099) || 8099
+const HOST = String(process.env.LW_BOARD_HOST || boardCfg.host || "127.0.0.1")
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
 function writeAtomic(file, text) {

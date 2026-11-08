@@ -142,6 +142,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 ```json
 {
   "world": { "enabled": true, "running": true, "reviewHour": 23, "fallbackWakeTime": "09:00" },
+  "board": { "host": "127.0.0.1", "port": 8099 },
   "bridge": {
     "enabled": true,
     "ownerQQ": 123456789,
@@ -181,7 +182,8 @@ git fetch origin && git checkout pi-agent-adv && git pull
 
 - 总开关：`world.enabled=false` 会让扩展整体停用（需重启 pi）；
 - 本地模型留空：热切换的 local 目标失效、机密抽屉停用；
-- 在线模型留空：群聊回落到 `LIFE_WORLD_MODEL`。
+- 在线模型留空：群聊回落到 `LIFE_WORLD_MODEL`；
+- `board.host/port`：看板监听地址与端口；`lwctl board set` 会自动保存并重启，`LW_BOARD_HOST` / `LW_BOARD_PORT` 环境变量优先级更高。
 
 ## 记忆系统
 
@@ -277,7 +279,10 @@ lwctl backup --reset        # 删除快照目录（手动清理）
 lwctl tail [qq|home|debug]  # 看日志
 lwctl restart [qq|home|all] # 重启常驻窗口
 lwctl usage [天数]           # token/费用/云端本地/切换次数
-lwctl board [start|stop]    # Web 看板
+lwctl board [start|stop|restart|status]  # Web 看板
+lwctl board set <地址> <端口>             # 保存监听设置并重启（如 0.0.0.0 8099）
+lwctl board host <地址>                   # 只改监听地址（0.0.0.0 = 局域网）
+lwctl board port <端口>                   # 只改监听端口
 ```
 
 心跳：每个 pi 进程每 5 秒写 `status/<role>-<pid>.json`；看板/lwctl 只显示 PID 存活且 90 秒内有过心跳的会话。`lwctl set` 通过 `control.json` 下发，目标进程回执到 `control-state.json`。
@@ -285,9 +290,15 @@ lwctl board [start|stop]    # Web 看板
 ## Web 看板
 
 ```bash
-lwctl board            # http://127.0.0.1:8099
-LW_BOARD_HOST=0.0.0.0 lwctl board   # 允许局域网访问
+lwctl board                     # 默认 http://127.0.0.1:8099
+lwctl board set 0.0.0.0 8099    # 保存为局域网可访问，并重启看板
+lwctl board host 0.0.0.0        # 只改监听地址
+lwctl board port 8098           # 只改监听端口
+lwctl board status              # 看运行状态、地址、接口是否正常
+lwctl board stop                # 停止
 ```
+
+监听地址和端口写在 `life-world.json` 的 `board` 段；`LW_BOARD_HOST` / `LW_BOARD_PORT` 环境变量优先级更高，适合临时覆盖。
 
 页面：会话与模型切换、模型设置（下拉自 `pi --list-models`）、主动关怀开关、7 天用量、**记忆星图**（Canvas 3D 投影 + 星云背景图（压暗/模糊/暗角，跟随星图一起旋转），可拖拽旋转/滚轮缩放/**全屏**：记忆点按角色/类型着色，大小=激活/关联；日记金色；**印象是带光环的大星**，沿中心环排列、常显对象名，并用金色虚线连回**真实来源日期**的记忆；点任意星看原文）、**印象墙**（含「立即整理」，不影响 05:00 的每日整理）、FTS5 记忆检索、日记与某天对话、日志、手动快照。版面为「主视区 + 右侧控制栏」，窄屏自动单列。
 
