@@ -103,6 +103,22 @@ function sessions() {
     .filter((s) => pidAlive(Number(s.pid)) && Date.now() - Date.parse(s.updated || 0) < 90_000)
     .sort((a, b) => String(a.roleKey).localeCompare(String(b.roleKey)))
 }
+/** AI 日程：只取 world.json 里 plan_next 排的闹钟；随机想起不在 alarms 里 */
+function scheduleList(limit = 50) {
+  const state = readJson(join(WORLD, "world.json"), {})
+  const alarms = Array.isArray(state.alarms) ? state.alarms : []
+  return alarms
+    .filter((a) => a && Number.isFinite(Date.parse(a.at)))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    .slice(0, limit)
+    .map((a) => ({
+      id: String(a.id || ""),
+      at: String(a.at),
+      note: String(a.note || "").slice(0, 300),
+      model: String(a.model || ""),
+      setAt: String(a.setAt || ""),
+    }))
+}
 
 let memDb
 function openMem() {
@@ -362,6 +378,7 @@ const server = http.createServer(async (req, res) => {
         models: c.models || {},
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
+        schedule: scheduleList(),
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
         available: await availableModels(),
