@@ -1,6 +1,6 @@
 # pi-agent-adv · 路线图
 
-> 本分支已改名 `pi-agent-v2`（原 `pi-agent-adv`）。`pi-agent` 是轻量稳定版，会一直保留；v2 是多功能版。
+> 本分支是 `pi-agent-adv`（第 3 条 pi 分支，实验版）。`pi-agent` 是轻量稳定版；`pi-agent-v2` 是保留本地向量检索（jina）的多功能版。
 
 ## 进行中
 
@@ -16,7 +16,7 @@
 
 ## 已完成（续）
 
-- [x] **CPU 语义检索（可选）**：transformers.js + jina-embeddings-v2-base-zh（q8），向量存 `vec` 表，与 FTS 混合排序。
+- [x] **CPU 语义检索**：已移到 `pi-agent-v2`（transformers.js + jina + `vec` 表）；adv 不再包含。
 - [x] **遗忘曲线**：`mem.strength` 命中加强、按半衰期每日衰减，只降权不删。
 - [x] **Web 看板**。
 
@@ -35,3 +35,4 @@
 ## 不做
 
 - ~~多机同步/容灾~~（改为 worlds/backup 本地快照）。
+- **向量检索**：adv 专注 FTS5 + ACT-R + Hebbian；语义向量由 `pi-agent-v2` 承担。

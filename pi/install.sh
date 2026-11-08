@@ -103,13 +103,8 @@ EOF
     rm -f "$PROJECT/.pi/extensions/life-world/index.ts"
     echo "已移除项目级扩展（世界数据保留）"
     ;;
-  --semantic)
-    echo "== 安装语义检索依赖（transformers.js） =="
-    npm install --prefix "$SRC" --no-audit --no-fund @huggingface/transformers
-    echo "  ✓ 依赖装在 $SRC/node_modules；在 life-world.json 打开 memory.semantic.enabled 即可"
-    ;;
   -h|--help)
-    echo "用法：./pi/install.sh [--global|--project|--uninstall|--project-uninstall|--semantic]"
+    echo "用法：./pi/install.sh [--global|--project|--uninstall|--project-uninstall]"
     ;;
   *)
     echo "未知参数：$MODE"

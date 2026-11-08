@@ -32,7 +32,6 @@
 |---|---|
 | 跨会话记忆 | 对话原文归档 JSONL；新会话在第一次可安全注入时补最近 48h + 记忆地图 + 自述 |
 | FTS5 检索 | `memory_search` 查本地索引，中文 trigram；3 字以上 BM25、2 字 LIKE 回退 |
-| 可选语义检索 | CPU 跑 `jina-embeddings-v2-base-zh`，与 FTS 混合排序；不装依赖自动退回 FTS |
 | 遗忘曲线 | 每条记忆有强度：命中加强、按半衰期衰减，只降权不删 |
 | ACT-R 激活 | 检索排序叠加频率 × 近因的基级激活（`B = ln(Σ (now−t)^−d)`） |
 | Hebbian 联想 | 共同召回自动连边，检索时一跳扩散带出关联记忆 |
@@ -77,15 +76,7 @@ cd life-world
 
 安装脚本会：建世界目录、复制颜文字库、生成世界规则、软链扩展，并把 `browser-*`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwctl`、`lwboard` 等放进 `~/.local/share/life-world/bin/`。
 
-### 3. 可选：语义检索依赖
-
-```bash
-./pi/install.sh --semantic
-```
-
-装 `@huggingface/transformers`（约 480MB，含 onnxruntime）到 `pi/node_modules`。第一次开启会在 `~/.local/share/life-world/models/` 下载 jina 模型（约 157MB）。不装也能用，只是 `memory_search` 走 FTS5。
-
-### 4. 配模型
+### 3. 配模型
 
 在线模型：容器里跑 `pi` → `/login deepseek`（或设 `DEEPSEEK_API_KEY`）。
 
@@ -106,7 +97,7 @@ cd life-world
 
 然后在 `life-world.json` 的 `models` 段写 `local` / `cloud`（见下）。
 
-### 5. 常驻
+### 4. 常驻
 
 ```bash
 tmux new-session -d -s life-world -n qq   'TZ=Asia/Shanghai LIFE_WORLD_MODEL=basalt/abliterated-iq3_xxs node ~/life-world/pi/bin/qq-bridge.mjs'
@@ -171,7 +162,6 @@ git fetch origin && git checkout pi-agent-adv && git pull
   "guard": { "enabled": true, "staleSeconds": 300, "cooldownMinutes": 10, "allowRestart": true },
   "cleanup": { "tmpMaxAgeHours": 72 },
   "memory": {
-    "semantic": { "enabled": false, "model": "Xenova/jina-embeddings-v2-base-zh", "dtype": "q8", "backfillLimit": 5000 },
     "decay": { "enabled": true, "halfLifeDays": 30, "hitBoost": 0.15, "maxStrength": 3, "minStrength": 0.1 },
     "actr": { "enabled": true, "decay": 0.5, "weight": 0.2, "maxAccess": 50 },
     "association": { "enabled": true, "weight": 0.1, "learnRate": 0.05, "decayPerDay": 0.02, "maxWeight": 1, "maxNeighbors": 50, "bootstrap": true },
@@ -190,7 +180,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 **真相永远是文件**：`worlds/default/conversations/*.jsonl`、`diary/*.md`、`plan/*.md`、`room/*.md`、`identity/*.md`。SQLite 只是索引，删了能重建。
 
 - **FTS5**：`memory-index.db`（trigram 分词，WAL + busy_timeout），归档时增量写入；历史由单个进程加锁回填（500 条一事务）。
-- **语义检索**（可选）：`vec` 表存 768 维向量；文本截 512 字；FTS 与语义结果合并去重后，再交给 ACT-R/联想层加权；换模型自动清空向量并重建。
+- **检索路线**：FTS5 字面命中 → ACT-R 激活 + Hebbian 联想加权；本分支**不做向量检索**，需要“语义相近”的检索请用 `pi-agent-v2`。
 - **遗忘曲线**：`mem` 表存 strength/uses/last_used；检索命中 +`hitBoost`，每天按 `halfLifeDays` 衰减；排序权重 `0.7 + 0.3*min(1, strength/2)`，只降权不删。
 - **记忆工具**：`memory_search`（关键词/时间/角色/范围/前后文）、`memory_day`（某天）、`memory_timeline`（一段时间的摘要）。
 
@@ -316,8 +306,7 @@ lwctl board stop                # 停止
 │   ├── 表情包/ 语音/ outbox/ tmp/
 │   └── world.json           # 闹钟与每日标记
 ├── worlds/backup/           # git 快照（不含 models/node_modules）
-├── memory-index.db          # FTS5 + 向量 + 强度索引（可重建）
-├── models/                  # 语义模型缓存（157MB，可选）
+├── memory-index.db          # FTS5 + 强度 + 激活/联想索引（可重建）
 ├── pi-sessions/             # pi 会话文件
 ├── status/                  # 会话心跳
 ├── control.json / control-state.json
@@ -331,7 +320,7 @@ lwctl board stop                # 停止
 | | `main`（opencode） | `pi-agent`（轻量） | `pi-agent-v2`（增强） | `pi-agent-adv`（本分支，实验） |
 |---|---|---|---|---|
 | 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 | pi 1.5 扩展 |
-| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 | 同上 + ACT-R 激活 + Hebbian 联想 |
+| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 | FTS5 + 遗忘曲线 + ACT-R + Hebbian |
 | 印象整理 | 无 | 无 | 无 | 每日归纳 + 本地/云端注入 |
 | 模型 | 固定 | 热切换 + 自动兜底 | 同上 + 看板/lwctl 手切 | 同上 |
 | 隐私抽屉 | 无 | 有 | 有（按会话、云端禁读） | 同上；纯云端不启用 |
@@ -344,8 +333,7 @@ lwctl board stop                # 停止
 
 - `pi-agent-adv` 是实验分支，暂未合回 `pi-agent-v2`；检索权重、印象调度、星图布局还可能继续调；
 - 记忆星图背景图是 `pi/bin/nebula.jpg`，由 lwboard 的 `/nebula.jpg` 路由提供；换图只换文件，覆盖倍数在 `board.html` 里调；
-- 语义检索是**可选**功能：依赖 480MB、模型 157MB，首次加载约 17 秒；CPU 回填历史较慢，进程需常驻一会儿才补全；
-- 语义质量取决于语料与模型，纯关键词查询仍以 FTS5 为准；
+- 本分支不装向量检索依赖；需要语义相似检索时切到 `pi-agent-v2`（它保留 jina 向量 + FTS 混合）；
 - 看板无鉴权，默认只监听本机；
 - 群会话不跨桥接重启保留（靠归档记忆续上）；
 - 家会话每次启动是新会话（归档记忆负责连续）；

@@ -168,7 +168,7 @@ interface Config {
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
   guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number; allowRestart: boolean }
   cleanup: { tmpMaxAgeHours: number }
-  memory: { semantic: SemanticOptions; decay: DecayOptions; actr: ActrOptions; association: AssociationOptions; impression: ImpressionOptions }
+  memory: { decay: DecayOptions; actr: ActrOptions; association: AssociationOptions; impression: ImpressionOptions }
 }
 
 /** ACT-R 基级激活（频率 × 近因幂律） */
@@ -221,17 +221,6 @@ interface DecayOptions {
   minStrength: number
 }
 
-/** 可选：CPU 语义检索（transformers.js + ONNX 模型） */
-interface SemanticOptions {
-  enabled: boolean
-  /** HuggingFace 模型 id（需带 ONNX） */
-  model: string
-  /** 量化：q8 更省内存 */
-  dtype: string
-  /** 首轮最多扫描多少条历史做向量化回填 */
-  backfillLimit: number
-}
-
 /** 主动关怀：随机想起、天气、安静时段 */
 interface CareOptions {
   enabled: boolean
@@ -261,7 +250,6 @@ function config(): Config {
     guard: { enabled: true, staleSeconds: 300, cooldownMinutes: 10, allowRestart: true },
     cleanup: { tmpMaxAgeHours: 72 },
     memory: {
-      semantic: { enabled: false, model: "Xenova/jina-embeddings-v2-base-zh", dtype: "q8", backfillLimit: 5000 },
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
       association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50, bootstrap: true },
@@ -282,7 +270,6 @@ function config(): Config {
     guard: { ...base.guard, ...(raw.guard || {}) },
     cleanup: { ...base.cleanup, ...(raw.cleanup || {}) },
     memory: {
-      semantic: { ...base.memory.semantic, ...((raw.memory || {}).semantic || {}) },
       decay: { ...base.memory.decay, ...((raw.memory || {}).decay || {}) },
       actr: { ...base.memory.actr, ...((raw.memory || {}).actr || {}) },
       association: { ...base.memory.association, ...((raw.memory || {}).association || {}) },
@@ -453,7 +440,6 @@ function openMemIndex(): any {
     try { chmodSync(MEM_INDEX_FILE, 0o600) } catch { /* ignore */ }
     memDb.exec("CREATE TABLE IF NOT EXISTS msg (id TEXT PRIMARY KEY, day TEXT, t TEXT, role TEXT, text TEXT)")
     memDb.exec("CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(id UNINDEXED, text, tokenize=trigram)")
-    memDb.exec("CREATE TABLE IF NOT EXISTS vec (id TEXT PRIMARY KEY, v BLOB)")
     memDb.exec("CREATE TABLE IF NOT EXISTS mem (id TEXT PRIMARY KEY, strength REAL DEFAULT 1, uses INTEGER DEFAULT 0, last_used TEXT)")
     memDb.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     memDb.exec("CREATE TABLE IF NOT EXISTS access (id TEXT, t TEXT)")
@@ -685,7 +671,6 @@ function indexRecord(r: Record_): void {
       if (Number(info?.changes || 0) > 0) {
         db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
         db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)").run(r.id)
-        enqueueEmbed(r.id, r.text)
       }
       db.exec("COMMIT")
     } catch (e) {
@@ -788,143 +773,6 @@ function ftsChatIds(query: string, from: string | undefined, to: string | undefi
   }
 }
 
-// ———————— 可选：CPU 语义检索（transformers.js） ————————
-let embedderPromise: any = undefined
-let embedderFailedAt = 0
-const embedQueue: Array<() => Promise<void>> = []
-let embedPumping = false
-
-async function getEmbedder(): Promise<any> {
-  const sem = config().memory.semantic
-  if (!sem.enabled) return null
-  if (embedderPromise !== undefined) return embedderPromise
-  if (embedderFailedAt && Date.now() - embedderFailedAt < 600_000) return null
-  embedderPromise = (async () => {
-    try {
-      if (!openMemIndex()) return null
-      // 从扩展真实文件位置解析依赖（pi 加载扩展时工作路径不可靠）
-      const req = createRequire(SELF_PATH)
-      const mod: any = req("@huggingface/transformers")
-      // 模型缓存放世界目录，npm 重装 node_modules 不会把模型冲掉
-      try { mod.env.cacheDir = `${join(ROOT, "models")}/` } catch { /* ignore */ }
-      let timer: any
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("embedder load timeout")), 120_000)
-        if (timer && typeof timer.unref === "function") timer.unref()
-      })
-      const pipe = await Promise.race([
-        mod.pipeline("feature-extraction", sem.model, { dtype: sem.dtype }),
-        timeout,
-      ])
-      if (timer) clearTimeout(timer)
-      // 换模型就清空旧向量，避免维度不一致导致永久空结果
-      const db = openMemIndex()
-      if (db) {
-        const prev: any = db.prepare("SELECT value FROM meta WHERE key='vec_model'").get()
-        if (prev && String(prev.value) !== sem.model) {
-          db.exec("DELETE FROM vec")
-          log(`vec cleared · model changed ${prev.value} → ${sem.model}`)
-          { const t = setTimeout(() => { void backfillVectors() }, 5000); (t as any).unref?.() }
-        }
-        db.prepare("INSERT OR REPLACE INTO meta (key,value) VALUES ('vec_model',?)").run(sem.model)
-      }
-      log(`semantic embedder ready · ${sem.model}`)
-      return pipe
-    } catch (e) {
-      embedderFailedAt = Date.now()
-      embedderPromise = undefined
-      log(`semantic embedder unavailable · ${String(e)}`)
-      return null
-    }
-  })()
-  return embedderPromise
-}
-
-async function embedTexts(texts: string[]): Promise<Float32Array[]> {
-  const pipe = await getEmbedder()
-  if (!pipe || !texts.length) return []
-  try {
-    // 长文截断：语义检索看意思是够的，CPU 也快得多
-    const out: any = await pipe(texts.map((t) => String(t).slice(0, 512)), { pooling: "mean", normalize: true })
-    const rows = out.tolist().map((a: any) => Float32Array.from(a))
-    return rows
-  } catch (e) { log(`embed failed ${String(e)}`); return [] }
-}
-
-function saveVec(id: string, v: Float32Array): void {
-  try {
-    const db = openMemIndex()
-    if (!db) return
-    db.prepare("INSERT OR REPLACE INTO vec (id, v) VALUES (?,?)").run(id, Buffer.from(v.buffer))
-  } catch (e) { log(`saveVec failed ${String(e)}`) }
-}
-
-async function pumpEmbedQueue(): Promise<void> {
-  if (embedPumping) return
-  embedPumping = true
-  try {
-    while (embedQueue.length) {
-      const job = embedQueue.shift()!
-      try { await job() } catch { /* ignore */ }
-    }
-  } finally { embedPumping = false }
-}
-
-function enqueueEmbed(id: string, text: string): void {
-  if (!config().memory.semantic.enabled) return
-  if (embedQueue.length > 200) embedQueue.splice(0, embedQueue.length - 200)
-  embedQueue.push(async () => { const [v] = await embedTexts([text]); if (v) saveVec(id, v) })
-  void pumpEmbedQueue()
-}
-
-async function semanticIds(query: string, limit: number): Promise<Array<{ id: string; score: number }>> {
-  const sem = config().memory.semantic
-  if (!sem.enabled) return []
-  const db = openMemIndex()
-  if (!db) return []
-  const [qv] = await embedTexts([query])
-  if (!qv) return []
-  let rows: any[] = []
-  try { rows = db.prepare("SELECT id, v FROM vec").all() } catch { return [] }
-  const scored: Array<{ id: string; score: number }> = []
-  for (const r of rows) {
-    const buf = r.v
-    if (!buf || buf.length !== qv.length * 4) continue
-    if (buf.byteOffset % 4 !== 0) continue
-    const v = new Float32Array(buf.buffer, buf.byteOffset, qv.length)
-    let s = 0
-    for (let i = 0; i < qv.length; i++) s += qv[i] * v[i]
-    scored.push({ id: String(r.id), score: s })
-  }
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, Math.max(limit, 60))
-}
-
-async function backfillVectors(): Promise<void> {
-  const sem = config().memory.semantic
-  if (!sem.enabled) return
-  if (!takeBackfillLock("vec-backfill")) {
-    const t = setTimeout(() => { void backfillVectors() }, 60_000)
-    ;(t as any).unref?.()
-    return
-  }
-  try {
-    const db = openMemIndex()
-    if (!db) return
-    let total = 0
-    while (total < sem.backfillLimit) {
-      const rows = db.prepare("SELECT m.id AS id, m.text AS text FROM msg m LEFT JOIN vec v ON v.id = m.id WHERE v.id IS NULL ORDER BY m.t DESC LIMIT 64").all()
-      if (!rows.length) break
-      const vecs = await embedTexts(rows.map((r: any) => String(r.text)))
-      if (!vecs.length) break
-      rows.forEach((r: any, i: number) => { if (vecs[i]) saveVec(String(r.id), vecs[i]) })
-      total += rows.length
-    }
-    if (total) log(`semantic backfill done ${total}`)
-  } catch (e) { log(`backfillVectors failed ${String(e)}`) }
-  finally { releaseBackfillLock("vec-backfill") }
-}
-
 function diaryTitle(day: string): string {
   const raw = readText(join(DIARY_DIR, `${day}.md`))
   for (const line of raw.split("\n")) {
@@ -1011,30 +859,7 @@ async function searchChat(query: string, from: string | undefined, to: string | 
   const hits: Array<{ i: number; score: number; at: number }> = []
   const byId = new Map(all.map((r, i) => [r.id, i]))
   const ids = ftsChatIds(query, from, to, role, Math.max(limit * 6, 60))
-  const semRaw = await semanticIds(query, Math.max(limit * 6, 60))
-  const sem = semRaw.filter((h) => {
-    const i = byId.get(h.id)
-    if (i === undefined) return false
-    const r = all[i]
-    if (role !== "any" && r.role !== role) return false
-    const d = dayOf(new Date(r.t))
-    if (from && d < from) return false
-    if (to && d > to) return false
-    return true
-  })
-  if (sem.length) {
-    // 语义命中 + FTS 命中加权
-    const ftsRank = new Map(ids.map((id, i) => [id, i]))
-    sem.map((s) => {
-      const rank = ftsRank.get(s.id)
-      const bonus = rank === undefined ? 0 : (1 - rank / Math.max(1, ids.length)) * 0.25
-      return { id: s.id, score: s.score * 0.75 + bonus }
-    }).sort((a, b) => b.score - a.score).slice(0, limit).forEach((m) => {
-      const i = byId.get(m.id)
-      if (i === undefined) return
-      hits.push({ i, score: m.score, at: Date.parse(all[i].t) || 0 })
-    })
-  } else if (ids.length) {
+  if (ids.length) {
     // FTS5 命中，按 bm25 排名
     ids.forEach((id, rank) => {
       const i = byId.get(id)
@@ -1847,7 +1672,7 @@ export default function (pi: ExtensionAPI) {
   ensureDirs()
   loadArchived()
   // 索引回填放到后台，不挡启动
-  const backfillTimer = setTimeout(() => { backfillMemoryIndex(); void backfillVectors() }, 3000)
+  const backfillTimer = setTimeout(() => { backfillMemoryIndex() }, 3000)
   ;(backfillTimer as any).unref?.()
 
   // —— lwctl：会话心跳 + 远程切换模型 ——

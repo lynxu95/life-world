@@ -266,7 +266,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         </div>
       </section>
 
-      <section class="impressions">
+      <section class="impressions" id="impressions-section" style="display:none">
         <div class="sec-head">
           <h2>印象墙</h2>
           <span class="spacer"></span>
@@ -368,6 +368,8 @@ const dayOfLocal = (d = new Date()) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+let FEATURES = { impressions: false }
+let impressionsLoaded = false
 
 function applyTheme(t) {
   if (t) document.documentElement.setAttribute("data-theme", t)
@@ -390,6 +392,10 @@ async function getJson(url, opts) {
 async function loadOverview() {
   try {
     const d = await getJson("/api/overview")
+    FEATURES = d.features || { impressions: true }
+    const impSec = $("impressions-section")
+    if (impSec) impSec.style.display = FEATURES.impressions ? "" : "none"
+    if (FEATURES.impressions && !impressionsLoaded) { impressionsLoaded = true; loadImpressions() }
     $("hb-dot").className = "dot"
     $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
     renderSessions(d.sessions, d.models)
@@ -926,7 +932,7 @@ $("imp-run").onclick = async () => {
   setTimeout(() => { b.disabled = false; b.textContent = "立即整理"; loadImpressions(); loadBrain() }, 4000)
 }
 
-loadOverview(); loadDates(); loadLog(); loadBrain(); loadImpressions(); loadDay(dayOfLocal())
+loadOverview(); loadDates(); loadLog(); loadBrain(); loadDay(dayOfLocal())
 setInterval(loadOverview, 10000)
 setInterval(loadLog, 15000)
 </script>

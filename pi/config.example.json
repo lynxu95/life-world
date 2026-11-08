@@ -83,12 +83,6 @@
     "tmpMaxAgeHours": 72
   },
   "memory": {
-    "semantic": {
-      "enabled": false,
-      "model": "Xenova/jina-embeddings-v2-base-zh",
-      "dtype": "q8",
-      "backfillLimit": 5000
-    },
     "decay": {
       "enabled": true,
       "halfLifeDays": 30,

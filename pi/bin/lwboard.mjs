@@ -33,6 +33,8 @@ const boardCfg = (() => {
 })()
 const PORT = Number(process.env.LW_BOARD_PORT || boardCfg.port || 8099) || 8099
 const HOST = String(process.env.LW_BOARD_HOST || boardCfg.host || "127.0.0.1")
+/** 分支能力：v2 没有印象整理，adv 有；v2 的 board.html 会据此隐藏印象墙 */
+const FEATURES = { impressions: true }
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
 function writeAtomic(file, text) {
@@ -359,6 +361,7 @@ const server = http.createServer(async (req, res) => {
         sessions: sessions(),
         models: c.models || {},
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
+        features: FEATURES,
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
         available: await availableModels(),
