@@ -28,11 +28,13 @@
 
 ## 分支导航
 
+最早是 opencode 插件；本地模型经 opencode 调用效果不佳，于是移植到 pi 1.5 得到 `pi-agent`（轻量稳定）。pi 的扩展点方便继续开发，后续在 `pi-agent-v2` 继续加功能，并分出 `pi-agent-adv` 做仿生记忆实验。
+
 | 分支 | 定位 | 一句话 |
 |---|---|---|
 | `main`（本分支） | opencode v2 插件 | 原始版，零运行时依赖 |
-| `pi-agent` | pi 1.5 轻量稳定 | 只保留核心：归档/记忆/闹钟/QQ/热切换/抽屉 |
-| `pi-agent-v2` | pi 1.5 增强 + 本地向量 | FTS5 + jina 语义混合、看板、快照、守护 |
+| `pi-agent` | pi 1.5 轻量稳定 | opencode 功能移植到 pi + 少量优化 |
+| `pi-agent-v2` | pi 1.5 增强 + 本地向量 | 在 pi-agent 上继续加功能，FTS5 + jina 语义混合 |
 | `pi-agent-adv` | pi 1.5 仿生实验 | 去向量，ACT-R + Hebbian + 印象 + 3D 星图；395 生产在跑 |
 
 详细的记忆架构差异、分支血缘、安装命令和“该选哪条”见 **[BRANCHES.md](BRANCHES.md)**。
