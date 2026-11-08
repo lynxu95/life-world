@@ -206,6 +206,10 @@ interface ImpressionOptions {
   days: number
   /** 一次最多整理几条印象 */
   maxItems: number
+  /** 最后验证满这么多天：有新印象时优先删它腾位 */
+  staleDays: number
+  /** 最后验证超过这么多天：视为过期，直接删并补位 */
+  expireDays: number
 }
 
 /** 遗忘曲线：命中加强、随时间衰减（只降权，不删） */
@@ -253,7 +257,7 @@ function config(): Config {
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
       association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50, bootstrap: true },
-      impression: { enabled: true, hour: 5, days: 3, maxItems: 5 },
+      impression: { enabled: true, hour: 5, days: 3, maxItems: 5, staleDays: 3, expireDays: 7 },
     },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
@@ -1094,7 +1098,7 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
 }
 
 function impressionPrompt(imp: ImpressionOptions): string {
-  return `【印象整理】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明；总数不超过 ${imp.maxItems} 条，旧的、不再成立的删掉。\n只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
+  return `【印象整理】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明。\n腾位与过期（按「最后验证」距今算，只决定删不删，不改置信度）：\n- 满 ${imp.staleDays} 天但不到 ${imp.expireDays} 天：算「可替换」，有新印象要进来时优先删它腾位。\n- 超过 ${imp.expireDays} 天：算「过期印象」，直接删掉，用新印象补位。\n- 不到 ${imp.staleDays} 天：除非已被新证据推翻，否则别删。\n总数不超过 ${imp.maxItems} 条。只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
 }
 
 let ticking = false
