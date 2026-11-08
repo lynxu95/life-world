@@ -820,10 +820,17 @@ function layoutBrain() {
     }
   }
   BRAIN.pos = arr
+  const radii = arr.map((p) => Math.hypot(p.x, p.z))
+  BRAIN.meanR = radii.reduce((a, b) => a + b, 0) / Math.max(1, radii.length) || 11
 }
 
+function rotFactor(r) {
+  const mean = BRAIN.meanR || 11
+  return Math.max(0.8, Math.min(1.6, 1 + (mean - r) * 0.065))
+}
 function projectPoint(p, w, h) {
-  const cy = Math.cos(BRAIN.yaw), sy = Math.sin(BRAIN.yaw)
+  const yaw = BRAIN.yaw * rotFactor(Math.hypot(p.x, p.z))
+  const cy = Math.cos(yaw), sy = Math.sin(yaw)
   const cp = Math.cos(BRAIN.pitch), sp = Math.sin(BRAIN.pitch)
   const x1 = p.x * cy - p.z * sy
   const z1 = p.x * sy + p.z * cy
@@ -912,20 +919,19 @@ function drawIdentityLinks(ctx, idx, proj, focus, focusMix, t) {
     const focusMul = focus && !inFocus ? 1 - 0.9 * focusMix : 1
     const depth = Math.max(0, Math.min(1, (pa.z + pb.z) / 24 + 0.5))
     const phase = (hashStr(l.source + l.target) % 1000) / 1000 * Math.PI * 2
-    const glow = reduceMotion ? 0.35 : Math.pow(Math.max(0, Math.sin(t * 0.0006 + phase)), 6)
-    const alpha = Math.min(0.98, 0.22 + (1 - depth) * 0.08 + glow * 0.78) * focusMul
+    const breathe = reduceMotion ? 1 : 0.85 + 0.15 * Math.sin(t * 0.0008 + phase)
+    const alpha = (0.36 + (1 - depth) * 0.14) * breathe * focusMul
     ctx.save()
-    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y)
-    if (glow > 0.2) {
-      ctx.globalAlpha = alpha * glow * 0.8
-      ctx.strokeStyle = "rgba(190,235,255,1)"
-      ctx.lineWidth = 7
-      ctx.stroke()
-    }
+    ctx.setLineDash([3, 4])
+    ctx.globalAlpha = alpha * 0.35
+    ctx.strokeStyle = "rgba(200,240,255,1)"
+    ctx.lineWidth = 3
+    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke()
     ctx.globalAlpha = alpha
-    ctx.strokeStyle = "rgba(225,248,255,1)"
-    ctx.lineWidth = 0.7 + glow * 2.8
+    ctx.strokeStyle = "rgba(235,248,255,1)"
+    ctx.lineWidth = 1
     ctx.stroke()
+    ctx.setLineDash([])
     ctx.restore()
   }
 }
@@ -1097,7 +1103,7 @@ function drawBrain(t) {
       ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.5
       ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke()
     }
-    const showLabel = (node.kind !== "identity" && BRAIN.hover === node.id) || node.kind === "impression" || hit || BRAIN.selected === node.id || (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
+    const showLabel = BRAIN.hover === node.id || node.kind === "impression" || hit || BRAIN.selected === node.id || (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
     if (showLabel && !queryDim) {
       labels++
       const text = node.kind === "identity" ? node.subject : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
