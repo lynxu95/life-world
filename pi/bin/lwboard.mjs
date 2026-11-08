@@ -8,7 +8,7 @@
  * 提供：会话/模型、模型热切换、用量、记忆检索、日记、日志、快照。
  */
 import http from "node:http"
-import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
@@ -307,11 +307,47 @@ function memoryGraph(limit = 400) {
     for (const t of targets) if (!extraIds.has(t.id)) { extraIds.add(t.id); extraNodes.push(t) }
   }
   const specials = [...diaries, ...impressions]
+  // 自动注入的人格文档：星图中心最亮的几颗星
+  const IDENTITY_DOCS = [
+    { file: "我是谁.md", label: "我是谁" },
+    { file: "心情.md", label: "心情" },
+    { file: "用户画像.md", label: "用户画像" },
+    { file: "模型使用规范.md", label: "模型规范" },
+  ]
+  const identityNodes = []
+  for (const doc of IDENTITY_DOCS) {
+    const path = join(WORLD, "identity", doc.file)
+    if (!existsSync(path)) continue
+    let text = ""
+    try { text = readFileSync(path, "utf8").trim() } catch { continue }
+    if (!text) continue
+    let mtime = now
+    try { mtime = statSync(path).mtimeMs } catch { /* ignore */ }
+    identityNodes.push({
+      id: `doc-${doc.file}`,
+      kind: "identity",
+      t: new Date(mtime).toISOString(),
+      role: "identity",
+      content: text.slice(0, 800),
+      subject: doc.label,
+      file: `identity/${doc.file}`,
+      activation: 0,
+      degree: 0,
+      hits: 0,
+      score: 2,
+    })
+  }
+  const identityLinks = []
+  for (let i = 0; i < identityNodes.length; i++) {
+    for (let j = i + 1; j < identityNodes.length; j++) {
+      identityLinks.push({ source: identityNodes[i].id, target: identityNodes[j].id, w: 0.8, kind: "identity" })
+    }
+  }
   const pickedMsgs = all.slice(0, Math.max(50, Math.min(1000, limit)))
   const pickedIds = new Set(pickedMsgs.map((n) => n.id))
   // 来源节点最多再补 120 个，避免极端情况下把图撑爆
   const extraPicked = extraNodes.filter((n) => !pickedIds.has(n.id)).slice(0, 120)
-  const picked = [...pickedMsgs, ...extraPicked, ...specials]
+  const picked = [...pickedMsgs, ...extraPicked, ...specials, ...identityNodes]
   const ids = new Set(picked.map((n) => n.id))
   const links = edges
     .filter((e) => ids.has(String(e.a)) && ids.has(String(e.b)))
@@ -332,6 +368,7 @@ function memoryGraph(limit = 400) {
       if (ids.has(t.id)) links.push({ source: im.id, target: t.id, w: 0.55, kind: "impression" })
     }
   }
+  for (const l of identityLinks) links.push(l)
   const avgAct = picked.length ? picked.reduce((s, n) => s + n.activation, 0) / picked.length : 0
   return {
     nodes: picked,
@@ -343,6 +380,7 @@ function memoryGraph(limit = 400) {
       avgActivation: Number(avgAct.toFixed(3)),
       shown: picked.length,
       impressions: impressions.length,
+      docs: identityNodes.length,
     },
   }
 }

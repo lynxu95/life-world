@@ -82,6 +82,13 @@ body{
 h1{font-size:20px;line-height:1.15;margin:0;font-weight:650;letter-spacing:.02em}
 .sub{color:var(--muted);font-size:11px;letter-spacing:.16em;text-transform:uppercase}
 .top-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tabs{display:inline-flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:999px;
+  background:var(--panel-2);backdrop-filter:blur(10px)}
+.tab-btn{border:0;background:transparent;color:var(--muted);font-size:12px;padding:5px 14px;
+  border-radius:999px;cursor:pointer;transition:background .15s,color .15s}
+.tab-btn:hover{color:var(--fg)}
+.tab-btn.active{background:var(--accent-soft);color:var(--accent);font-weight:650}
+.tab-panel[hidden]{display:none}
 .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
   border:1px solid var(--line);border-radius:999px;padding:4px 11px;
   background:var(--panel);backdrop-filter:blur(12px)}
@@ -90,6 +97,8 @@ h1{font-size:20px;line-height:1.15;margin:0;font-weight:650;letter-spacing:.02em
 
 /* —— 骨架 —— */
 .dash{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
+.dash.memory{grid-template-columns:minmax(0,1fr)}
+#tab-memory #graph{height:clamp(460px,62vh,720px)}
 @media (max-width:1080px){.dash{grid-template-columns:1fr}}
 main,.rail{display:flex;flex-direction:column;gap:18px;min-width:0}
 @media (max-width:1080px){.rail{order:2}}
@@ -104,6 +113,13 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .row-2{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
 @media (max-width:900px){.row-2{grid-template-columns:1fr}}
+#tab-memory .row-2{align-items:stretch}
+#tab-memory .row-2 > section{display:flex;flex-direction:column;height:540px}
+#tab-memory .row-2 .results{flex:1;max-height:none;min-height:0}
+#tab-memory .row-2 .day-wrap{flex:1;min-height:0}
+#tab-memory .row-2 .day-wrap pre.log{height:100%;max-height:none}
+#tab-memory .row-2 .dates{max-height:100%}
+@media (max-width:900px){#tab-memory .row-2 > section{height:auto;min-height:420px}}
 
 /* —— 控件 —— */
 button{font:inherit;color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
@@ -125,7 +141,7 @@ label.check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--m
 input[type=checkbox]{accent-color:var(--accent)}
 
 /* —— 会话 —— */
-.sessions{display:flex;flex-direction:column;gap:9px}
+.sessions{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
 .card{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 11px;background:var(--panel-2);min-width:0}
 .card .top{display:flex;align-items:baseline;gap:8px}
 .card .name{font-weight:650;font-family:var(--mono);font-size:12px}
@@ -146,15 +162,16 @@ input[type=checkbox]{accent-color:var(--accent)}
 .sched-meta .m{font-family:var(--mono);color:var(--accent)}
 
 /* —— 用量 —— */
-.tiles{display:grid;gap:9px;grid-template-columns:1fr 1fr;margin-bottom:12px}
+.tiles{display:grid;gap:9px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:12px}
 .tile{border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;background:var(--panel-2);min-width:0}
 .tile .k{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em}
 .tile .v{font-family:var(--mono);font-size:19px;font-variant-numeric:tabular-nums;margin-top:1px}
 .tile .n{font-size:10px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bars{display:flex;align-items:flex-end;gap:6px;height:86px;padding-top:4px}
-.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:4px;min-width:0}
+.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:4px;min-width:0;height:100%}
 .bar .b{background:linear-gradient(180deg,var(--accent),color-mix(in oklab,var(--accent) 45%,transparent));
   border-radius:4px 4px 0 0;min-height:2px}
+.bar.zero .b{width:6px;margin:0 auto;opacity:.3}
 .bar .d{font-size:9px;color:var(--faint);text-align:center;font-family:var(--mono)}
 
 /* —— 星图 —— */
@@ -244,18 +261,69 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="sub">记忆 · 会话 · 观测台</div>
       </div>
     </div>
+    <nav class="tabs" role="tablist" aria-label="看板分区">
+      <button class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
+      <button class="tab-btn" data-tab="memory" role="tab" aria-selected="false">记忆</button>
+    </nav>
     <div class="top-right">
       <span class="pill" id="heartbeat"><span class="dot" id="hb-dot"></span><span id="hb-text">连接中…</span></span>
       <button id="theme" class="ghost" title="切换主题">主题</button>
     </div>
   </header>
+  <div class="tab-panel" id="tab-overview">
+    <div class="dash">
+      <main>
+        <section>
+        <div class="sec-head"><h2>会话</h2><span class="spacer"></span><span class="sec-note">5s 心跳</span></div>
+        <div class="sessions" id="sessions"><div class="muted">加载中…</div></div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>用量 · 7 天</h2></div>
+        <div class="tiles" id="tiles"></div>
+        <div class="bars" id="bars"></div>
+        <div class="hint" id="usage-hint"></div>
+      </section>
+        <section>
+          <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
+          <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
+          <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
+        </section>
+      </main>
+      <aside class="rail">
+        <section>
+        <div class="sec-head"><h2>模型</h2></div>
+        <label class="field">本地<select id="m-local"></select></label>
+        <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="m-save">保存</button>
+          <span class="muted" id="m-hint"></span>
+        </div>
+        <div class="hint">改完保存，重启或切一次模型后生效。</div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>主动关怀</h2></div>
+        <label class="check"><input type="checkbox" id="care-random">随机想起</label>
+        <div class="row">
+          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
+          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="care-save">保存</button>
+          <span class="muted" id="care-hint"></span>
+        </div>
+        <div class="hint">关掉随机想起 = 全天不主动找你，闹钟和晨间唤醒不受影响。</div>
+      </section>
+      </aside>
+    </div>
+  </div>
 
-  <div class="dash">
-    <main>
-      <section class="star" id="star-shell">
+  <div class="tab-panel" id="tab-memory" hidden>
+    <div class="dash memory">
+      <main>
+        <section class="star" id="star-shell">
         <div class="sec-head">
           <h2>记忆星图</h2>
-          <span class="sec-note">拖拽旋转 · 滚轮缩放 · 点星看原文</span>
+          <span class="sec-note">拖拽旋转 · 滚轮缩放 · 点星看原文 · 亮白星=注入文档</span>
         </div>
         <div class="brain-bar">
           <div class="brain-stats" id="brain-stats">加载中…</div>
@@ -263,6 +331,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <label class="bf"><input type="checkbox" id="f-mem" checked>记忆</label>
             <label class="bf"><input type="checkbox" id="f-diary" checked>日记</label>
             <label class="bf"><input type="checkbox" id="f-imp" checked>印象</label>
+            <label class="bf"><input type="checkbox" id="f-doc" checked>文档</label>
             <input id="brain-q" placeholder="在星图里搜索…">
             <button id="brain-refresh">刷新</button>
             <button id="star-full">全屏</button>
@@ -276,8 +345,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           </aside>
         </div>
       </section>
-
-      <section class="impressions" id="impressions-section" style="display:none">
+        <section class="impressions" id="impressions-section" style="display:none">
         <div class="sec-head">
           <h2>印象墙</h2>
           <span class="spacer"></span>
@@ -286,9 +354,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         </div>
         <div class="imp-grid" id="imp-list"></div>
       </section>
-
-      <div class="row-2">
-        <section>
+        <div class="row-2">
+          <section>
           <div class="sec-head"><h2>记忆检索</h2></div>
           <div class="row">
             <input type="search" id="q" placeholder="搜对话原文，例如：机密抽屉、法考、千问" style="flex:1;min-width:180px">
@@ -296,8 +363,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           </div>
           <ul class="results" id="results"></ul>
         </section>
-
-        <section>
+          <section>
           <div class="sec-head">
             <h2>日记 / 某天</h2>
             <span class="spacer"></span>
@@ -309,9 +375,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <pre class="log" id="day-content">（左侧选一天，或点「今天」）</pre>
           </div>
         </section>
-      </div>
-
-      <section>
+        </div>
+        <section>
         <div class="sec-head">
           <h2>日志</h2>
           <div class="log-tools">
@@ -327,52 +392,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         </div>
         <pre class="log" id="log">（加载中…）</pre>
       </section>
-    </main>
-
-    <aside class="rail">
-      <section>
-        <div class="sec-head"><h2>会话</h2><span class="spacer"></span><span class="sec-note">5s 心跳</span></div>
-        <div class="sessions" id="sessions"><div class="muted">加载中…</div></div>
-      </section>
-
-      <section>
-        <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
-        <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
-        <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
-      </section>
-
-      <section>
-        <div class="sec-head"><h2>用量 · 7 天</h2></div>
-        <div class="tiles" id="tiles"></div>
-        <div class="bars" id="bars"></div>
-        <div class="hint" id="usage-hint"></div>
-      </section>
-
-      <section>
-        <div class="sec-head"><h2>模型</h2></div>
-        <label class="field">本地<select id="m-local"></select></label>
-        <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="m-save">保存</button>
-          <span class="muted" id="m-hint"></span>
-        </div>
-        <div class="hint">改完保存，重启或切一次模型后生效。</div>
-      </section>
-
-      <section>
-        <div class="sec-head"><h2>主动关怀</h2></div>
-        <label class="check"><input type="checkbox" id="care-random">随机想起</label>
-        <div class="row">
-          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
-          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="care-save">保存</button>
-          <span class="muted" id="care-hint"></span>
-        </div>
-        <div class="hint">关掉随机想起 = 全天不主动找你，闹钟和晨间唤醒不受影响。</div>
-      </section>
-    </aside>
+      </main>
+    </div>
   </div>
 </div>
 
@@ -517,11 +538,18 @@ function renderUsage(u) {  if (!u) return
     <div class="tile"><div class="k">输入 tokens</div><div class="v">${fmt(t.input)}</div><div class="n">缓存读 ${fmt(t.cacheRead)}</div></div>
     <div class="tile"><div class="k">输出 tokens</div><div class="v">${fmt(t.output)}</div><div class="n">模型切换 ${u.switches} 次</div></div>
     <div class="tile"><div class="k">费用</div><div class="v">${t.cost ? "$" + t.cost.toFixed(4) : "-"}</div><div class="n">云端 ${t.cloud} / 本地 ${t.local}</div></div>`
-  const max = Math.max(1, ...u.list.map((r) => r.input + r.output))
-  $("bars").innerHTML = u.list.map((r) => {
+  const list = Array.isArray(u.list) ? u.list : []
+  const byDay = new Map(list.map((r) => [r.day, r]))
+  const days = []
+  for (let i = 6; i >= 0; i--) {
+    const day = dayOfLocal(new Date(Date.now() - i * 86_400_000))
+    days.push(byDay.get(day) || { day, input: 0, output: 0, cacheRead: 0, cost: 0, req: 0, cloud: 0, local: 0 })
+  }
+  const max = Math.max(1, ...days.map((r) => r.input + r.output))
+  $("bars").innerHTML = days.map((r) => {
     const h = Math.round(((r.input + r.output) / max) * 100)
-    return `<div class="bar" title="${r.day} · ${fmt(r.input + r.output)} tokens"><div class="b" style="height:${h}%"></div><div class="d">${r.day.slice(5)}</div></div>`
-  }).join("") || '<div class="muted">最近没有用量</div>'
+    return `<div class="bar${r.input + r.output ? "" : " zero"}" title="${r.day} · ${fmt(r.input + r.output)} tokens"><div class="b" style="height:${h}%"></div><div class="d">${r.day.slice(5)}</div></div>`
+  }).join("")
   $("usage-hint").textContent = `云端 ${t.cloud} 次 · 本地 ${t.local} 次 · 切换 ${u.switches} 次`
 }
 
@@ -642,7 +670,8 @@ $("backup").onclick = async () => {
 }
 
 // ———————— 记忆星图（Canvas 3D + 星云） ————————
-const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true } }
+const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true } }
+const PULSES = []
 const brainCanvas = document.createElement("canvas")
 $("graph").appendChild(brainCanvas)
 const bctx = brainCanvas.getContext("2d")
@@ -670,12 +699,67 @@ bgImage.onload = () => {
 }
 bgImage.src = "/nebula.jpg?v=2"
 
+// 星图雾气：中心浓、外侧薄，像真正的星云气团
+const fogCanvas = document.createElement("canvas")
+function buildFog() {
+  const S = 640
+  fogCanvas.width = S; fogCanvas.height = S
+  const c = fogCanvas.getContext("2d")
+  c.clearRect(0, 0, S, S)
+  c.globalCompositeOperation = "lighter"
+  let seed = 20261108
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 }
+  const colors = [[80, 200, 220], [130, 110, 230], [70, 120, 220], [240, 190, 120], [90, 180, 200], [170, 140, 240], [60, 160, 180]]
+  const blob = (x, y, r, col, alpha) => {
+    const g = c.createRadialGradient(x, y, 0, x, y, r)
+    g.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${alpha})`)
+    g.addColorStop(0.55, `rgba(${col[0]},${col[1]},${col[2]},${alpha * 0.45})`)
+    g.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`)
+    c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill()
+  }
+  for (let i = 0; i < 48; i++) {
+    const a = rnd() * Math.PI * 2
+    const rad = Math.sqrt(rnd()) * S * 0.44
+    blob(S / 2 + Math.cos(a) * rad, S / 2 + Math.sin(a) * rad, S * (0.06 + rnd() * 0.16), colors[i % colors.length], 0.05 + rnd() * 0.08)
+  }
+  for (let i = 0; i < 22; i++) {
+    const a = rnd() * Math.PI * 2
+    const rad = Math.sqrt(rnd()) * S * 0.38
+    blob(S / 2 + Math.cos(a) * rad, S / 2 + Math.sin(a) * rad, S * (0.03 + rnd() * 0.07), colors[(i + 2) % colors.length], 0.04 + rnd() * 0.06)
+  }
+  // 条状云带，让气团有层次
+  for (let i = 0; i < 9; i++) {
+    const a = rnd() * Math.PI * 2
+    const rad = Math.sqrt(rnd()) * S * 0.36
+    const x = S / 2 + Math.cos(a) * rad
+    const y = S / 2 + Math.sin(a) * rad
+    const r = S * (0.14 + rnd() * 0.2)
+    const col = colors[i % colors.length]
+    const alpha = 0.04 + rnd() * 0.05
+    c.save(); c.translate(x, y); c.rotate(rnd() * Math.PI); c.scale(1, 0.3)
+    const g = c.createRadialGradient(0, 0, 0, 0, 0, r)
+    g.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${alpha})`)
+    g.addColorStop(0.6, `rgba(${col[0]},${col[1]},${col[2]},${alpha * 0.4})`)
+    g.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`)
+    c.fillStyle = g; c.beginPath(); c.arc(0, 0, r, 0, Math.PI * 2); c.fill(); c.restore()
+  }
+  c.globalCompositeOperation = "destination-in"
+  const mask = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2)
+  mask.addColorStop(0, "rgba(0,0,0,1)")
+  mask.addColorStop(0.5, "rgba(0,0,0,.62)")
+  mask.addColorStop(1, "rgba(0,0,0,0)")
+  c.fillStyle = mask; c.fillRect(0, 0, S, S)
+}
+buildFog()
+
 function nodeColor(n) {
+  if (n.kind === "identity") return "#e8fbff"
   if (n.kind === "impression") return "#fbbf24"
   if (n.kind === "diary") return "#f59e0b"
   return n.role === "user" ? "#4fc3f7" : "#2dd4bf"
 }
 function nodeVisible(n) {
+  if (n.kind === "identity") return BRAIN.filters.doc
   if (n.kind === "impression") return BRAIN.filters.imp
   if (n.kind === "diary") return BRAIN.filters.diary
   return BRAIN.filters.mem
@@ -690,14 +774,20 @@ function layoutBrain() {
     const h = hashStr(node.id)
     const theta = ((h % 1000) / 1000) * Math.PI * 2
     const phi = (((h >> 10) % 1000) / 1000) * Math.PI
-    const r = node.kind === "impression" ? 2.2 : node.kind === "diary" ? 5.5 : 9 + ((h >> 20) % 5)
+    const r = node.kind === "impression" ? 2.2 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : 9 + ((h >> 20) % 5)
     pos.set(node.id, { x: Math.cos(theta) * Math.sin(phi) * r, y: Math.cos(phi) * r, z: Math.sin(theta) * Math.sin(phi) * r })
   })
   // 印象固定在中心一圈，避免互相挤叠
   const imps = nodes.filter((node) => node.kind === "impression")
   imps.forEach((node, i) => {
     const a = (i / Math.max(1, imps.length)) * Math.PI * 2 - Math.PI / 2
-    pos.set(node.id, { x: Math.cos(a) * 6.5, y: i % 2 === 0 ? 2.2 : -2.2, z: Math.sin(a) * 6.5 })
+    pos.set(node.id, { x: Math.cos(a) * 6.8, y: i % 2 === 0 ? 2.2 : -2.2, z: Math.sin(a) * 6.8 })
+  })
+  // 自动注入的人格文档放在最内圈：星图中心最亮的几颗星
+  const docs = nodes.filter((node) => node.kind === "identity")
+  docs.forEach((node, i) => {
+    const a = (i / Math.max(1, docs.length)) * Math.PI * 2 - Math.PI / 2
+    pos.set(node.id, { x: Math.cos(a) * 2.4, y: i % 2 === 0 ? 0.7 : -0.7, z: Math.sin(a) * 2.4 })
   })
   const idx = new Map(nodes.map((node, i) => [node.id, i]))
   const arr = nodes.map((node) => pos.get(node.id))
@@ -723,7 +813,7 @@ function layoutBrain() {
       disp[b].x -= dx; disp[b].y -= dy; disp[b].z -= dz
     }
     for (let i = 0; i < arr.length; i++) {
-      if (nodes[i].kind === "impression") continue
+      if (nodes[i].kind === "impression" || nodes[i].kind === "identity") continue
       arr[i].x = arr[i].x * 0.98 + disp[i].x
       arr[i].y = arr[i].y * 0.98 + disp[i].y
       arr[i].z = arr[i].z * 0.98 + disp[i].z
@@ -754,9 +844,96 @@ function resizeBrain() {
   bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 }
 
+let lastPulseAt = 0
+function maybeSpawnPulse(t) {
+  if (reduceMotion) return
+  if (t - lastPulseAt < 480) return
+  lastPulseAt = t
+  if (PULSES.length > 24 || !BRAIN.links.length) return
+  const roll = Math.random()
+  const kind = roll < 0.78 ? "recall" : roll < 0.94 ? "impression" : "diary"
+  const pool = BRAIN.links.filter((l) => l.kind === kind)
+  if (!pool.length) return
+  const l = pool[Math.floor(Math.random() * pool.length)]
+  const speed = kind === "recall" ? 0.026 + Math.random() * 0.016 : 0.012 + Math.random() * 0.01
+  PULSES.push({ source: l.source, target: l.target, p: 0, speed, kind: l.kind })
+}
+function burstFrom(id) {
+  if (reduceMotion) return
+  const links = BRAIN.links.filter((l) => l.source === id || l.target === id).filter((l) => l.kind !== "identity").slice(0, 14)
+  for (const l of links) {
+    const forward = l.source === id
+    const speed = l.kind === "recall" ? 0.026 + Math.random() * 0.016 : 0.012 + Math.random() * 0.01
+    PULSES.push({
+      source: forward ? l.source : l.target,
+      target: forward ? l.target : l.source,
+      p: Math.random() * 0.15,
+      speed,
+      kind: l.kind,
+    })
+  }
+  if (PULSES.length > 46) PULSES.splice(0, PULSES.length - 46)
+}
+function drawPulses(ctx, idx, proj) {
+  if (reduceMotion) return
+  for (let i = PULSES.length - 1; i >= 0; i--) {
+    const q = PULSES[i]
+    q.p += q.speed
+    if (q.p >= 1) { PULSES.splice(i, 1); continue }
+    if (BRAIN.hover && q.source !== BRAIN.hover && q.target !== BRAIN.hover) continue
+    const a = idx.get(q.source), b = idx.get(q.target)
+    if (a === undefined || b === undefined) { PULSES.splice(i, 1); continue }
+    const pa = proj[a], pb = proj[b]
+    if (!pa || !pb) continue
+    const headX = pa.x + (pb.x - pa.x) * q.p, headY = pa.y + (pb.y - pa.y) * q.p
+    const special = q.kind !== "recall"
+    const tailP = Math.max(0, q.p - (special ? 0.12 : 0.08))
+    const tailX = pa.x + (pb.x - pa.x) * tailP, tailY = pa.y + (pb.y - pa.y) * tailP
+    const color = q.kind === "impression" ? "251,191,36" : q.kind === "diary" ? "245,158,11" : "94,234,212"
+    ctx.save()
+    ctx.globalCompositeOperation = "lighter"
+    ctx.strokeStyle = `rgba(${color},.85)`
+    ctx.lineWidth = special ? 2.4 : 1.6
+    ctx.beginPath(); ctx.moveTo(tailX, tailY); ctx.lineTo(headX, headY); ctx.stroke()
+    ctx.fillStyle = "rgba(225,255,250,.95)"
+    ctx.beginPath(); ctx.arc(headX, headY, special ? 2.6 : 1.8, 0, Math.PI * 2); ctx.fill()
+    ctx.restore()
+  }
+}
+
+function drawIdentityLinks(ctx, idx, proj, focus, focusMix, t) {
+  for (const l of BRAIN.links) {
+    if (l.kind !== "identity") continue
+    const a = idx.get(l.source), b = idx.get(l.target)
+    if (a === undefined || b === undefined) continue
+    const pa = proj[a], pb = proj[b]
+    if (!pa || !pb) continue
+    const inFocus = !focus || (focus.has(l.source) && focus.has(l.target))
+    const focusMul = focus && !inFocus ? 1 - 0.9 * focusMix : 1
+    const depth = Math.max(0, Math.min(1, (pa.z + pb.z) / 24 + 0.5))
+    const phase = (hashStr(l.source + l.target) % 1000) / 1000 * Math.PI * 2
+    const glow = reduceMotion ? 0.35 : Math.pow(Math.max(0, Math.sin(t * 0.0006 + phase)), 6)
+    const alpha = Math.min(0.98, 0.22 + (1 - depth) * 0.08 + glow * 0.78) * focusMul
+    ctx.save()
+    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y)
+    if (glow > 0.2) {
+      ctx.globalAlpha = alpha * glow * 0.8
+      ctx.strokeStyle = "rgba(190,235,255,1)"
+      ctx.lineWidth = 7
+      ctx.stroke()
+    }
+    ctx.globalAlpha = alpha
+    ctx.strokeStyle = "rgba(225,248,255,1)"
+    ctx.lineWidth = 0.7 + glow * 2.8
+    ctx.stroke()
+    ctx.restore()
+  }
+}
+
 function drawBrain(t) {
   const el = $("graph"), w = el.clientWidth, h = el.clientHeight
   if (!w || !h) return
+  maybeSpawnPulse(t)
   const ctx = bctx
   ctx.clearRect(0, 0, w, h)
   if (bgReady) {
@@ -771,6 +948,23 @@ function drawBrain(t) {
     ctx.drawImage(bgCanvas, -bgCanvas.width / 2, -bgCanvas.height / 2)
     ctx.restore()
   }
+  // 星云气团：中间浓、外侧薄，缓慢呼吸/漂移
+  const fogScale = Math.max(w, h) / 640 * 1.25
+  const fogBreathe = reduceMotion ? 1 : 1 + Math.sin(t * 0.00018) * 0.08
+  const fogDrift = reduceMotion ? 0 : Math.sin(t * 0.00003) * w * 0.012
+  const fogTimeRot = reduceMotion ? 0 : t * 0.000018
+  const fogPulse = reduceMotion ? 1 : 0.94 + 0.06 * Math.sin(t * 0.00022)
+  const drawFog = (scale, rot, alpha, dx, dy) => {
+    ctx.save()
+    ctx.globalAlpha = alpha
+    ctx.translate(w / 2 + dx, h / 2 + dy)
+    ctx.rotate(rot)
+    ctx.scale(scale, scale)
+    ctx.drawImage(fogCanvas, -320, -320)
+    ctx.restore()
+  }
+  drawFog(fogScale * fogBreathe, Math.sin(BRAIN.yaw) * 0.05 + fogTimeRot, 1.0 * fogPulse, Math.sin(BRAIN.yaw) * w * 0.025 + fogDrift, Math.cos(BRAIN.yaw * 0.7) * h * 0.02)
+  drawFog(fogScale * 1.55 * fogBreathe, -Math.sin(BRAIN.yaw) * 0.07 - fogTimeRot * 1.4, 0.55 * fogPulse, -Math.sin(BRAIN.yaw) * w * 0.02 - fogDrift, Math.cos(BRAIN.yaw * 0.9) * h * 0.015)
   // 屏幕固定：暗角 + 上下压暗，让星图节点浮在背景上
   const haze = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.18, w / 2, h / 2, Math.max(w, h) * 0.75)
   haze.addColorStop(0, "rgba(4,7,14,0)")
@@ -794,31 +988,70 @@ function drawBrain(t) {
   const idx = new Map(BRAIN.nodes.map((node, i) => [node.id, i]))
   const proj = BRAIN.pos.map((p) => projectPoint(p, w, h))
   const query = BRAIN.search
+  const hover = BRAIN.hover
+  if (hover) {
+    const set = new Set([hover])
+    const hoverNode = BRAIN.nodes.find((n) => n.id === hover)
+    if (hoverNode && hoverNode.kind === "identity") {
+      // 悬停主星时聚焦整组注入文档，而不是只剩一颗
+      for (const n of BRAIN.nodes) if (n.kind === "identity") set.add(n.id)
+    } else {
+      for (const l of BRAIN.links) {
+        if (l.source === hover) set.add(l.target)
+        if (l.target === hover) set.add(l.source)
+      }
+    }
+    BRAIN.focusIds = set
+  }
+  // 聚焦渐暗：悬停时约 0.5 秒过渡，离开后同样渐亮
+  BRAIN.focusMix += ((hover ? 1 : 0) - BRAIN.focusMix) * 0.055
+  if (!hover && BRAIN.focusMix < 0.01) { BRAIN.focusMix = 0; BRAIN.focusIds = null }
+  const focusMix = BRAIN.focusMix
+  const focus = BRAIN.focusIds && focusMix > 0.01 ? BRAIN.focusIds : null
   for (const l of BRAIN.links) {
+    if (l.kind === "identity") continue
     const a = idx.get(l.source), b = idx.get(l.target)
     if (a === undefined || b === undefined) continue
     if (!nodeVisible(BRAIN.nodes[a]) || !nodeVisible(BRAIN.nodes[b])) continue
     const pa = proj[a], pb = proj[b]
+    const inFocus = !focus || (focus.has(l.source) && focus.has(l.target))
+    if (focus && !inFocus) ctx.globalAlpha = 1 - 0.9 * focusMix
     const depth = Math.max(0, Math.min(1, (pa.z + pb.z) / 24 + 0.5))
     let color
-    if (l.kind === "impression") color = `rgba(251,191,36,${0.24 + (1 - depth) * 0.26})`
-    else if (l.kind === "diary") color = `rgba(245,158,11,${0.1 + (1 - depth) * 0.15})`
-    else color = `rgba(45,212,191,${0.07 + (1 - depth) * 0.12})`
+    let width
+    if (l.kind === "impression") {
+      color = `rgba(251,191,36,${0.24 + (1 - depth) * 0.26})`
+      width = 0.9
+    } else if (l.kind === "diary") {
+      color = `rgba(245,158,11,${0.1 + (1 - depth) * 0.15})`
+      width = 0.5
+    } else {
+      color = `rgba(45,212,191,${0.07 + (1 - depth) * 0.12})`
+      width = 0.5
+    }
     ctx.strokeStyle = color
-    ctx.lineWidth = l.kind === "impression" ? 0.9 : 0.5
+    ctx.lineWidth = width
     if (l.kind === "impression") ctx.setLineDash([3, 4])
-    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y)
+    ctx.stroke()
     ctx.setLineDash([])
+    ctx.globalAlpha = 1
   }
-  const order = BRAIN.nodes.map((node, i) => i).filter((i) => nodeVisible(BRAIN.nodes[i])).sort((a, b) => proj[b].z - proj[a].z)
+  drawPulses(ctx, idx, proj)
+  const order = BRAIN.nodes.map((node, i) => i).filter((i) => nodeVisible(BRAIN.nodes[i])).sort((a, b) => {
+    const rank = (n) => n.kind === "identity" ? 3 : n.kind === "impression" ? 2 : n.kind === "diary" ? 1 : 0
+    return (rank(BRAIN.nodes[a]) - rank(BRAIN.nodes[b])) || (proj[b].z - proj[a].z)
+  })
   let labels = 0
   for (const i of order) {
     const node = BRAIN.nodes[i], p = proj[i]
     const hit = query && String(node.content).toLowerCase().includes(query)
-    const dim = query && !hit
-    const base = node.kind === "impression" ? 7 : node.kind === "diary" ? 4 : 1.8 + Math.min(3, (node.score || 0) * 2)
+    const queryDim = query && !hit
+    const focusDim = focus && !focus.has(node.id)
+    const dimAlpha = queryDim ? 0.18 : focusDim ? 1 - 0.82 * focusMix : 1
+    const base = node.kind === "identity" ? 8.5 : node.kind === "impression" ? 7 : node.kind === "diary" ? 4 : 1.8 + Math.min(3, (node.score || 0) * 2)
     const r = Math.max(1.2, base * p.s)
-    ctx.globalAlpha = dim ? 0.18 : 1
+    ctx.globalAlpha = dimAlpha
     if (node.kind === "impression") {
       const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 2.8)
       g.addColorStop(0, "rgba(255,238,180,.95)")
@@ -829,13 +1062,29 @@ function drawBrain(t) {
       ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.75, 0, Math.PI * 2); ctx.stroke()
       ctx.fillStyle = "#fff3c4"; ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.75, 0, Math.PI * 2); ctx.fill()
     } else if (node.kind === "diary") {
-      ctx.globalAlpha = dim ? 0.1 : 0.22
+      ctx.globalAlpha = dimAlpha * 0.22
       ctx.fillStyle = "rgba(245,158,11,.9)"
       ctx.beginPath(); ctx.arc(p.x, p.y, r * 2.8, 0, Math.PI * 2); ctx.fill()
-      ctx.globalAlpha = dim ? 0.18 : 1
+      ctx.globalAlpha = dimAlpha
       ctx.fillStyle = "rgba(245,158,11,.85)"; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill()
       ctx.strokeStyle = "rgba(245,158,11,.35)"; ctx.lineWidth = 1
       ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.8, 0, Math.PI * 2); ctx.stroke()
+    } else if (node.kind === "identity") {
+      const breathe = reduceMotion ? 1 : 1 + 0.08 * Math.sin(t * 0.0012 + i * 1.7)
+      const gr = r * 6 * breathe
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, gr)
+      g.addColorStop(0, "rgba(255,255,255,.98)")
+      g.addColorStop(0.2, "rgba(235,250,255,.7)")
+      g.addColorStop(0.55, "rgba(130,200,255,.22)")
+      g.addColorStop(1, "rgba(120,180,255,0)")
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, gr, 0, Math.PI * 2); ctx.fill()
+      ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.7, 0, Math.PI * 2); ctx.fill()
+      ctx.strokeStyle = "rgba(200,240,255,.45)"; ctx.lineWidth = 1
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.45, 0, Math.PI * 2); ctx.stroke()
+      if (hit) {
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.2
+        ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke()
+      }
     } else {
       ctx.fillStyle = hit ? "#ffffff" : nodeColor(node)
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill()
@@ -844,37 +1093,61 @@ function drawBrain(t) {
         ctx.beginPath(); ctx.arc(p.x, p.y, r + 2.5, 0, Math.PI * 2); ctx.stroke()
       }
     }
-    const showLabel = node.kind === "impression" || hit || BRAIN.selected === node.id || (BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
-    if (showLabel && !dim) {
+    if (BRAIN.hover === node.id) {
+      ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.5
+      ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke()
+    }
+    const showLabel = (node.kind !== "identity" && BRAIN.hover === node.id) || node.kind === "impression" || hit || BRAIN.selected === node.id || (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
+    if (showLabel && !queryDim) {
       labels++
-      const text = node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
-      ctx.font = node.kind === "impression" ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
+      const text = node.kind === "identity" ? node.subject : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
+      ctx.font = node.kind === "identity" ? "600 11px system-ui,sans-serif" : node.kind === "impression" ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
       let lx = p.x, ly = p.y - r - 6
-      if (node.kind === "impression") {
+      if (node.kind === "identity") {
+        const dx = p.x - w / 2, dy = p.y - h / 2
+        const len = Math.hypot(dx, dy) || 1
+        lx = p.x + (dx / len) * (r * 1.9 + 8)
+        ly = p.y + (dy / len) * (r * 1.9 + 8)
+        ctx.textAlign = dx < 0 ? "right" : "left"
+      } else if (node.kind === "impression") {
         const dx = p.x - w / 2, dy = p.y - h / 2
         const len = Math.hypot(dx, dy) || 1
         lx = p.x + (dx / len) * (r * 2.2 + 10)
         ly = p.y + (dy / len) * (r * 2.2 + 10)
         ctx.textAlign = dx < 0 ? "right" : "left"
       } else ctx.textAlign = "center"
+      if (node.kind === "identity") {
+        const tw = ctx.measureText(text).width
+        const bx = ctx.textAlign === "right" ? lx - tw - 6 : lx - 6
+        const by = ly - 13
+        ctx.fillStyle = "rgba(4,8,16,.78)"
+        ctx.beginPath()
+        if (ctx.roundRect) ctx.roundRect(bx, by, tw + 12, 18, 6)
+        else ctx.rect(bx, by, tw + 12, 18)
+        ctx.fill()
+        ctx.strokeStyle = "rgba(190,235,255,.28)"; ctx.lineWidth = 1; ctx.stroke()
+      }
       ctx.lineWidth = 3; ctx.strokeStyle = "rgba(5,6,11,.85)"; ctx.strokeText(text, lx, ly)
-      ctx.fillStyle = node.kind === "impression" ? "#fde68a" : node.kind === "diary" ? "#fbbf24" : "#cbd5e1"
+      ctx.fillStyle = node.kind === "identity" ? "#dff8ff" : node.kind === "impression" ? "#fde68a" : node.kind === "diary" ? "#fbbf24" : "#cbd5e1"
       ctx.fillText(text, lx, ly)
     }
     ctx.globalAlpha = 1
   }
+  drawIdentityLinks(ctx, idx, proj, focus, focusMix, t)
   BRAIN.proj = proj
 }
 
 function brainLoop(t) {
-  if (!BRAIN.drag && !reduceMotion) BRAIN.yaw += 0.0012
+  if (!BRAIN.drag && !reduceMotion) BRAIN.yaw += BRAIN.hover ? 0.00025 : 0.0012
   drawBrain(t || 0)
   requestAnimationFrame(brainLoop)
 }
 
 function showBrainDetail(n) {
   const el = $("brain-detail")
-  if (n.kind === "impression") {
+  if (n.kind === "identity") {
+    el.innerHTML = `<h4>注入文档 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>文件：${esc2(n.file || "")}</span><span>更新：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span></div>`
+  } else if (n.kind === "impression") {
     el.innerHTML = `<h4>印象 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>${esc2(n.meta || "")}</span></div>`
   } else if (n.kind === "diary") {
     el.innerHTML = `<h4>日记 ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div>`
@@ -894,23 +1167,38 @@ function hitBrain(x, y) {
 }
 
 brainCanvas.addEventListener("pointerdown", (e) => {
+  BRAIN.hover = null
+  brainCanvas.style.cursor = "grab"
   BRAIN.drag = { x: e.clientX, y: e.clientY, moved: 0 }
   try { brainCanvas.setPointerCapture(e.pointerId) } catch {}
 })
 brainCanvas.addEventListener("pointermove", (e) => {
-  if (!BRAIN.drag) return
+  if (!BRAIN.drag) {
+    const rect = brainCanvas.getBoundingClientRect()
+    const n = hitBrain(e.clientX - rect.left, e.clientY - rect.top)
+    const id = n ? n.id : null
+    if (BRAIN.hover !== id) {
+      BRAIN.hover = id
+      brainCanvas.style.cursor = id ? "pointer" : "grab"
+    }
+    return
+  }
   const dx = e.clientX - BRAIN.drag.x, dy = e.clientY - BRAIN.drag.y
   BRAIN.drag.moved += Math.abs(dx) + Math.abs(dy)
   BRAIN.drag.x = e.clientX; BRAIN.drag.y = e.clientY
   BRAIN.yaw += dx * 0.006
   BRAIN.pitch = Math.max(-1.2, Math.min(1.2, BRAIN.pitch + dy * 0.006))
 })
+brainCanvas.addEventListener("pointerleave", () => {
+  BRAIN.hover = null
+  brainCanvas.style.cursor = "grab"
+})
 brainCanvas.addEventListener("pointerup", (e) => {
   const d = BRAIN.drag; BRAIN.drag = null
   if (!d || d.moved > 6) return
   const rect = brainCanvas.getBoundingClientRect()
   const n = hitBrain(e.clientX - rect.left, e.clientY - rect.top)
-  if (n) { BRAIN.selected = n.id; showBrainDetail(n) }
+  if (n) { BRAIN.selected = n.id; showBrainDetail(n); burstFrom(n.id) }
 })
 brainCanvas.addEventListener("wheel", (e) => {
   e.preventDefault()
@@ -945,18 +1233,22 @@ document.addEventListener("keydown", (e) => {
 syncFullLabel()
 
 function toggleFilter() {
-  BRAIN.filters = { mem: $("f-mem").checked, diary: $("f-diary").checked, imp: $("f-imp").checked }
+  BRAIN.filters = { mem: $("f-mem").checked, diary: $("f-diary").checked, imp: $("f-imp").checked, doc: $("f-doc").checked }
 }
-for (const id of ["f-mem", "f-diary", "f-imp"]) $(id).addEventListener("change", toggleFilter)
+for (const id of ["f-mem", "f-diary", "f-imp", "f-doc"]) $(id).addEventListener("change", toggleFilter)
 
 async function loadBrain() {
   try {
     const d = await getJson("/api/memory-graph?limit=400")
     const st = d.stats || {}
-    $("brain-stats").innerHTML = `<span>节点 <b>${st.nodes ?? 0}</b></span><span>联想边 <b>${st.edges ?? 0}</b></span><span>今日命中 <b>${st.todayAccess ?? 0}</b></span><span>展示 <b>${st.shown ?? 0}</b></span><span>印象 <b>${st.impressions ?? 0}</b></span>`
+    $("brain-stats").innerHTML = `<span>节点 <b>${st.nodes ?? 0}</b></span><span>联想边 <b>${st.edges ?? 0}</b></span><span>今日命中 <b>${st.todayAccess ?? 0}</b></span><span>展示 <b>${st.shown ?? 0}</b></span><span>文档 <b>${st.docs ?? 0}</b></span><span>印象 <b>${st.impressions ?? 0}</b></span>`
     BRAIN.nodes = d.nodes
     BRAIN.links = d.links
     BRAIN.selected = null
+    BRAIN.hover = null
+    BRAIN.focusMix = 0
+    BRAIN.focusIds = null
+    PULSES.length = 0
     layoutBrain()
     resizeBrain()
   } catch (e) { $("brain-stats").textContent = "加载失败：" + e.message }
@@ -993,6 +1285,25 @@ $("imp-run").onclick = async () => {
   } catch (e) { $("imp-hint").textContent = "失败：" + e.message }
   setTimeout(() => { b.disabled = false; b.textContent = "立即整理"; loadImpressions(); loadBrain() }, 4000)
 }
+
+const TAB_IDS = ["overview", "memory"]
+function setTab(name, remember = true) {
+  if (!TAB_IDS.includes(name)) name = "overview"
+  for (const id of TAB_IDS) {
+    const panel = $("tab-" + id)
+    const btn = document.querySelector(`.tab-btn[data-tab="${id}"]`)
+    const on = id === name
+    if (panel) panel.hidden = !on
+    if (btn) {
+      btn.classList.toggle("active", on)
+      btn.setAttribute("aria-selected", on ? "true" : "false")
+    }
+  }
+  if (remember) { try { localStorage.setItem("lw-tab", name) } catch {} }
+  if (name === "memory") setTimeout(() => { resizeBrain(); drawBrain(performance.now()) }, 80)
+}
+document.querySelectorAll(".tab-btn").forEach((btn) => { btn.onclick = () => setTab(btn.dataset.tab) })
+try { setTab(localStorage.getItem("lw-tab") || "overview", false) } catch { setTab("overview", false) }
 
 loadOverview(); loadDates(); loadLog(); loadBrain(); loadDay(dayOfLocal())
 setInterval(loadOverview, 10000)
