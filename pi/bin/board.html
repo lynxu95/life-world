@@ -119,7 +119,13 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 #tab-memory .row-2 .day-wrap{flex:1;min-height:0}
 #tab-memory .row-2 .day-wrap pre.log{height:100%;max-height:none}
 #tab-memory .row-2 .dates{max-height:100%}
-@media (max-width:900px){#tab-memory .row-2 > section{height:auto;min-height:420px}}
+@media (max-width:900px){
+  #tab-memory .row-2 > section{height:auto;min-height:0}
+  #tab-memory .row-2 .results{max-height:420px}
+  #tab-memory .row-2 .day-wrap{flex:none;min-height:0}
+  #tab-memory .row-2 .day-wrap pre.log{height:360px;max-height:360px;overflow:auto}
+  #tab-memory .row-2 .dates{max-height:180px}
+}
 
 /* —— 控件 —— */
 button{font:inherit;color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
