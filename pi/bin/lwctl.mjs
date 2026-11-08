@@ -80,7 +80,7 @@ async function applySwitch(target, value, reason) {
     return false
   }
   const seq = Date.now()
-  writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target, model: value, reason: reason || "lwctl 手动切换" }, null, 2))
+  writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target, model: value, reason: reason || "lwctl 手动切换" }, null, 2))
   process.stdout.write(`  已下发：${target} → ${describeModel(value)} …`)
   const st = await waitAck(seq)
   console.log("")

@@ -294,10 +294,38 @@ function config(): Config {
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
 interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string; lastImpression?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
+}
+
+/** world.json 跨进程读改写的轻量锁（home/qq/cli 会同时改闹钟） */
+function withWorldLock<T>(fn: () => T): T | undefined {
+  const lock = join(ROOT, ".world.lock")
+  const pause = () => {
+    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5) }
+    catch { const end = Date.now() + 5; while (Date.now() < end) { /* spin */ } }
+  }
+  for (let i = 0; i < 60; i++) {
+    let fd: number
+    try { fd = openSync(lock, "wx", 0o600) }
+    catch {
+      try {
+        if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > 10_000) { unlinkSync(lock); continue }
+      } catch { /* ignore */ }
+      pause()
+      continue
+    }
+    try {
+      try { writeFileSync(fd, String(process.pid)); closeSync(fd) } catch (e) { try { closeSync(fd) } catch { /* ignore */ } throw e }
+      return fn()
+    } finally {
+      try { unlinkSync(lock) } catch { /* ignore */ }
+    }
+  }
+  log("world lock timeout")
+  return undefined
 }
 
 function bridgeStatus(): string {
@@ -473,26 +501,30 @@ function reinforce(ids: string[]): void {
 }
 
 /** 按半衰期整体衰减：只降强度，不删记录 */
-function decayStrengths(): void {
+function decayStrengths(): boolean {
   const cfg = config().memory.decay
-  if (!cfg.enabled) return
+  if (!cfg.enabled) return false
   try {
     const db = openMemIndex()
-    if (!db) return
+    if (!db) return false
     const state = readWorld()
     const now = Date.now()
     const last = state.lastDecay ? Date.parse(state.lastDecay) : 0
     const days = last ? (now - last) / 86_400_000 : 0
     if (!Number.isFinite(days) || days < 0.25) {
       // 首次没有标记：写一个起点，下次才按天数衰减
-      if (!state.lastDecay) writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
-      return
+      if (!state.lastDecay) {
+        writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
+        return true
+      }
+      return false
     }
     const factor = Math.pow(0.5, days / Math.max(1, cfg.halfLifeDays))
     db.prepare("UPDATE mem SET strength = max(?, strength * ?)").run(cfg.minStrength, factor)
     writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
     log(`decay applied ×${factor.toFixed(3)} · ${days.toFixed(1)}d`)
-  } catch (e) { log(`decay failed ${String(e)}`) }
+    return true
+  } catch (e) { log(`decay failed ${String(e)}`); return false }
 }
 
 // ———————— ACT-R 激活 / Hebbian 联想 ————————
@@ -597,11 +629,15 @@ function decayEdges(): void {
   const cfg = config().memory.association
   if (!cfg.enabled) return
   try {
+    // 边衰减有自己的每日标记，不跟着记忆强度的 lastDecay 走
+    const state = readWorld()
+    if (state.lastEdgeDecay && dayOf(new Date(state.lastEdgeDecay)) === dayOf()) return
     const db = openMemIndex()
     if (!db) return
     const now = new Date().toISOString()
     db.prepare("UPDATE edges SET w = w * max(0.01, exp(-? * max(0, julianday(?) - julianday(last)))), last = ?").run(cfg.decayPerDay, now, now)
     db.exec("DELETE FROM edges WHERE w < 0.02")
+    writeWorld({ ...readWorld(), lastEdgeDecay: now })
   } catch (e) { log(`decayEdges failed ${String(e)}`) }
 }
 
@@ -626,7 +662,7 @@ function bootstrapCooccurrence(db: any, all: Record_[]): void {
           const c = list[i]
           const a = p.id < c.id ? p.id : c.id
           const b = p.id < c.id ? c.id : p.id
-          const info = ins.run(a, b, 0.02, c.t)
+          const info = ins.run(a, b, 0.03, c.t)
           if (Number(info?.changes || 0) > 0) added++
         }
       }
@@ -1182,11 +1218,12 @@ function acquireTimerLock(): boolean {
   } catch { return false }
 }
 
-function sendTime(text: string): void {
+function sendTime(text: string): boolean {
   try {
-    ;(piRef as any)?.sendMessage?.({ customType: "life-world-time", content: text, display: true }, { triggerTurn: true, deliverAs: "followUp" })
+    const r = (piRef as any)?.sendMessage?.({ customType: "life-world-time", content: text, display: true }, { triggerTurn: true, deliverAs: "followUp" })
     log(`sendTime ${text.slice(0, 60)}`)
-  } catch (e) { log(`sendTime failed ${String(e)}`) }
+    return r !== false
+  } catch (e) { log(`sendTime failed ${String(e)}`); return false }
 }
 
 // ———————— 主动关怀：安静时段 / 天气 ————————
@@ -1281,8 +1318,9 @@ async function tick(): Promise<void> {
     if (state.lastCleanup !== today) {
       if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) writeWorld({ ...readWorld(), lastCleanup: today })
     }
-    // 记忆衰减：每天一次（lastDecay 是 ISO，按天判断）
-    if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) { decayStrengths(); decayEdges() }
+    // 记忆强度与联想边各自每天一次；边衰减不再依赖 decay 开关
+    if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) decayStrengths()
+    if (!state.lastEdgeDecay || dayOf(new Date(state.lastEdgeDecay)) !== today) decayEdges()
     guardBridge()
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
@@ -1290,10 +1328,12 @@ async function tick(): Promise<void> {
       const text = `【我的时间】${shortStamp(a.at)} 到了，说好做到这里是：${a.note}。\n先看看做完了没有；做完了就想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
       if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
       else sendTime(text)
-      const fresh = readWorld()
-      fresh.alarms = (fresh.alarms || []).filter((x) => x.id !== a.id)
-      fresh.lastWake = today
-      writeWorld(fresh)
+      withWorldLock(() => {
+        const fresh = readWorld()
+        fresh.alarms = (fresh.alarms || []).filter((x) => x.id !== a.id)
+        fresh.lastWake = today
+        return writeWorld(fresh)
+      })
     }
     if (due.length) return
     maybeRandomCare()
@@ -1304,9 +1344,10 @@ async function tick(): Promise<void> {
       if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "每日印象整理")
         log(`impression · switch model · ${r}`)
+        if (r.startsWith("切不过去")) log("impression · 本地不可用，按当前模型继续")
       }
-      sendTime(impressionPrompt(impCfg))
-      writeWorld({ ...readWorld(), lastImpression: today })
+      if (sendTime(impressionPrompt(impCfg))) writeWorld({ ...readWorld(), lastImpression: today })
+      else log("impression · send failed, will retry")
     }
     // 早上兜底
     if (state.lastWake === today) return
@@ -1811,7 +1852,10 @@ export default function (pi: ExtensionAPI) {
 
   // —— lwctl：会话心跳 + 远程切换模型 ——
   const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
-  let lastControlSeq = 0
+  const CONTROL_SEEN = join(ROOT, `.control-seen-${roleKey.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`)
+  let lastControlSeq = (() => {
+    try { return Number(JSON.parse(readFileSync(CONTROL_SEEN, "utf8")).seq) || 0 } catch { return 0 }
+  })()
   const statusPayload = () => {
     // ctx 在 newSession / 进程收尾后可能失效，逐项安全读取
     let model = "", sessionId = "", sessionFile = ""
@@ -1849,10 +1893,18 @@ export default function (pi: ExtensionAPI) {
   }
   const pollControl = async () => {
     try {
-      const c = readJson<{ seq?: number; target?: string; model?: string; reason?: string; action?: string }>(CONTROL_FILE, {})
+      const c = readJson<{ seq?: number; at?: number; target?: string; model?: string; reason?: string; action?: string }>(CONTROL_FILE, {})
       const seq = Number(c?.seq || 0)
       if (!seq || seq <= lastControlSeq) return
+      const at = Number(c?.at || 0)
+      // 进程重启前留下的旧命令只作废，不再执行一遍
+      if (!at || Date.now() - at > 5 * 60_000) {
+        lastControlSeq = seq
+        try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString(), skipped: "stale" })) } catch { /* ignore */ }
+        return
+      }
       lastControlSeq = seq
+      try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString() })) } catch { /* ignore */ }
       if (String(c?.target || "") !== roleKey) return
       const o = config().models
       if (String(c?.action || "") === "impression") {
@@ -1861,9 +1913,15 @@ export default function (pi: ExtensionAPI) {
           return
         }
         const imp = config().memory.impression
-        if (o.local && modelIdOf(lastCtx) !== o.local) await switchTo(lastCtx, o.local, "手动印象整理")
-        sendTime(impressionPrompt(imp))
-        atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: true, msg: "印象整理已触发", at: new Date().toISOString() }, null, 2))
+        if (o.local && modelIdOf(lastCtx) !== o.local) {
+          const r = await switchTo(lastCtx, o.local, "手动印象整理")
+          if (r.startsWith("切不过去")) {
+            atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: false, msg: `本地模型没切过去：${r}`, at: new Date().toISOString() }, null, 2))
+            return
+          }
+        }
+        const sent = sendTime(impressionPrompt(imp))
+        atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: sent, msg: sent ? "印象整理已触发" : "任务没能送进会话", at: new Date().toISOString() }, null, 2))
         writeStatus()
         return
       }
@@ -1883,9 +1941,11 @@ export default function (pi: ExtensionAPI) {
   ;(statusTimer as any).unref?.()
 
   let hydrated = false
+  let memoryHydrated = false
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     hydrated = false
+    memoryHydrated = false
     lastCtx = ctx
     // 恢复会话时只补开、不主动合：同一 session 可能还有另一个进程在云端
     const o = config().models
@@ -1993,11 +2053,14 @@ export default function (pi: ExtensionAPI) {
       prompt = `${prompt}\n\n${PRIVATE_HINT_MARK}\n${hint}`
     }
     if (prompt !== original) patch.systemPrompt = prompt
-    const memory = first && !cloudActive ? memoryBlock() : ""
+    // 记忆块只在第一次能安全给本地看时注入；云端开局、之后切回本地会补一次
+    const wantMemory = !memoryHydrated && !cloudActive
+    if (wantMemory) memoryHydrated = true
+    const memory = wantMemory ? memoryBlock() : ""
     const content = [stateText(!cloudActive), memory].filter(Boolean).join("\n\n")
     if (content) {
       patch.message = {
-        customType: first && memory ? "life-world-bootstrap" : "life-world-state",
+        customType: memory ? "life-world-bootstrap" : "life-world-state",
         content,
         display: false,
       }
@@ -2113,15 +2176,18 @@ export default function (pi: ExtensionAPI) {
       const now = Date.now()
       const target = typeof params.after_minutes === "number" ? now + params.after_minutes * 60_000 : Date.parse(String(params.at || ""))
       if (!Number.isFinite(target) || target < now + 60_000) return ok("时间不对：至少定在 1 分钟之后，at 要带时区。")
-      const state = readWorld()
       const c = config().models
       const current = lastCtx ? modelIdOf(lastCtx) : ""
       const model: Alarm["model"] = params.model === "local" || params.model === "cloud"
         ? params.model
         : current && current === c.local ? "local" : current && current === c.cloud ? "cloud" : undefined
       const alarm: Alarm = { id: `a-${now}-${Math.random().toString(36).slice(2, 6)}`, at: new Date(target).toISOString(), note: String(params.note || ""), setAt: new Date(now).toISOString(), model }
-      state.alarms = [...(state.alarms || []), alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-      if (!writeWorld(state)) return ok("闹钟没能写进 world.json。")
+      const saved = withWorldLock(() => {
+        const state = readWorld()
+        state.alarms = [...(state.alarms || []), alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+        return writeWorld(state)
+      })
+      if (!saved) return ok("闹钟没能写进 world.json。")
       const modelText = model === "cloud" ? "在线模型" : model === "local" ? "本地模型" : "当前模型"
       return ok(`定好了：${isoLocal(new Date(target))} —— ${alarm.note}（到点用${modelText}跑）`)
     },
@@ -2146,11 +2212,14 @@ export default function (pi: ExtensionAPI) {
     parameters: { type: "object", properties: { match: { type: "string", description: "note 关键词" } } },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能改闹钟。")
-      const state = readWorld()
-      const all = state.alarms || []
       const match = String(params.match || "").trim()
-      state.alarms = match ? all.filter((a) => !a.note.includes(match)) : []
-      writeWorld(state)
+      const saved = withWorldLock(() => {
+        const state = readWorld()
+        const all = state.alarms || []
+        state.alarms = match ? all.filter((a) => !a.note.includes(match)) : []
+        return writeWorld(state)
+      })
+      if (!saved) return ok("闹钟没改成功（world.json 暂时被占用）。")
       return ok(match ? `取消了 note 含「${match}」的闹钟。` : "全取消了。")
     },
   })

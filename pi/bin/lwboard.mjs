@@ -196,13 +196,19 @@ function parseImpressions() {
   return { raw, items }
 }
 
+function dayOfLocal(d = new Date()) {
+  const p = (n) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
 function memoryGraph(limit = 400) {
   const db = openMem()
   if (!db) return { nodes: [], links: [], stats: {} }
+  const cfg = readJson(CONFIG_FILE, {})
   const now = Date.now()
-  const d = 0.5
+  const d = Number(cfg?.memory?.actr?.decay) || 0.5
   const access = new Map()
-  const todayStr = new Date().toISOString().slice(0, 10)
+  const todayStr = dayOfLocal()
   let todayAccess = 0
   try {
     for (const r of db.prepare("SELECT id, t FROM access").all()) {
@@ -211,7 +217,7 @@ function memoryGraph(limit = 400) {
       const key = String(r.id)
       if (!access.has(key)) access.set(key, [])
       access.get(key).push(t)
-      if (String(r.t).slice(0, 10) === todayStr) todayAccess++
+      if (dayOfLocal(new Date(t)) === todayStr) todayAccess++
     }
   } catch { /* ignore */ }
   const edges = (() => { try { return db.prepare("SELECT a, b, w FROM edges").all() } catch { return [] } })()
@@ -229,9 +235,11 @@ function memoryGraph(limit = 400) {
   }
   const all = rows.map((r) => {
     const id = String(r.id)
+    const t = String(r.t || "")
     return {
       id,
-      t: String(r.t || ""),
+      t,
+      day: dayOfLocal(new Date(t)),
       role: String(r.role || ""),
       content: String(r.text || "").slice(0, 240),
       activation: Number(actOf(access.get(id)).toFixed(3)),
@@ -250,16 +258,36 @@ function memoryGraph(limit = 400) {
     for (const f of readdirSync(diaryDir).filter((x) => x.endsWith(".md")).sort().slice(-14)) {
       const body = readFileSync(join(diaryDir, f), "utf8")
       const title = body.split("\n").map((l) => l.replace(/^[#>\s-]+/, "").trim()).find(Boolean) || ""
-      diaries.push({ id: `diary-${f.replace(/\.md$/, "")}`, kind: "diary", t: `${f.replace(/\.md$/, "")}T20:00:00`, role: "diary", content: title.slice(0, 120), subject: f.replace(/\.md$/, ""), activation: 0, degree: 0, hits: 0, score: 0.6 })
+      diaries.push({ id: `diary-${f.replace(/\.md$/, "")}`, kind: "diary", t: `${f.replace(/\.md$/, "")}T20:00:00`, day: f.replace(/\.md$/, ""), role: "diary", content: title.slice(0, 120), subject: f.replace(/\.md$/, ""), activation: 0, degree: 0, hits: 0, score: 0.6 })
     }
   }
   const impressions = parseImpressions().items.map((it, i) => {
     const dayMatch = String(it.meta || "").match(/最后验证：\s*(\d{4}-\d{2}-\d{2})/)
     return { id: `imp-${i}`, kind: "impression", t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: 1.2 }
   })
+  // 印象的来源节点：按来源日期从全量消息里取，不用「全站 top5」硬凑
+  const impTargets = new Map()
+  const extraNodes = []
+  const extraIds = new Set()
+  for (const im of impressions) {
+    const meta = String(im.meta || "")
+    const md = [...new Set(meta.match(/\d{2}-\d{2}/g) || [])]
+    let targets = []
+    if (md.length) {
+      const years = [...new Set((meta.match(/\d{4}-\d{2}-\d{2}/g) || []).map((x) => x.slice(0, 4)))]
+      const year = years[0] || new Date().getFullYear()
+      const wanted = new Set(md.map((x) => `${year}-${x}`))
+      targets = all.filter((n) => wanted.has(n.day)).sort((a, b) => b.score - a.score).slice(0, 5)
+    }
+    impTargets.set(im.id, targets)
+    for (const t of targets) if (!extraIds.has(t.id)) { extraIds.add(t.id); extraNodes.push(t) }
+  }
   const specials = [...diaries, ...impressions]
   const pickedMsgs = all.slice(0, Math.max(50, Math.min(1000, limit)))
-  const picked = [...pickedMsgs, ...specials]
+  const pickedIds = new Set(pickedMsgs.map((n) => n.id))
+  // 来源节点最多再补 120 个，避免极端情况下把图撑爆
+  const extraPicked = extraNodes.filter((n) => !pickedIds.has(n.id)).slice(0, 120)
+  const picked = [...pickedMsgs, ...extraPicked, ...specials]
   const ids = new Set(picked.map((n) => n.id))
   const links = edges
     .filter((e) => ids.has(String(e.a)) && ids.has(String(e.b)))
@@ -267,27 +295,18 @@ function memoryGraph(limit = 400) {
   // 日记 → 当天前 5 条消息
   const byDayList = new Map()
   for (const n of pickedMsgs) {
-    const d = String(n.t).slice(0, 10)
-    if (!byDayList.has(d)) byDayList.set(d, [])
-    byDayList.get(d).push(n)
+    if (!byDayList.has(n.day)) byDayList.set(n.day, [])
+    byDayList.get(n.day).push(n)
   }
-  for (const d of diaries) {
-    const day = d.subject
-    const targets = (byDayList.get(day) || []).slice().sort((a, b) => b.score - a.score).slice(0, 5)
-    for (const t of targets) links.push({ source: d.id, target: t.id, w: 0.35, kind: "diary" })
+  for (const dnode of diaries) {
+    const targets = (byDayList.get(dnode.subject) || []).slice().sort((a, b) => b.score - a.score).slice(0, 5)
+    for (const t of targets) links.push({ source: dnode.id, target: t.id, w: 0.35, kind: "diary" })
   }
-  // 印象 → 来源日期内的前 5 条消息
+  // 印象 → 真正的来源日期消息；没有来源就不断线
   for (const im of impressions) {
-    const days = [...new Set((String(im.meta || "").match(/\d{2}-\d{2}/g) || []))]
-    let targets = []
-    if (days.length) {
-      const years = [...new Set((String(im.meta || "").match(/\d{4}-\d{2}-\d{2}/g) || []).map((x) => x.slice(0, 4)))]
-      const year = years[0] || new Date().getFullYear()
-      const wanted = new Set(days.map((md) => `${year}-${md}`))
-      targets = pickedMsgs.filter((n) => wanted.has(String(n.t).slice(0, 10)))
+    for (const t of impTargets.get(im.id) || []) {
+      if (ids.has(t.id)) links.push({ source: im.id, target: t.id, w: 0.55, kind: "impression" })
     }
-    if (!targets.length) targets = pickedMsgs.slice(0, 5)
-    for (const t of targets.sort((a, b) => b.score - a.score).slice(0, 5)) links.push({ source: im.id, target: t.id, w: 0.55, kind: "impression" })
   }
   const avgAct = picked.length ? picked.reduce((s, n) => s + n.activation, 0) / picked.length : 0
   return {
@@ -299,7 +318,7 @@ function memoryGraph(limit = 400) {
       todayAccess,
       avgActivation: Number(avgAct.toFixed(3)),
       shown: picked.length,
-      impressions: parseImpressions().items.length,
+      impressions: impressions.length,
     },
   }
 }
@@ -307,6 +326,14 @@ function memoryGraph(limit = 400) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`)
   try {
+    if (req.method === "GET" && url.pathname === "/nebula.jpg") {
+      const file = join(HERE, "nebula.jpg")
+      if (!existsSync(file)) { res.writeHead(404); res.end(); return }
+      const data = readFileSync(file)
+      res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=86400" })
+      res.end(data)
+      return
+    }
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       const file = join(HERE, "board.html")
       const data = readFileSync(file)
@@ -359,7 +386,7 @@ const server = http.createServer(async (req, res) => {
       const resolved = value === "local" ? m.local : value === "cloud" ? m.cloud : value
       if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
       const seq = Date.now()
-      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
+      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
       const st = await waitAck(seq)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
     }
@@ -390,7 +417,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/impressions/run") {
       const seq = Date.now()
-      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target: "home", action: "impression", reason: "看板手动整理" }, null, 2))
+      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target: "home", action: "impression", reason: "看板手动整理" }, null, 2))
       const st = await waitAck(seq, 15000)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（可能没在跑）" })
     }
