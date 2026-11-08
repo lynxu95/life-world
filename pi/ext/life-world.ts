@@ -433,9 +433,13 @@ function decayStrengths(): void {
     if (!db) return
     const state = readWorld()
     const now = Date.now()
-    const last = state.lastDecay ? Date.parse(state.lastDecay) : now
-    const days = (now - last) / 86_400_000
-    if (!Number.isFinite(days) || days < 0.25) return
+    const last = state.lastDecay ? Date.parse(state.lastDecay) : 0
+    const days = last ? (now - last) / 86_400_000 : 0
+    if (!Number.isFinite(days) || days < 0.25) {
+      // 首次没有标记：写一个起点，下次才按天数衰减
+      if (!state.lastDecay) writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
+      return
+    }
     const factor = Math.pow(0.5, days / Math.max(1, cfg.halfLifeDays))
     db.prepare("UPDATE mem SET strength = max(?, strength * ?)").run(cfg.minStrength, factor)
     writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
