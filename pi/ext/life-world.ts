@@ -1256,17 +1256,16 @@ async function tick(): Promise<void> {
     }
     if (due.length) return
     maybeRandomCare()
-    // 印象整理：云端随时可跑；本地模型等到设定时间（默认 05:00）
+    // 印象整理：每天一次，固定 hour（默认 05:00）后；配了本地模型先切本地再跑
     const impCfg = c.memory.impression
-    if (impCfg.enabled && state.lastImpression !== today) {
-      const cur = lastCtx ? modelIdOf(lastCtx) : ""
-      const isLocal = !!c.models.local && cur === c.models.local
-      const isCloud = !!c.models.cloud && cur === c.models.cloud
-      const timeOk = isCloud || !isLocal || hour >= impCfg.hour
-      if (timeOk) {
-        sendTime(`【印象整理】用 memory_timeline / memory_search 回看最近 ${impCfg.days} 天（对话、日记、房间笔记），整理最多 ${impCfg.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明；总数不超过 ${impCfg.maxItems} 条，旧的、不再成立的删掉。\n只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`)
-        writeWorld({ ...readWorld(), lastImpression: today })
+    if (impCfg.enabled && state.lastImpression !== today && hour >= impCfg.hour) {
+      const o = c.models
+      if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
+        const r = await switchTo(lastCtx, o.local, "每日印象整理")
+        log(`impression · switch model · ${r}`)
       }
+      sendTime(`【印象整理】用 memory_timeline / memory_search 回看最近 ${impCfg.days} 天（对话、日记、房间笔记），整理最多 ${impCfg.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明；总数不超过 ${impCfg.maxItems} 条，旧的、不再成立的删掉。\n只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`)
+      writeWorld({ ...readWorld(), lastImpression: today })
     }
     // 早上兜底
     if (state.lastWake === today) return
@@ -1292,7 +1291,10 @@ function rotateLog(file: string, maxBytes = 5 * 1024 * 1024): void {
     const old = `${file}.1`
     try { if (existsSync(old)) unlinkSync(old) } catch { /* ignore */ }
     renameSync(file, old)
-  } catch (e) { log(`rotateLog failed ${String(e)}`) }
+  } catch (e) {
+    const msg = String(e)
+    if (!msg.includes("ENOENT")) log(`rotateLog failed ${msg}`)
+  }
 }
 
 function cleanupTmp(maxAgeHours: number): boolean {
@@ -1925,8 +1927,8 @@ export default function (pi: ExtensionAPI) {
     // 模型使用规范：和心情一样注入（identity/模型使用规范.md，控制在 500 字内）
     const rules = readText(MODEL_RULES_FILE)
     if (rules && !prompt.includes(MODEL_RULES_MARK)) prompt = `${prompt}\n\n${MODEL_RULES_MARK}\n${rules}`
-    // 印象：只在本地/非云端注入（可能含私密内容）
-    if (!cloudActive) {
+    // 印象：本地和云端都注入（只放判断，不含私密细节）
+    {
       const imp = readText(IMPRESSION_FILE)
       if (imp && !prompt.includes(IMPRESSION_MARK)) prompt = `${prompt}\n\n${IMPRESSION_MARK}\n${imp}`
     }

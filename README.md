@@ -195,9 +195,10 @@ git fetch origin && git checkout pi-agent-v2 && git pull
 
 每天一次，把最近 `impression.days` 天的对话/日记/笔记交给模型归纳成最多 `impression.maxItems` 条“印象”，写进 `identity/印象.md`（带来源、置信度、最后验证）。合并更新，不重复、不写私密细节。
 
-- 当前是**云端模型**：随时可跑；
-- 当前是**本地模型**：等到 `impression.hour`（默认 05:00）之后才跑，避免白天抢算力；
-- 印象只在**非云端**会话注入（可能含私密判断）。
+- 每天一次，统一在 `impression.hour`（默认 05:00）之后跑；
+- **配了本地模型**：先切到本地模型再生成，生成后留在本地；
+- **纯云端模式**（未配 `models.local`）：直接用当前在线模型跑，不切模型；
+- 印象**本地和云端都会注入**（只放判断，不含私密细节）。
 
 实测配置（RTX 5060 Ti 16G + Basalt + Qwen3.8-Flash-Next IQ3_XXS，搭配 DeepSeek Flash）：插件稳定运行，日常聊天质量不错，世界探索交给在线模型。
 
