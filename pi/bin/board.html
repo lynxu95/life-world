@@ -208,12 +208,12 @@ input[type=checkbox]{accent-color:var(--accent)}
 .star:fullscreen{display:flex;flex-direction:column;background:#04060c;border:0;border-radius:0;height:100vh;overflow:hidden}
 .star:fullscreen .brain-wrap{flex:1;min-height:0}
 .star:fullscreen #graph{height:100%}
-.star:fullscreen .brain-detail{max-height:none;width:320px;height:100%}
+.star:fullscreen .brain-detail{max-height:none;width:300px;height:100%}
 .star.is-full{position:fixed;inset:0;z-index:80;display:flex;flex-direction:column;
   background:#04060c;border:0;border-radius:0;height:100vh;overflow:hidden}
 .star.is-full .brain-wrap{flex:1;min-height:0}
 .star.is-full #graph{height:100%}
-.star.is-full .brain-detail{max-height:none;width:320px;height:100%}
+.star.is-full .brain-detail{max-height:none;width:300px;height:100%}
 #tab-memory #star-shell:fullscreen #graph,
 #tab-memory #star-shell.is-full #graph{height:100%!important}
 
@@ -334,7 +334,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <label class="bf"><input type="checkbox" id="f-diary" checked>日记</label>
             <label class="bf"><input type="checkbox" id="f-imp" checked>印象</label>
             <label class="bf"><input type="checkbox" id="f-doc" checked>文档</label>
-            <input id="brain-q" placeholder="在星图里搜索…">
+            <input id="brain-q" placeholder="在星图里搜索（按摘要）…">
             <button id="brain-refresh">刷新</button>
             <button id="star-full">全屏</button>
           </div>
@@ -672,8 +672,9 @@ $("backup").onclick = async () => {
 }
 
 // ———————— 记忆星图（Canvas 3D + 星云） ————————
-const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true } }
+const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true }, dirty: true, dpr: 0 }
 const PULSES = []
+const POINTERS = new Map()
 const brainCanvas = document.createElement("canvas")
 $("graph").appendChild(brainCanvas)
 const bctx = brainCanvas.getContext("2d")
@@ -754,6 +755,49 @@ function buildFog() {
 }
 buildFog()
 
+// 星云云团：分形噪声生成有絮状边缘的云块，叠在柔焦雾之上
+const cloudCanvas = document.createElement("canvas")
+function buildClouds() {
+  const S = 384
+  cloudCanvas.width = S; cloudCanvas.height = S
+  const c = cloudCanvas.getContext("2d")
+  const img = c.createImageData(S, S)
+  const hash = (x, y) => {
+    let h = Math.imul(x, 374761393) + Math.imul(y, 668265263)
+    h = Math.imul(h ^ (h >>> 13), 1274126177)
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+  }
+  const smooth = (t) => t * t * (3 - 2 * t)
+  const noise = (x, y, scale) => {
+    const gx = x / scale, gy = y / scale
+    const x0 = Math.floor(gx), y0 = Math.floor(gy)
+    const fx = smooth(gx - x0), fy = smooth(gy - y0)
+    const a = hash(x0, y0), b = hash(x0 + 1, y0), c2 = hash(x0, y0 + 1), d = hash(x0 + 1, y0 + 1)
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c2 * (1 - fx) + d * fx) * fy
+  }
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let n = 0, amp = 0.5, scale = 96
+      for (let o = 0; o < 5; o++) { n += noise(x, y, scale) * amp; scale /= 2; amp /= 2 }
+      const density = Math.max(0, Math.min(1, (n - 0.42) * 2.6))
+      const r = Math.round(70 + 120 * n)
+      const g = Math.round(145 + 80 * n)
+      const b = Math.round(195 + 45 * n)
+      const i = (y * S + x) * 4
+      img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b
+      img.data[i + 3] = Math.round(255 * density * 0.62)
+    }
+  }
+  c.putImageData(img, 0, 0)
+  c.globalCompositeOperation = "destination-in"
+  const mask = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2)
+  mask.addColorStop(0, "rgba(0,0,0,1)")
+  mask.addColorStop(0.55, "rgba(0,0,0,.6)")
+  mask.addColorStop(1, "rgba(0,0,0,0)")
+  c.fillStyle = mask; c.fillRect(0, 0, S, S)
+}
+buildClouds()
+
 function nodeColor(n) {
   if (n.kind === "identity") return "#e8fbff"
   if (n.kind === "impression") return "#fbbf24"
@@ -823,23 +867,25 @@ function layoutBrain() {
   }
   BRAIN.pos = arr
   const radii = arr.map((p) => Math.hypot(p.x, p.z))
-  BRAIN.meanR = radii.reduce((a, b) => a + b, 0) / Math.max(1, radii.length) || 11
+  const meanR = radii.reduce((a, b) => a + b, 0) / Math.max(1, radii.length) || 11
+  const raw = radii.map((r) => 1 + (meanR - r) * 0.065)
+  const clamped = raw.map((f) => Math.max(0.8, Math.min(1.6, f)))
+  const avg = clamped.reduce((a, b) => a + b, 0) / Math.max(1, clamped.length) || 1
+  arr.forEach((p, i) => { p.rot = clamped[i] / avg })
+  BRAIN.meanR = meanR
+  BRAIN.maxR = radii.reduce((m, r) => Math.max(m, r), 6)
 }
 
-function rotFactor(r) {
-  const mean = BRAIN.meanR || 11
-  return Math.max(0.8, Math.min(1.6, 1 + (mean - r) * 0.065))
-}
-function projectPoint(p, w, h) {
-  const yaw = BRAIN.yaw * rotFactor(Math.hypot(p.x, p.z))
+function projectPoint(p, w, h, fitK) {
+  const yaw = BRAIN.yaw * (p.rot || 1)
   const cy = Math.cos(yaw), sy = Math.sin(yaw)
   const cp = Math.cos(BRAIN.pitch), sp = Math.sin(BRAIN.pitch)
   const x1 = p.x * cy - p.z * sy
   const z1 = p.x * sy + p.z * cy
   const y1 = p.y * cp - z1 * sp
   const z2 = p.y * sp + z1 * cp
-  const scale = 1 / (1 + z2 * 0.045)
-  const k = 24 * scale * BRAIN.zoom
+  const scale = 1 / Math.max(0.25, 1 + z2 * 0.045)
+  const k = fitK * scale * BRAIN.zoom
   return { x: w / 2 + x1 * k, y: h / 2 + y1 * k, z: z2, s: scale * BRAIN.zoom }
 }
 
@@ -847,10 +893,12 @@ function resizeBrain() {
   const el = $("graph")
   const w = el.clientWidth, h = el.clientHeight
   if (!w || !h) return
-  const dpr = window.devicePixelRatio || 1
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  BRAIN.dpr = dpr
   brainCanvas.width = Math.round(w * dpr); brainCanvas.height = Math.round(h * dpr)
   brainCanvas.style.width = w + "px"; brainCanvas.style.height = h + "px"
   bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  BRAIN.dirty = true
 }
 
 let lastPulseAt = 0
@@ -861,7 +909,8 @@ function maybeSpawnPulse(t) {
   if (PULSES.length > 24 || !BRAIN.links.length) return
   const roll = Math.random()
   const kind = roll < 0.78 ? "recall" : roll < 0.94 ? "impression" : "diary"
-  const pool = BRAIN.links.filter((l) => l.kind === kind)
+  const vis = new Set(BRAIN.nodes.filter(nodeVisible).map((n) => n.id))
+  const pool = BRAIN.links.filter((l) => l.kind === kind && vis.has(l.source) && vis.has(l.target))
   if (!pool.length) return
   const l = pool[Math.floor(Math.random() * pool.length)]
   const speed = kind === "recall" ? 0.026 + Math.random() * 0.016 : 0.012 + Math.random() * 0.01
@@ -869,7 +918,8 @@ function maybeSpawnPulse(t) {
 }
 function burstFrom(id) {
   if (reduceMotion) return
-  const links = BRAIN.links.filter((l) => l.source === id || l.target === id).filter((l) => l.kind !== "identity").slice(0, 14)
+  const vis = new Set(BRAIN.nodes.filter(nodeVisible).map((n) => n.id))
+  const links = BRAIN.links.filter((l) => (l.source === id || l.target === id) && l.kind !== "identity" && vis.has(l.source) && vis.has(l.target)).slice(0, 14)
   for (const l of links) {
     const forward = l.source === id
     const speed = l.kind === "recall" ? 0.026 + Math.random() * 0.016 : 0.012 + Math.random() * 0.01
@@ -887,13 +937,14 @@ function drawPulses(ctx, idx, proj) {
   if (reduceMotion) return
   for (let i = PULSES.length - 1; i >= 0; i--) {
     const q = PULSES[i]
-    q.p += q.speed
+    q.p += q.speed * (BRAIN.dt || 1)
     if (q.p >= 1) { PULSES.splice(i, 1); continue }
     if (BRAIN.hover && q.source !== BRAIN.hover && q.target !== BRAIN.hover) continue
     const a = idx.get(q.source), b = idx.get(q.target)
     if (a === undefined || b === undefined) { PULSES.splice(i, 1); continue }
     const pa = proj[a], pb = proj[b]
     if (!pa || !pb) continue
+    if (!nodeVisible(BRAIN.nodes[a]) || !nodeVisible(BRAIN.nodes[b])) continue
     const headX = pa.x + (pb.x - pa.x) * q.p, headY = pa.y + (pb.y - pa.y) * q.p
     const special = q.kind !== "recall"
     const tailP = Math.max(0, q.p - (special ? 0.12 : 0.08))
@@ -911,18 +962,24 @@ function drawPulses(ctx, idx, proj) {
 }
 
 function drawIdentityLinks(ctx, idx, proj, focus, focusMix, t) {
+  if (!BRAIN.filters.doc) return
+  const q = BRAIN.search
   for (const l of BRAIN.links) {
     if (l.kind !== "identity") continue
     const a = idx.get(l.source), b = idx.get(l.target)
     if (a === undefined || b === undefined) continue
+    const na = BRAIN.nodes[a], nb = BRAIN.nodes[b]
+    if (!nodeVisible(na) || !nodeVisible(nb)) continue
     const pa = proj[a], pb = proj[b]
     if (!pa || !pb) continue
+    const qHit = !q || String((na.content || "") + " " + (na.subject || "")).toLowerCase().includes(q) || String((nb.content || "") + " " + (nb.subject || "")).toLowerCase().includes(q)
+    const queryMul = qHit ? 1 : 0.18
     const inFocus = !focus || (focus.has(l.source) && focus.has(l.target))
     const focusMul = focus && !inFocus ? 1 - 0.9 * focusMix : 1
     const depth = Math.max(0, Math.min(1, (pa.z + pb.z) / 24 + 0.5))
     const phase = (hashStr(l.source + l.target) % 1000) / 1000 * Math.PI * 2
     const breathe = reduceMotion ? 1 : 0.85 + 0.15 * Math.sin(t * 0.0008 + phase)
-    const alpha = (0.36 + (1 - depth) * 0.14) * breathe * focusMul
+    const alpha = (0.36 + (1 - depth) * 0.14) * breathe * focusMul * queryMul
     ctx.save()
     ctx.setLineDash([3, 4])
     ctx.globalAlpha = alpha * 0.35
@@ -973,6 +1030,15 @@ function drawBrain(t) {
   }
   drawFog(fogScale * fogBreathe, Math.sin(BRAIN.yaw) * 0.05 + fogTimeRot, 1.0 * fogPulse, Math.sin(BRAIN.yaw) * w * 0.025 + fogDrift, Math.cos(BRAIN.yaw * 0.7) * h * 0.02)
   drawFog(fogScale * 1.55 * fogBreathe, -Math.sin(BRAIN.yaw) * 0.07 - fogTimeRot * 1.4, 0.55 * fogPulse, -Math.sin(BRAIN.yaw) * w * 0.02 - fogDrift, Math.cos(BRAIN.yaw * 0.9) * h * 0.015)
+  // 分形云团：保留上面的柔焦，再叠有结构的云块
+  const cloudScale = Math.max(w, h) / 384 * 1.1
+  ctx.save()
+  ctx.globalAlpha = 0.7
+  ctx.translate(w / 2 + Math.sin(BRAIN.yaw * 0.6) * w * 0.025, h / 2 + Math.cos(BRAIN.yaw * 0.4) * h * 0.02)
+  ctx.rotate(Math.sin(BRAIN.yaw * 0.35) * 0.06 + (reduceMotion ? 0 : t * 0.000012))
+  ctx.scale(cloudScale, cloudScale)
+  ctx.drawImage(cloudCanvas, -192, -192)
+  ctx.restore()
   // 屏幕固定：暗角 + 上下压暗，让星图节点浮在背景上
   const haze = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.18, w / 2, h / 2, Math.max(w, h) * 0.75)
   haze.addColorStop(0, "rgba(4,7,14,0)")
@@ -994,7 +1060,8 @@ function drawBrain(t) {
   }
   ctx.globalAlpha = 1
   const idx = new Map(BRAIN.nodes.map((node, i) => [node.id, i]))
-  const proj = BRAIN.pos.map((p) => projectPoint(p, w, h))
+  const fitK = Math.min(24, Math.max(12, (Math.min(w, h) * 0.52) / Math.max(6, BRAIN.maxR || 16)))
+  const proj = BRAIN.pos.map((p) => projectPoint(p, w, h, fitK))
   const query = BRAIN.search
   const hover = BRAIN.hover
   if (hover) {
@@ -1012,7 +1079,7 @@ function drawBrain(t) {
     BRAIN.focusIds = set
   }
   // 聚焦渐暗：悬停时约 0.5 秒过渡，离开后同样渐亮
-  BRAIN.focusMix += ((hover ? 1 : 0) - BRAIN.focusMix) * 0.055
+  BRAIN.focusMix += ((hover ? 1 : 0) - BRAIN.focusMix) * Math.min(0.2, 0.055 * (BRAIN.dt || 1))
   if (!hover && BRAIN.focusMix < 0.01) { BRAIN.focusMix = 0; BRAIN.focusIds = null }
   const focusMix = BRAIN.focusMix
   const focus = BRAIN.focusIds && focusMix > 0.01 ? BRAIN.focusIds : null
@@ -1025,20 +1092,22 @@ function drawBrain(t) {
     const inFocus = !focus || (focus.has(l.source) && focus.has(l.target))
     if (focus && !inFocus) ctx.globalAlpha = 1 - 0.9 * focusMix
     const depth = Math.max(0, Math.min(1, (pa.z + pb.z) / 24 + 0.5))
+    const lw = Math.max(0.02, Math.min(1, Number(l.w) || 0.2))
+    const strength = 0.45 + 0.55 * Math.min(1, lw / 0.5)
     let color
     let width
     if (l.kind === "impression") {
-      color = `rgba(251,191,36,${0.24 + (1 - depth) * 0.26})`
+      color = `rgba(251,191,36,${(0.24 + (1 - depth) * 0.26) * strength})`
       width = 0.9
     } else if (l.kind === "diary") {
-      color = `rgba(245,158,11,${0.1 + (1 - depth) * 0.15})`
+      color = `rgba(245,158,11,${(0.1 + (1 - depth) * 0.15) * strength})`
       width = 0.5
     } else {
-      color = `rgba(45,212,191,${0.07 + (1 - depth) * 0.12})`
+      color = `rgba(45,212,191,${(0.07 + (1 - depth) * 0.12) * strength})`
       width = 0.5
     }
     ctx.strokeStyle = color
-    ctx.lineWidth = width
+    ctx.lineWidth = width * (0.7 + 0.3 * strength)
     if (l.kind === "impression") ctx.setLineDash([3, 4])
     ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y)
     ctx.stroke()
@@ -1145,13 +1214,30 @@ function drawBrain(t) {
   BRAIN.proj = proj
 }
 
+let lastFrame = 0
 function brainLoop(t) {
-  if (!BRAIN.drag && !reduceMotion) BRAIN.yaw += BRAIN.hover ? 0.00025 : 0.0012
-  drawBrain(t || 0)
+  const ts = t || 0
+  const dt = lastFrame ? Math.min(50, Math.max(0, ts - lastFrame)) : 16.67
+  lastFrame = ts
+  const k = dt / 16.67
+  const memoryHidden = $("tab-memory")?.hidden
+  if (document.hidden || memoryHidden) { requestAnimationFrame(brainLoop); return }
+  if (Math.min(2, window.devicePixelRatio || 1) !== BRAIN.dpr) resizeBrain()
+  if (!BRAIN.drag && !reduceMotion) BRAIN.yaw += (BRAIN.hover ? 0.00025 : 0.0012) * k
+  BRAIN.dt = k
+  if (reduceMotion && !BRAIN.dirty && !BRAIN.drag && !BRAIN.hover && BRAIN.focusMix < 0.01) {
+    requestAnimationFrame(brainLoop)
+    return
+  }
+  BRAIN.dirty = false
+  drawBrain(ts)
   requestAnimationFrame(brainLoop)
 }
 
+let detailSeq = 0
+let brainLoadSeq = 0
 function showBrainDetail(n) {
+  const seq = ++detailSeq
   const el = $("brain-detail")
   if (n.kind === "identity") {
     el.innerHTML = `<h4>注入文档 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>文件：${esc2(n.file || "")}</span><span>更新：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span></div>`
@@ -1162,6 +1248,14 @@ function showBrainDetail(n) {
   } else {
     el.innerHTML = `<h4>记忆节点</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>时间：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span><span>角色：${n.role === "user" ? "对方" : "我"}</span><span>激活：${n.activation}</span><span>命中：${n.hits} 次 · 关联：${n.degree} 条</span></div>`
   }
+  if (!n.kind || n.kind === "identity" || n.kind === "diary") {
+    getJson("/api/node?id=" + encodeURIComponent(n.id)).then((d) => {
+      if (seq !== detailSeq || !d || typeof d.content !== "string") return
+      const txt = el.querySelector(".txt")
+      if (txt) txt.textContent = d.content
+    }).catch(() => {})
+  }
+  BRAIN.dirty = true
 }
 
 function hitBrain(x, y) {
@@ -1175,12 +1269,30 @@ function hitBrain(x, y) {
 }
 
 brainCanvas.addEventListener("pointerdown", (e) => {
-  BRAIN.hover = null
-  brainCanvas.style.cursor = "grab"
-  BRAIN.drag = { x: e.clientX, y: e.clientY, moved: 0 }
+  if (e.pointerType === "mouse" && e.button !== 0) return
+  POINTERS.set(e.pointerId, { x: e.clientX, y: e.clientY })
   try { brainCanvas.setPointerCapture(e.pointerId) } catch {}
+  if (POINTERS.size === 2) {
+    const [a, b] = [...POINTERS.values()]
+    BRAIN.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoom: BRAIN.zoom }
+    BRAIN.drag = null
+    BRAIN.hover = null
+    BRAIN.dirty = true
+    return
+  }
+  BRAIN.hover = null
+  BRAIN.drag = { x: e.clientX, y: e.clientY, moved: 0 }
+  BRAIN.dirty = true
 })
 brainCanvas.addEventListener("pointermove", (e) => {
+  if (POINTERS.has(e.pointerId)) POINTERS.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  if (BRAIN.pinch && POINTERS.size >= 2) {
+    const [a, b] = [...POINTERS.values()]
+    const d = Math.hypot(a.x - b.x, a.y - b.y)
+    if (d > 0) BRAIN.zoom = Math.max(0.45, Math.min(3.2, BRAIN.pinch.zoom * d / BRAIN.pinch.dist))
+    BRAIN.dirty = true
+    return
+  }
   if (!BRAIN.drag) {
     const rect = brainCanvas.getBoundingClientRect()
     const n = hitBrain(e.clientX - rect.left, e.clientY - rect.top)
@@ -1188,6 +1300,7 @@ brainCanvas.addEventListener("pointermove", (e) => {
     if (BRAIN.hover !== id) {
       BRAIN.hover = id
       brainCanvas.style.cursor = id ? "pointer" : "grab"
+      BRAIN.dirty = true
     }
     return
   }
@@ -1196,21 +1309,45 @@ brainCanvas.addEventListener("pointermove", (e) => {
   BRAIN.drag.x = e.clientX; BRAIN.drag.y = e.clientY
   BRAIN.yaw += dx * 0.006
   BRAIN.pitch = Math.max(-1.2, Math.min(1.2, BRAIN.pitch + dy * 0.006))
+  BRAIN.dirty = true
 })
 brainCanvas.addEventListener("pointerleave", () => {
   BRAIN.hover = null
   brainCanvas.style.cursor = "grab"
+  BRAIN.dirty = true
 })
 brainCanvas.addEventListener("pointerup", (e) => {
-  const d = BRAIN.drag; BRAIN.drag = null
-  if (!d || d.moved > 6) return
+  const wasPinch = !!BRAIN.pinch
+  const d = BRAIN.drag
+  POINTERS.delete(e.pointerId)
+  if (BRAIN.pinch && POINTERS.size < 2) BRAIN.pinch = null
+  BRAIN.drag = null
+  BRAIN.dirty = true
+  if (wasPinch || !d || d.moved > 6) return
   const rect = brainCanvas.getBoundingClientRect()
   const n = hitBrain(e.clientX - rect.left, e.clientY - rect.top)
   if (n) { BRAIN.selected = n.id; showBrainDetail(n); burstFrom(n.id) }
 })
+function clearPointer(e) {
+  POINTERS.delete(e.pointerId)
+  BRAIN.drag = null
+  if (POINTERS.size < 2) BRAIN.pinch = null
+  brainCanvas.style.cursor = "grab"
+  BRAIN.dirty = true
+}
+brainCanvas.addEventListener("pointercancel", clearPointer)
+brainCanvas.addEventListener("lostpointercapture", clearPointer)
+window.addEventListener("blur", () => {
+  POINTERS.clear()
+  BRAIN.drag = null
+  BRAIN.pinch = null
+  brainCanvas.style.cursor = "grab"
+  BRAIN.dirty = true
+})
 brainCanvas.addEventListener("wheel", (e) => {
   e.preventDefault()
   BRAIN.zoom = Math.max(0.45, Math.min(3.2, BRAIN.zoom * (e.deltaY > 0 ? 0.92 : 1.08)))
+  BRAIN.dirty = true
 }, { passive: false })
 
 // 全屏
@@ -1242,12 +1379,19 @@ syncFullLabel()
 
 function toggleFilter() {
   BRAIN.filters = { mem: $("f-mem").checked, diary: $("f-diary").checked, imp: $("f-imp").checked, doc: $("f-doc").checked }
+  if (BRAIN.hover) {
+    const n = BRAIN.nodes.find((x) => x.id === BRAIN.hover)
+    if (!n || !nodeVisible(n)) BRAIN.hover = null
+  }
+  BRAIN.dirty = true
 }
 for (const id of ["f-mem", "f-diary", "f-imp", "f-doc"]) $(id).addEventListener("change", toggleFilter)
 
 async function loadBrain() {
+  const seq = ++brainLoadSeq
   try {
     const d = await getJson("/api/memory-graph?limit=400")
+    if (seq !== brainLoadSeq) return
     const st = d.stats || {}
     $("brain-stats").innerHTML = `<span>节点 <b>${st.nodes ?? 0}</b></span><span>联想边 <b>${st.edges ?? 0}</b></span><span>今日命中 <b>${st.todayAccess ?? 0}</b></span><span>展示 <b>${st.shown ?? 0}</b></span><span>文档 <b>${st.docs ?? 0}</b></span><span>印象 <b>${st.impressions ?? 0}</b></span>`
     BRAIN.nodes = d.nodes
@@ -1257,11 +1401,14 @@ async function loadBrain() {
     BRAIN.focusMix = 0
     BRAIN.focusIds = null
     PULSES.length = 0
+    detailSeq++
+    $("brain-detail").innerHTML = '<h4>节点详情</h4><div class="txt">点一颗记忆球看原文、激活度与关联。</div>'
+    BRAIN.dirty = true
     layoutBrain()
     resizeBrain()
   } catch (e) { $("brain-stats").textContent = "加载失败：" + e.message }
 }
-$("brain-q").addEventListener("input", () => { BRAIN.search = $("brain-q").value.trim().toLowerCase() })
+$("brain-q").addEventListener("input", () => { BRAIN.search = $("brain-q").value.trim().toLowerCase(); BRAIN.dirty = true })
 $("brain-refresh").onclick = loadBrain
 
 if (typeof ResizeObserver !== "undefined") {
@@ -1308,7 +1455,10 @@ function setTab(name, remember = true) {
     }
   }
   if (remember) { try { localStorage.setItem("lw-tab", name) } catch {} }
-  if (name === "memory") setTimeout(() => { resizeBrain(); drawBrain(performance.now()) }, 80)
+  if (name === "memory") {
+    BRAIN.dirty = true
+    setTimeout(() => { resizeBrain(); drawBrain(performance.now()) }, 80)
+  }
 }
 document.querySelectorAll(".tab-btn").forEach((btn) => { btn.onclick = () => setTab(btn.dataset.tab) })
 try { setTab(localStorage.getItem("lw-tab") || "overview", false) } catch { setTab("overview", false) }

@@ -225,12 +225,38 @@ function dayOfLocal(d = new Date()) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
+/** 从印象 meta 里解析「来源：」段的日期；全日期与 MM-DD 分开处理，避免把 2026-11-05 切成 26-11 */
+function sourceDays(meta) {
+  const text = String(meta || "")
+  const m = text.match(/来源[:：]\s*([^；;）)]*)/)
+  const section = m ? m[1] : ""
+  if (!section) return []
+  const last = text.match(/最后验证[:：]\s*(\d{4})-(\d{2})-(\d{2})/)
+  const baseYear = last ? Number(last[1]) : new Date().getFullYear()
+  const days = new Set()
+  const full = /(\d{4})-(\d{2})-(\d{2})/g
+  let x
+  while ((x = full.exec(section))) days.add(`${x[1]}-${x[2]}-${x[3]}`)
+  const short = /(?<![\d-])(\d{2})-(\d{2})(?![\d-])/g
+  while ((x = short.exec(section))) {
+    const mm = Number(x[1]), dd = Number(x[2])
+    let year = baseYear
+    if (last) {
+      const bm = Number(last[2]), bd = Number(last[3])
+      if (mm > bm + 6 || (bm <= 2 && mm >= 11)) year = baseYear - 1
+    }
+    days.add(`${year}-${x[1]}-${x[2]}`)
+  }
+  return [...days]
+}
+
 function memoryGraph(limit = 400) {
   const db = openMem()
   if (!db) return { nodes: [], links: [], stats: {} }
   const cfg = readJson(CONFIG_FILE, {})
   const now = Date.now()
-  const d = Number(cfg?.memory?.actr?.decay) || 0.5
+  const dRaw = Number(cfg?.memory?.actr?.decay)
+  const d = Number.isFinite(dRaw) ? dRaw : 0.5
   const access = new Map()
   const todayStr = dayOfLocal()
   let todayAccess = 0
@@ -250,7 +276,7 @@ function memoryGraph(limit = 400) {
     degree.set(String(e.a), (degree.get(String(e.a)) || 0) + 1)
     degree.set(String(e.b), (degree.get(String(e.b)) || 0) + 1)
   }
-  const rows = (() => { try { return db.prepare("SELECT id, t, role, text FROM msg").all() } catch { return [] } })()
+  const rows = (() => { try { return db.prepare("SELECT id, t, role, text FROM msg ORDER BY rowid DESC LIMIT 20000").all() } catch { return [] } })()
   const actOf = (times) => {
     if (!times || !times.length) return 0
     let sum = 0
@@ -271,8 +297,12 @@ function memoryGraph(limit = 400) {
       hits: (access.get(id) || []).length,
     }
   })
-  const maxAct = Math.max(1e-6, ...all.map((n) => n.activation))
-  const maxDeg = Math.max(1, ...all.map((n) => n.degree))
+  let maxAct = 1e-6
+  let maxDeg = 1
+  for (const n of all) {
+    if (n.activation > maxAct) maxAct = n.activation
+    if (n.degree > maxDeg) maxDeg = n.degree
+  }
   for (const n of all) n.score = (n.activation / maxAct) * 0.7 + (n.degree / maxDeg) * 0.3
   all.sort((a, b) => b.score - a.score)
   // 特殊节点：日记、印象（不参与 400 上限挤占）
@@ -294,13 +324,9 @@ function memoryGraph(limit = 400) {
   const extraNodes = []
   const extraIds = new Set()
   for (const im of impressions) {
-    const meta = String(im.meta || "")
-    const md = [...new Set(meta.match(/\d{2}-\d{2}/g) || [])]
+    const wanted = new Set(sourceDays(im.meta))
     let targets = []
-    if (md.length) {
-      const years = [...new Set((meta.match(/\d{4}-\d{2}-\d{2}/g) || []).map((x) => x.slice(0, 4)))]
-      const year = years[0] || new Date().getFullYear()
-      const wanted = new Set(md.map((x) => `${year}-${x}`))
+    if (wanted.size) {
       targets = all.filter((n) => wanted.has(n.day)).sort((a, b) => b.score - a.score).slice(0, 5)
     }
     impTargets.set(im.id, targets)
@@ -351,6 +377,8 @@ function memoryGraph(limit = 400) {
   const ids = new Set(picked.map((n) => n.id))
   const links = edges
     .filter((e) => ids.has(String(e.a)) && ids.has(String(e.b)))
+    .sort((a, b) => (Number(b.w) || 0) - (Number(a.w) || 0))
+    .slice(0, 5000)
     .map((e) => ({ source: String(e.a), target: String(e.b), w: Number(e.w) || 0, kind: "recall" }))
   // 日记 → 当天前 5 条消息
   const byDayList = new Map()
@@ -428,6 +456,32 @@ const server = http.createServer(async (req, res) => {
       const q = url.searchParams.get("q") || ""
       const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 20))
       return json(res, 200, { rows: memorySearch(q, limit) })
+    }
+    if (req.method === "GET" && url.pathname === "/api/node") {
+      const id = String(url.searchParams.get("id") || "")
+      if (!id) return json(res, 400, { error: "missing id" })
+      if (id.startsWith("doc-")) {
+        const allowed = new Set(["我是谁.md", "心情.md", "用户画像.md", "模型使用规范.md"])
+        const file = id.slice(4)
+        if (!allowed.has(file)) return json(res, 404, { error: "not found" })
+        const path = join(WORLD, "identity", file)
+        if (!existsSync(path)) return json(res, 404, { error: "not found" })
+        return json(res, 200, { id, content: readFileSync(path, "utf8") })
+      }
+      if (id.startsWith("diary-")) {
+        const day = id.slice(6)
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return json(res, 404, { error: "not found" })
+        const path = join(WORLD, "diary", `${day}.md`)
+        if (!existsSync(path)) return json(res, 404, { error: "not found" })
+        return json(res, 200, { id, content: readFileSync(path, "utf8") })
+      }
+      const db = openMem()
+      if (!db) return json(res, 503, { error: "index unavailable" })
+      try {
+        const row = db.prepare("SELECT text FROM msg WHERE id = ?").get(id)
+        if (!row) return json(res, 404, { error: "not found" })
+        return json(res, 200, { id, content: String(row.text || "") })
+      } catch { return json(res, 500, { error: "query failed" }) }
     }
     if (req.method === "GET" && url.pathname === "/api/diary") {
       return json(res, 200, { list: diaryList(14) })
