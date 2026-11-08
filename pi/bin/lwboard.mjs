@@ -25,8 +25,16 @@ const STATUS_DIR = join(ROOT, "status")
 const CONTROL_FILE = join(ROOT, "control.json")
 const CONTROL_STATE = join(ROOT, "control-state.json")
 const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
-const PORT = Number(process.env.LW_BOARD_PORT || 8099)
-const HOST = process.env.LW_BOARD_HOST || "127.0.0.1"
+const boardCfg = (() => {
+  try {
+    const c = JSON.parse(readFileSync(CONFIG_FILE, "utf8"))
+    return c && typeof c.board === "object" && c.board ? c.board : {}
+  } catch { return {} }
+})()
+const PORT = Number(process.env.LW_BOARD_PORT || boardCfg.port || 8099) || 8099
+const HOST = String(process.env.LW_BOARD_HOST || boardCfg.host || "127.0.0.1")
+/** 分支能力：v2 没有印象整理，adv 有；v2 的 board.html 会据此隐藏印象墙 */
+const FEATURES = { impressions: false }
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
 function writeAtomic(file, text) {
@@ -178,9 +186,162 @@ function body(req) {
   })
 }
 
+function parseImpressions() {
+  const file = join(WORLD, "identity", "印象.md")
+  if (!existsSync(file)) return { raw: "", items: [] }
+  const raw = readFileSync(file, "utf8")
+  const items = []
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^-\s*\[([^\]]+)\]\s*(.+)$/)
+    if (!m) continue
+    const body = m[2]
+    items.push({
+      subject: m[1].trim(),
+      text: body.replace(/（[^）]*）\s*$/, "").trim(),
+      meta: (body.match(/（([^）]*)）\s*$/) || [])[1] || "",
+    })
+  }
+  return { raw, items }
+}
+
+function dayOfLocal(d = new Date()) {
+  const p = (n) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+function memoryGraph(limit = 400) {
+  const db = openMem()
+  if (!db) return { nodes: [], links: [], stats: {} }
+  const cfg = readJson(CONFIG_FILE, {})
+  const now = Date.now()
+  const d = Number(cfg?.memory?.actr?.decay) || 0.5
+  const access = new Map()
+  const todayStr = dayOfLocal()
+  let todayAccess = 0
+  try {
+    for (const r of db.prepare("SELECT id, t FROM access").all()) {
+      const t = Date.parse(String(r.t)) || 0
+      if (!t) continue
+      const key = String(r.id)
+      if (!access.has(key)) access.set(key, [])
+      access.get(key).push(t)
+      if (dayOfLocal(new Date(t)) === todayStr) todayAccess++
+    }
+  } catch { /* ignore */ }
+  const edges = (() => { try { return db.prepare("SELECT a, b, w FROM edges").all() } catch { return [] } })()
+  const degree = new Map()
+  for (const e of edges) {
+    degree.set(String(e.a), (degree.get(String(e.a)) || 0) + 1)
+    degree.set(String(e.b), (degree.get(String(e.b)) || 0) + 1)
+  }
+  const rows = (() => { try { return db.prepare("SELECT id, t, role, text FROM msg").all() } catch { return [] } })()
+  const actOf = (times) => {
+    if (!times || !times.length) return 0
+    let sum = 0
+    for (const t of times) sum += Math.pow(Math.max(0.001, (now - t) / 1000), -d)
+    return sum > 0 ? Math.log(sum) : 0
+  }
+  const all = rows.map((r) => {
+    const id = String(r.id)
+    const t = String(r.t || "")
+    return {
+      id,
+      t,
+      day: dayOfLocal(new Date(t)),
+      role: String(r.role || ""),
+      content: String(r.text || "").slice(0, 240),
+      activation: Number(actOf(access.get(id)).toFixed(3)),
+      degree: degree.get(id) || 0,
+      hits: (access.get(id) || []).length,
+    }
+  })
+  const maxAct = Math.max(1e-6, ...all.map((n) => n.activation))
+  const maxDeg = Math.max(1, ...all.map((n) => n.degree))
+  for (const n of all) n.score = (n.activation / maxAct) * 0.7 + (n.degree / maxDeg) * 0.3
+  all.sort((a, b) => b.score - a.score)
+  // 特殊节点：日记、印象（不参与 400 上限挤占）
+  const diaryDir = join(WORLD, "diary")
+  const diaries = []
+  if (existsSync(diaryDir)) {
+    for (const f of readdirSync(diaryDir).filter((x) => x.endsWith(".md")).sort().slice(-14)) {
+      const body = readFileSync(join(diaryDir, f), "utf8")
+      const title = body.split("\n").map((l) => l.replace(/^[#>\s-]+/, "").trim()).find(Boolean) || ""
+      diaries.push({ id: `diary-${f.replace(/\.md$/, "")}`, kind: "diary", t: `${f.replace(/\.md$/, "")}T20:00:00`, day: f.replace(/\.md$/, ""), role: "diary", content: title.slice(0, 120), subject: f.replace(/\.md$/, ""), activation: 0, degree: 0, hits: 0, score: 0.6 })
+    }
+  }
+  const impressions = parseImpressions().items.map((it, i) => {
+    const dayMatch = String(it.meta || "").match(/最后验证：\s*(\d{4}-\d{2}-\d{2})/)
+    return { id: `imp-${i}`, kind: "impression", t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: 1.2 }
+  })
+  // 印象的来源节点：按来源日期从全量消息里取，不用「全站 top5」硬凑
+  const impTargets = new Map()
+  const extraNodes = []
+  const extraIds = new Set()
+  for (const im of impressions) {
+    const meta = String(im.meta || "")
+    const md = [...new Set(meta.match(/\d{2}-\d{2}/g) || [])]
+    let targets = []
+    if (md.length) {
+      const years = [...new Set((meta.match(/\d{4}-\d{2}-\d{2}/g) || []).map((x) => x.slice(0, 4)))]
+      const year = years[0] || new Date().getFullYear()
+      const wanted = new Set(md.map((x) => `${year}-${x}`))
+      targets = all.filter((n) => wanted.has(n.day)).sort((a, b) => b.score - a.score).slice(0, 5)
+    }
+    impTargets.set(im.id, targets)
+    for (const t of targets) if (!extraIds.has(t.id)) { extraIds.add(t.id); extraNodes.push(t) }
+  }
+  const specials = [...diaries, ...impressions]
+  const pickedMsgs = all.slice(0, Math.max(50, Math.min(1000, limit)))
+  const pickedIds = new Set(pickedMsgs.map((n) => n.id))
+  // 来源节点最多再补 120 个，避免极端情况下把图撑爆
+  const extraPicked = extraNodes.filter((n) => !pickedIds.has(n.id)).slice(0, 120)
+  const picked = [...pickedMsgs, ...extraPicked, ...specials]
+  const ids = new Set(picked.map((n) => n.id))
+  const links = edges
+    .filter((e) => ids.has(String(e.a)) && ids.has(String(e.b)))
+    .map((e) => ({ source: String(e.a), target: String(e.b), w: Number(e.w) || 0, kind: "recall" }))
+  // 日记 → 当天前 5 条消息
+  const byDayList = new Map()
+  for (const n of pickedMsgs) {
+    if (!byDayList.has(n.day)) byDayList.set(n.day, [])
+    byDayList.get(n.day).push(n)
+  }
+  for (const dnode of diaries) {
+    const targets = (byDayList.get(dnode.subject) || []).slice().sort((a, b) => b.score - a.score).slice(0, 5)
+    for (const t of targets) links.push({ source: dnode.id, target: t.id, w: 0.35, kind: "diary" })
+  }
+  // 印象 → 真正的来源日期消息；没有来源就不断线
+  for (const im of impressions) {
+    for (const t of impTargets.get(im.id) || []) {
+      if (ids.has(t.id)) links.push({ source: im.id, target: t.id, w: 0.55, kind: "impression" })
+    }
+  }
+  const avgAct = picked.length ? picked.reduce((s, n) => s + n.activation, 0) / picked.length : 0
+  return {
+    nodes: picked,
+    links,
+    stats: {
+      nodes: rows.length,
+      edges: edges.length,
+      todayAccess,
+      avgActivation: Number(avgAct.toFixed(3)),
+      shown: picked.length,
+      impressions: impressions.length,
+    },
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`)
   try {
+    if (req.method === "GET" && url.pathname === "/nebula.jpg") {
+      const file = join(HERE, "nebula.jpg")
+      if (!existsSync(file)) { res.writeHead(404); res.end(); return }
+      const data = readFileSync(file)
+      res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=86400" })
+      res.end(data)
+      return
+    }
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       const file = join(HERE, "board.html")
       const data = readFileSync(file)
@@ -200,6 +361,7 @@ const server = http.createServer(async (req, res) => {
         sessions: sessions(),
         models: c.models || {},
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
+        features: FEATURES,
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
         available: await availableModels(),
@@ -233,7 +395,7 @@ const server = http.createServer(async (req, res) => {
       const resolved = value === "local" ? m.local : value === "cloud" ? m.cloud : value
       if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
       const seq = Date.now()
-      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
+      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
       const st = await waitAck(seq)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
     }
@@ -258,6 +420,19 @@ const server = http.createServer(async (req, res) => {
       if (typeof data.quietEnd === "string") cfg.care.quietEnd = data.quietEnd.trim()
       writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
       return json(res, 200, { ok: true, care: cfg.care })
+    }
+    if (req.method === "GET" && url.pathname === "/api/impressions") {
+      return json(res, 200, parseImpressions())
+    }
+    if (req.method === "POST" && url.pathname === "/api/impressions/run") {
+      const seq = Date.now()
+      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target: "home", action: "impression", reason: "看板手动整理" }, null, 2))
+      const st = await waitAck(seq, 15000)
+      return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（可能没在跑）" })
+    }
+    if (req.method === "GET" && url.pathname === "/api/memory-graph") {
+      const limit = Number(url.searchParams.get("limit")) || 400
+      return json(res, 200, memoryGraph(limit))
     }
     if (req.method === "POST" && url.pathname === "/api/models") {
       const data = await body(req)

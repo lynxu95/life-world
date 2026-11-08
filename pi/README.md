@@ -1,7 +1,7 @@
 # life-world · pi 版
 
 > 本目录是 life-world 的 **pi 1.5.0 移植版**，独立于仓库根目录的 opencode 插件。
-> 分支：`pi-agent-v2`（轻量版在 `pi-agent`，`main` 仍是 opencode 版）。
+> 分支：`pi-agent-v2`（向量版；轻量版在 `pi-agent`，`main` 仍是 opencode 版；`pi-agent-adv` 是去向量、ACT-R/Hebbian 的仿生版）。
 >
 > 评估与决策见 vault：`AI/开发中项目/life-world 迁 pi · 扩展点评估.md`；
 > 实施记录见 `AI/开发中项目/piagent 迁移 worklog.md`。
@@ -217,11 +217,13 @@ lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次
 ### Web 看板
 
 ```bash
-lwctl board          # 启动：http://127.0.0.1:8099
+lwctl board                     # 启动：默认 http://127.0.0.1:8099
+lwctl board set 0.0.0.0 8099    # 保存监听设置并重启
+lwctl board status
 lwctl board stop
 ```
 
-页面提供：会话与模型（可直接点按钮热切换）、7 天用量、记忆检索（FTS5）、日记与某天对话、日志、手动快照。服务只绑 `127.0.0.1`，端口用 `LW_BOARD_PORT` 改。
+页面提供：会话与模型（可直接点按钮热切换）、7 天用量、**记忆星图**（Canvas 3D、全屏、星云背景）、FTS5 记忆检索、日记与某天对话、日志、手动快照。印象墙仅 `pi-agent-adv` 有，本分支自动隐藏；监听地址/端口写在 `life-world.json` 的 `board` 段。
 
 ### 世界快照
 

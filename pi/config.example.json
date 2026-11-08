@@ -10,6 +10,10 @@
       "mapDays": 3
     }
   },
+  "board": {
+    "host": "127.0.0.1",
+    "port": 8099
+  },
   "bridge": {
     "enabled": true,
     "ownerQQ": 0,

@@ -2,6 +2,7 @@
 
 > **这是 `pi-agent-v2` 分支的 README。**
 > `pi-agent` 是之前的轻量稳定版；`main` 是 opencode 插件版。v2 在 pi 1.5 上做了加强：记忆索引、语义检索、遗忘曲线、模型热切换与机密抽屉、主动关怀、Web 看板、世界快照与运行守护。
+> 分支定位：`pi-agent-v2` 保留本地小模型向量检索（jina + FTS 混合）；`pi-agent-adv` 是去向量、专注 ACT-R/Hebbian/印象的仿生神经版。
 
 给 [pi coding agent](https://github.com/earendil-works/pi) 里的陪伴角色一个会记得、会生活的世界。所有能力都跑在**本地文件 + 本地进程**上，聊天默认用本地模型，需要时借在线模型的算力。
 
@@ -21,7 +22,7 @@
 - [lwctl 运维命令](#lwctl-运维命令)
 - [Web 看板](#web-看板)
 - [数据位置](#数据位置)
-- [和另外两个分支的区别](#和另外两个分支的区别)
+- [和其它三个分支的区别](#和其它三个分支的区别)
 - [已知限制](#已知限制)
 
 ---
@@ -39,7 +40,7 @@
 | 主动关怀 | 随机想起、安静时段、早晨天气 |
 | QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小 |
 | 定时 | 闹钟可指定到点用哪个模型；每日回顾、早上兜底 |
-| Web 看板 | 会话/模型/用量/记忆/日记/日志/快照，一页看完 |
+| Web 看板 | 会话/模型/用量/记忆星图/日记/日志/快照，一页看完；含全屏与星云背景 |
 | 运维 | `lwctl` 状态、切换、日志、重启、快照、用量；桥接守护、tmp 清理、日志轮转 |
 
 ## 安装
@@ -243,7 +244,7 @@ OneBot 只监听 `127.0.0.1` 时用 SSH 隧道；同机部署直接 `ws://127.0.
 ## lwctl 运维命令
 
 ```bash
-lwctl                       # 交互菜单：看会话、切模型
+lwctl                       # 交互菜单：会话/看板/快照/日志/用量/重启
 lwctl status                # 各会话当前模型
 lwctl set qq cloud          # 直接切
 lwctl backup [--private]    # 世界快照到 worlds/backup（git 增量）
@@ -253,7 +254,10 @@ lwctl backup --reset        # 删除快照目录（手动清理）
 lwctl tail [qq|home|debug]  # 看日志
 lwctl restart [qq|home|all] # 重启常驻窗口
 lwctl usage [天数]           # token/费用/云端本地/切换次数
-lwctl board [start|stop]    # Web 看板
+lwctl board [start|stop|restart|status]  # Web 看板
+lwctl board set <地址> <端口>             # 保存监听设置并重启
+lwctl board host <地址>                   # 0.0.0.0 = 局域网
+lwctl board port <端口>
 ```
 
 心跳：每个 pi 进程每 5 秒写 `status/<role>-<pid>.json`；看板/lwctl 只显示 PID 存活且 90 秒内有过心跳的会话。`lwctl set` 通过 `control.json` 下发，目标进程回执到 `control-state.json`。
@@ -261,11 +265,15 @@ lwctl board [start|stop]    # Web 看板
 ## Web 看板
 
 ```bash
-lwctl board            # http://127.0.0.1:8099
-LW_BOARD_HOST=0.0.0.0 lwctl board   # 允许局域网访问
+lwctl board                     # 默认 http://127.0.0.1:8099
+lwctl board set 0.0.0.0 8099    # 保存局域网监听并重启
+lwctl board host 0.0.0.0        # 只改地址
+lwctl board port 8098           # 只改端口
+lwctl board status              # 状态/地址/接口
+lwctl board stop                # 停止
 ```
 
-页面：会话与模型切换、模型设置（下拉自 `pi --list-models`）、主动关怀开关、7 天用量、FTS5 记忆检索、日记与某天对话、日志、手动快照。
+页面：会话与模型切换、模型设置、主动关怀、7 天用量、**记忆星图**（Canvas 3D、可拖拽/缩放/**全屏**、星云背景，含基础记忆节点）、FTS5 记忆检索、日记与某天对话、日志、手动快照。印象墙是 `pi-agent-adv` 的能力，本分支自动隐藏。
 
 **安全**：默认只绑 `127.0.0.1`，没有登录鉴权；改成 `0.0.0.0` 前请确认网络环境。
 
@@ -291,18 +299,19 @@ LW_BOARD_HOST=0.0.0.0 lwctl board   # 允许局域网访问
 └── bin/                     # 安装的脚本
 ```
 
-## 和另外两个分支的区别
+## 和其它三个分支的区别
 
-| | `main`（opencode） | `pi-agent`（轻量版） | `pi-agent-v2`（本分支） |
-|---|---|---|---|
-| 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 |
-| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 |
-| 模型 | 固定 | 热切换 + 自动兜底 | 同上 + 看板/lwctl 手切 |
-| 隐私抽屉 | 无 | 有 | 有（按会话、云端禁读） |
-| 主动关怀 | 无 | 无 | 随机想起/安静时段/天气 |
-| 看板 | 无 | 无 | Web 看板 |
-| 快照/守护/清理 | 无 | 无 | git 快照、桥接守护、tmp/日志清理 |
-| 定位 | 存档 | 轻量稳定 | 多功能 |
+| | `main`（opencode） | `pi-agent`（轻量） | `pi-agent-v2`（本分支，向量） | `pi-agent-adv`（仿生） |
+|---|---|---|---|---|
+| 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 | pi 1.5 扩展 |
+| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 | FTS5 + 遗忘曲线 + ACT-R + Hebbian |
+| 印象整理 | 无 | 无 | 无 | 每日归纳 + 注入 |
+| 模型 | 固定 | 热切换 + 自动兜底 | 同上 + 看板/lwctl 手切 | 同上 |
+| 隐私抽屉 | 无 | 有 | 有（按会话、云端禁读） | 同上；纯云端不启用 |
+| 主动关怀 | 无 | 无 | 随机想起/安静时段/天气 | 同上 |
+| 看板 | 无 | 无 | Web 看板 + 记忆星图 | 同上 + 印象墙 |
+| 快照/守护/清理 | 无 | 无 | git 快照、桥接守护、tmp/日志清理 | 同上 |
+| 定位 | 存档 | 轻量稳定 | 向量/多功能 | 仿生神经实验 |
 
 ## 已知限制
 
