@@ -1,7 +1,7 @@
-# life-world · pi agent v2
+# life-world · pi agent adv
 
-> **这是 `pi-agent-v2` 分支的 README。**
-> `pi-agent` 是之前的轻量稳定版；`main` 是 opencode 插件版。v2 在 pi 1.5 上做了加强：记忆索引、语义检索、遗忘曲线、模型热切换与机密抽屉、主动关怀、Web 看板、世界快照与运行守护。
+> **这是 `adv` 分支（第 3 条 pi 分支）的 README。**
+> 分支顺序：`main` = opencode 插件版；`pi-agent` = 轻量稳定版；`pi-agent-v2` = 增强版（记忆索引 / 语义检索 / 遗忘曲线 / 模型热切换 / 机密抽屉 / 主动关怀 / 看板 / 快照与守护）；`adv` = 在 v2 上继续做实验（ACT-R 激活、Hebbian 联想、印象整理、3D 记忆星图）。adv 暂未合回 v2。
 
 给 [pi coding agent](https://github.com/earendil-works/pi) 里的陪伴角色一个会记得、会生活的世界。所有能力都跑在**本地文件 + 本地进程**上，聊天默认用本地模型，需要时借在线模型的算力。
 
@@ -21,7 +21,7 @@
 - [lwctl 运维命令](#lwctl-运维命令)
 - [Web 看板](#web-看板)
 - [数据位置](#数据位置)
-- [和另外两个分支的区别](#和另外两个分支的区别)
+- [和其它三个分支的区别](#和其它三个分支的区别)
 - [已知限制](#已知限制)
 
 ---
@@ -30,16 +30,20 @@
 
 | 能力 | 说明 |
 |---|---|
-| 跨会话记忆 | 对话原文归档 JSONL；新会话注入最近 48h + 记忆地图 + 自述 |
+| 跨会话记忆 | 对话原文归档 JSONL；新会话在第一次可安全注入时补最近 48h + 记忆地图 + 自述 |
 | FTS5 检索 | `memory_search` 查本地索引，中文 trigram；3 字以上 BM25、2 字 LIKE 回退 |
 | 可选语义检索 | CPU 跑 `jina-embeddings-v2-base-zh`，与 FTS 混合排序；不装依赖自动退回 FTS |
 | 遗忘曲线 | 每条记忆有强度：命中加强、按半衰期衰减，只降权不删 |
+| ACT-R 激活 | 检索排序叠加频率 × 近因的基级激活（`B = ln(Σ (now−t)^−d)`） |
+| Hebbian 联想 | 共同召回自动连边，检索时一跳扩散带出关联记忆 |
+| 印象整理 | 每天把近期对话/日记归纳成 `identity/印象.md`，本地/云端都注入 |
+| 记忆星图 | 看板 3D 星图：全屏、星云背景随旋转、印象连线回真实来源 |
 | 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换 |
 | 机密抽屉 | 切云端前收起前文、云端禁读，切回本地恢复 |
 | 主动关怀 | 随机想起、安静时段、早晨天气 |
 | QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小 |
 | 定时 | 闹钟可指定到点用哪个模型；每日回顾、早上兜底 |
-| Web 看板 | 会话/模型/用量/记忆/日记/日志/快照，一页看完 |
+| Web 看板 | 会话/模型/用量/记忆星图/日记/日志/快照，一页看完 |
 | 运维 | `lwctl` 状态、切换、日志、重启、快照、用量；桥接守护、tmp 清理、日志轮转 |
 
 ## 安装
@@ -66,7 +70,7 @@ pi --version   # 1.5.0+
 ### 2. 装 life-world
 
 ```bash
-git clone -b pi-agent-v2 https://github.com/lynxu95/life-world
+git clone -b adv https://github.com/lynxu95/life-world
 cd life-world
 ./pi/install.sh --global     # 所有 pi 会话加载；只想在仓库目录用改成 --project
 ```
@@ -120,10 +124,10 @@ lwctl board                              # Web 看板
 
 ## 升级 / 迁移
 
-从 `pi-agent` 或旧 `pi-agent-adv` 升级：
+从 `pi-agent-v2` 升到 `adv`（数据目录不变）：
 
 ```bash
-git fetch origin && git checkout pi-agent-v2 && git pull
+git fetch origin && git checkout adv && git pull
 ./pi/install.sh --global
 ```
 
@@ -167,7 +171,10 @@ git fetch origin && git checkout pi-agent-v2 && git pull
   "cleanup": { "tmpMaxAgeHours": 72 },
   "memory": {
     "semantic": { "enabled": false, "model": "Xenova/jina-embeddings-v2-base-zh", "dtype": "q8", "backfillLimit": 5000 },
-    "decay": { "enabled": true, "halfLifeDays": 30, "hitBoost": 0.15, "maxStrength": 3, "minStrength": 0.1 }
+    "decay": { "enabled": true, "halfLifeDays": 30, "hitBoost": 0.15, "maxStrength": 3, "minStrength": 0.1 },
+    "actr": { "enabled": true, "decay": 0.5, "weight": 0.2, "maxAccess": 50 },
+    "association": { "enabled": true, "weight": 0.1, "learnRate": 0.05, "decayPerDay": 0.02, "maxWeight": 1, "maxNeighbors": 50, "bootstrap": true },
+    "impression": { "enabled": true, "hour": 5, "days": 3, "maxItems": 5 }
   }
 }
 ```
@@ -181,25 +188,26 @@ git fetch origin && git checkout pi-agent-v2 && git pull
 **真相永远是文件**：`worlds/default/conversations/*.jsonl`、`diary/*.md`、`plan/*.md`、`room/*.md`、`identity/*.md`。SQLite 只是索引，删了能重建。
 
 - **FTS5**：`memory-index.db`（trigram 分词，WAL + busy_timeout），归档时增量写入；历史由单个进程加锁回填（500 条一事务）。
-- **语义检索**（可选）：`vec` 表存 768 维向量；文本截 512 字；查询按 `0.75*cos + 0.25*FTS` 混合；换模型自动清空向量并重建。
+- **语义检索**（可选）：`vec` 表存 768 维向量；文本截 512 字；FTS 与语义结果合并去重后，再交给 ACT-R/联想层加权；换模型自动清空向量并重建。
 - **遗忘曲线**：`mem` 表存 strength/uses/last_used；检索命中 +`hitBoost`，每天按 `halfLifeDays` 衰减；排序权重 `0.7 + 0.3*min(1, strength/2)`，只降权不删。
 - **记忆工具**：`memory_search`（关键词/时间/角色/范围/前后文）、`memory_day`（某天）、`memory_timeline`（一段时间的摘要）。
 
 ### ACT-R 激活与联想扩散（adv 新增）
 
-- **ACT-R 基级激活**：每条记忆记录被检索命中的次数与时间，排序用 `B = ln(Σ (now−tₖ)^(−d))`（d≈0.5），同时体现近因与频率；关闭 `memory.actr.enabled` 则退回旧的强度衰减。
-- **共现自举**：首次建图时，同一天相邻的对话先生成弱边（0.02），之后谁先被一起召回谁就变强；
-- **Hebbian 联想**：同一次检索的前几名会两两连边，权重按 `learnRate` 增强、每日按 `decayPerDay` 衰减；检索时从种子做一跳扩散，把关联记忆带上来。
-- 只记录 `memory_search` 真正召回的记忆；每轮强制注入历史不算“访问”。
+- **ACT-R 基级激活**：每条记忆记录被检索命中的次数与时间（`access` 表），排序用 `B = ln(Σ (now−tₖ)^(−d))`（d≈0.5），同时体现近因与频率；关闭 `memory.actr.enabled` 则退回旧的强度衰减。
+- **共现自举**：首次建图时，同一天相邻的对话先生成弱边（0.03，略高于每日清理阈值 0.02），之后谁先被一起召回谁就变强；
+- **Hebbian 联想**：同一次检索的前几名会两两连边（`edges` 表），权重按 `learnRate` 增强、每日按 `decayPerDay` 衰减；检索时从种子做一跳扩散，把关联记忆带上来。
+- 只记录 `memory_search` 真正召回的记忆；每轮强制注入历史不算“访问”。看板的记忆星图直接读 `access`/`edges`，远近与亮度就是激活/关联。
 
 ### 印象整理（adv 新增）
 
 每天一次，把最近 `impression.days` 天的对话/日记/笔记交给模型归纳成最多 `impression.maxItems` 条“印象”，写进 `identity/印象.md`（带来源、置信度、最后验证）。合并更新，不重复、不写私密细节。
 
 - 每天一次，统一在 `impression.hour`（默认 05:00）之后跑；
-- **配了本地模型**：先切到本地模型再生成，生成后留在本地；
-- **纯云端模式**（未配 `models.local`）：直接用当前在线模型跑，不切模型；
-- 印象**本地和云端都会注入**（只放判断，不含私密细节）。
+- **配了本地模型**：先切到本地模型再生成，切换失败会记日志并按当前模型继续；
+- **纯云端模式**（未配 `models.local`）：直接用当前在线模型跑，不切模型，也不启用机密抽屉；
+- 印象**本地和云端都会注入**（只放判断，不含私密细节）；
+- 看板「立即整理」可额外触发一次，不占 05:00 的额度；只有任务真正送进会话才写回执，不再“假成功”。
 
 实测配置（RTX 5060 Ti 16G + Basalt + Qwen3.8-Flash-Next IQ3_XXS，搭配 DeepSeek Flash）：插件稳定运行，日常聊天质量不错，世界探索交给在线模型。
 
@@ -307,21 +315,24 @@ LW_BOARD_HOST=0.0.0.0 lwctl board   # 允许局域网访问
 └── bin/                     # 安装的脚本
 ```
 
-## 和另外两个分支的区别
+## 和其它三个分支的区别
 
-| | `main`（opencode） | `pi-agent`（轻量版） | `pi-agent-v2`（本分支） |
-|---|---|---|---|
-| 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 |
-| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 |
-| 模型 | 固定 | 热切换 + 自动兜底 | 同上 + 看板/lwctl 手切 |
-| 隐私抽屉 | 无 | 有 | 有（按会话、云端禁读） |
-| 主动关怀 | 无 | 无 | 随机想起/安静时段/天气 |
-| 看板 | 无 | 无 | Web 看板 |
-| 快照/守护/清理 | 无 | 无 | git 快照、桥接守护、tmp/日志清理 |
-| 定位 | 存档 | 轻量稳定 | 多功能 |
+| | `main`（opencode） | `pi-agent`（轻量） | `pi-agent-v2`（增强） | `adv`（本分支，实验） |
+|---|---|---|---|---|
+| 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 | pi 1.5 扩展 |
+| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 | 同上 + ACT-R 激活 + Hebbian 联想 |
+| 印象整理 | 无 | 无 | 无 | 每日归纳 + 本地/云端注入 |
+| 模型 | 固定 | 热切换 + 自动兜底 | 同上 + 看板/lwctl 手切 | 同上 |
+| 隐私抽屉 | 无 | 有 | 有（按会话、云端禁读） | 同上；纯云端不启用 |
+| 主动关怀 | 无 | 无 | 随机想起/安静时段/天气 | 同上 |
+| 看板 | 无 | 无 | Web 看板 | 看板 + 3D 记忆星图（全屏/星云） |
+| 快照/守护/清理 | 无 | 无 | git 快照、桥接守护、tmp/日志清理 | 同上 |
+| 定位 | 存档 | 轻量稳定 | 多功能 | 实验田 |
 
 ## 已知限制
 
+- `adv` 是实验分支，暂未合回 `pi-agent-v2`；检索权重、印象调度、星图布局还可能继续调；
+- 记忆星图背景图是 `pi/bin/nebula.jpg`，由 lwboard 的 `/nebula.jpg` 路由提供；换图只换文件，覆盖倍数在 `board.html` 里调；
 - 语义检索是**可选**功能：依赖 480MB、模型 157MB，首次加载约 17 秒；CPU 回填历史较慢，进程需常驻一会儿才补全；
 - 语义质量取决于语料与模型，纯关键词查询仍以 FTS5 为准；
 - 看板无鉴权，默认只监听本机；

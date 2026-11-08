@@ -1,7 +1,7 @@
 # life-world · pi 版
 
 > 本目录是 life-world 的 **pi 1.5.0 移植版**，独立于仓库根目录的 opencode 插件。
-> 分支：`pi-agent-v2`（轻量版在 `pi-agent`，`main` 仍是 opencode 版）。
+> 分支：`adv`（第 3 条 pi 分支；`pi-agent` 是轻量版，`pi-agent-v2` 是增强版，`main` 仍是 opencode 版）。
 >
 > 评估与决策见 vault：`AI/开发中项目/life-world 迁 pi · 扩展点评估.md`；
 > 实施记录见 `AI/开发中项目/piagent 迁移 worklog.md`。
@@ -18,6 +18,7 @@
 - **每轮状态**：`input` 事件把时间、心情、桥接状态拼进当前用户消息（不改 system，保护缓存）
 - **归档**：`message_end` 写 `conversations/YYYY-MM-DD.jsonl`
 - **记忆**：新会话首轮注入最近 48h / 2000 字 + 3 天记忆地图 + 自述；检索走 FTS5（`memory-index.db`，trigram，≥3 字 MATCH / 2 字 LIKE 回退）
+- **记忆增强（adv）**：ACT-R 基级激活、Hebbian 联想、每日印象整理；看板 3D 记忆星图（全屏、星云背景随旋转）
 - **定时器**：`LIFE_WORLD_ROLE=home` 的进程每 30 秒检查闹钟 / 每日回顾 / 早上兜底，用 `pi.sendMessage(triggerTurn)` 唤醒
 - **QQ 桥接**：OneBot v11 正向 WS ↔ `pi --mode rpc`；私聊、余波、outbox、图片/语音/文件、基础群聊
   - 配了 `models.cloud` 时，**群聊会话优先在线模型**（判官也用在线模型），私聊仍用 `LIFE_WORLD_MODEL`（通常本地）
@@ -50,7 +51,7 @@ pi --version   # 1.5.0+
 ### 1. 装 life-world
 
 ```bash
-git clone -b pi-agent-v2 https://github.com/lynxu95/life-world
+git clone -b adv https://github.com/lynxu95/life-world
 cd life-world
 
 ./pi/install.sh --global     # 全局：所有 pi 会话都加载（默认）
