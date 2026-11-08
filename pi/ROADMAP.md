@@ -1,6 +1,6 @@
 # pi-agent-adv · 路线图
 
-> 基线：`pi-agent@75fd944`。`pi-agent` 是轻量稳定版，会一直保留；`pi-agent-adv` 是多功能版（记忆索引、主动关怀、看板、快照等），验证后再决定是否合并。
+> 本分支已改名 `pi-agent-v2`（原 `pi-agent-adv`）。`pi-agent` 是轻量稳定版，会一直保留；v2 是多功能版。
 
 ## 进行中
 

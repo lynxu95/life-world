@@ -1,7 +1,7 @@
 # life-world · pi 版
 
 > 本目录是 life-world 的 **pi 1.5.0 移植版**，独立于仓库根目录的 opencode 插件。
-> 分支：`pi-agent`（`main` 仍是 opencode 版）。
+> 分支：`pi-agent-v2`（轻量版在 `pi-agent`，`main` 仍是 opencode 版）。
 >
 > 评估与决策见 vault：`AI/开发中项目/life-world 迁 pi · 扩展点评估.md`；
 > 实施记录见 `AI/开发中项目/piagent 迁移 worklog.md`。
@@ -50,7 +50,7 @@ pi --version   # 1.5.0+
 ### 1. 装 life-world
 
 ```bash
-git clone -b pi-agent https://github.com/lynxu95/life-world
+git clone -b pi-agent-v2 https://github.com/lynxu95/life-world
 cd life-world
 
 ./pi/install.sh --global     # 全局：所有 pi 会话都加载（默认）
