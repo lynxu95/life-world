@@ -205,15 +205,17 @@ input[type=checkbox]{accent-color:var(--accent)}
   .brain-detail{border-left:0;border-top:1px solid rgba(126,168,206,.14);max-height:220px}
   #graph{height:400px}
 }
-.star:fullscreen{display:flex;flex-direction:column;background:#04060c;border:0;border-radius:0}
+.star:fullscreen{display:flex;flex-direction:column;background:#04060c;border:0;border-radius:0;height:100vh;overflow:hidden}
 .star:fullscreen .brain-wrap{flex:1;min-height:0}
 .star:fullscreen #graph{height:100%}
-.star:fullscreen .brain-detail{max-height:none;width:320px}
+.star:fullscreen .brain-detail{max-height:none;width:320px;height:100%}
 .star.is-full{position:fixed;inset:0;z-index:80;display:flex;flex-direction:column;
-  background:#04060c;border:0;border-radius:0}
+  background:#04060c;border:0;border-radius:0;height:100vh;overflow:hidden}
 .star.is-full .brain-wrap{flex:1;min-height:0}
 .star.is-full #graph{height:100%}
-.star.is-full .brain-detail{max-height:none;width:320px}
+.star.is-full .brain-detail{max-height:none;width:320px;height:100%}
+#tab-memory #star-shell:fullscreen #graph,
+#tab-memory #star-shell.is-full #graph{height:100%!important}
 
 /* —— 印象 —— */
 .imp-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
