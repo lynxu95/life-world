@@ -269,7 +269,7 @@ OneBot 只监听 `127.0.0.1` 时用 SSH 隧道；同机部署直接 `ws://127.0.
 ## lwctl 运维命令
 
 ```bash
-lwctl                       # 交互菜单：看会话、切模型
+lwctl                       # 交互菜单：会话/看板/快照/日志/用量/重启
 lwctl status                # 各会话当前模型
 lwctl set qq cloud          # 直接切
 lwctl backup [--private]    # 世界快照到 worlds/backup（git 增量）
