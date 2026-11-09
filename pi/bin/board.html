@@ -209,6 +209,35 @@ input[type=checkbox]{accent-color:var(--accent)}
 .quick .qb{border:1px solid var(--line);background:var(--panel-2);color:var(--fg);font:inherit;font-size:12px;padding:8px 9px;border-radius:var(--radius-sm);cursor:pointer;text-align:center}
 .quick .qb:hover{border-color:var(--accent);color:var(--accent)}
 .quick .qb:disabled{opacity:.5;cursor:default}
+/* —— 日程页 —— */
+.sched-summary{display:grid;grid-template-columns:auto 1fr 1fr .8fr;gap:14px;align-items:center;
+  border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 14px;background:var(--panel-2)}
+.ss-date{font-family:var(--mono);font-size:13px;font-weight:600;white-space:nowrap}
+.ss-item{display:flex;flex-direction:column;gap:1px;min-width:0}
+.ss-item .k{color:var(--faint);font-size:11px;letter-spacing:.04em}
+.ss-item .v{font-size:13px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sched-cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:18px;align-items:start}
+@media (max-width:900px){.sched-cols{grid-template-columns:1fr}.sched-summary{grid-template-columns:1fr 1fr}}
+.timeline{display:flex;flex-direction:column;gap:0;max-height:none;overflow:visible}
+.tl-group{margin-left:52px;border-left:1px solid var(--line-strong);padding:0 0 12px 14px}
+.tl-day{margin-left:-52px;font-family:var(--mono);font-size:11px;color:var(--faint);padding:2px 0 6px}
+.tl-item{position:relative;padding:6px 0}
+.tl-time{position:absolute;left:-60px;top:7px;width:44px;text-align:right;font-family:var(--mono);font-size:12px;color:var(--muted)}
+.tl-dot{position:absolute;left:-18px;top:12px;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--bg)}
+.tl-item.due .tl-dot{background:var(--warn)} .tl-item.due .tl-time{color:var(--warn)}
+.tl-note{font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.tl-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:3px;font-size:11px;color:var(--faint)}
+.tl-meta .m{font-family:var(--mono);color:var(--accent)}
+.tl-empty{padding:14px;color:var(--faint);font-size:12px}
+.plan-ring{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.plan-ring .num{font-family:var(--mono);font-size:20px;font-variant-numeric:tabular-nums}
+.plan-ring .bar{flex:1;height:6px;border-radius:999px;background:var(--panel-2);overflow:hidden}
+.plan-ring .bar > i{display:block;height:100%;background:var(--accent);border-radius:999px}
+.plan-item .txt{overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.plan-group{margin-top:8px}
+.plan-group summary{cursor:pointer;color:var(--faint);font-size:12px;padding:4px 0}
+.log-wrap pre.log{max-height:360px}
+.lg-msg{color:var(--fg)} .lg-glow{color:var(--accent-2)} .lg-err{color:var(--bad)} .lg-boot{color:var(--accent)}
 .tile{border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;background:var(--panel-2);min-width:0}
 .tile .k{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em}
 .tile .v{font-family:var(--mono);font-size:19px;font-variant-numeric:tabular-nums;margin-top:1px}
@@ -402,31 +431,39 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
   <div class="tab-panel" id="tab-schedule" hidden>
     <div class="dash single">
       <main>
-        <section>
-          <div class="sec-head"><h2>今日计划</h2><span class="spacer"></span><span class="sec-note" id="plan-note">…</span></div>
-          <div class="plan" id="plan"><div class="muted">加载中…</div></div>
+        <section class="sched-summary">
+          <div class="ss-date" id="ss-date">…</div>
+          <div class="ss-item"><span class="k">计划</span><span class="v" id="ss-plan">…</span></div>
+          <div class="ss-item"><span class="k">下一条</span><span class="v" id="ss-next">…</span></div>
+          <div class="ss-item"><span class="k">日程</span><span class="v" id="ss-count">…</span></div>
         </section>
-        <section>
-          <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
-          <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
-          <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
-        </section>
-        <section>
-        <div class="sec-head">
-          <h2>日志</h2>
-          <div class="log-tools">
-            <select id="log-target">
-              <option value="qq">QQ 桥接</option>
-              <option value="home">家会话</option>
-              <option value="debug">调试</option>
-            </select>
-            <button id="log-refresh">刷新</button>
-            <button id="backup">打快照</button>
-            <span class="muted" id="backup-hint"></span>
-          </div>
+        <div class="sched-cols">
+          <section>
+            <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
+            <div class="schedule timeline" id="schedule"><div class="muted">加载中…</div></div>
+          </section>
+          <section>
+            <div class="sec-head"><h2>今日计划</h2><span class="spacer"></span><span class="sec-note" id="plan-note">…</span></div>
+            <div class="plan" id="plan"><div class="muted">加载中…</div></div>
+          </section>
         </div>
-        <pre class="log" id="log">（加载中…）</pre>
-      </section>
+        <section class="log-wrap">
+          <div class="sec-head">
+            <h2>日志</h2>
+            <div class="log-tools">
+              <select id="log-target">
+                <option value="qq">QQ 桥接</option>
+                <option value="home">家会话</option>
+                <option value="debug">调试</option>
+              </select>
+              <label class="bf"><input type="checkbox" id="log-follow" checked>跟随</label>
+              <button id="log-refresh">刷新</button>
+              <button id="backup">打快照</button>
+              <span class="muted" id="backup-hint"></span>
+            </div>
+          </div>
+          <pre class="log" id="log">（加载中…）</pre>
+        </section>
       </main>
     </div>
   </div>
@@ -618,39 +655,58 @@ function fmtDuration(ms) {
   return `${d} 天${hh ? ` ${hh} 小时` : ""}`
 }
 
+let LAST_SCHED = []
+let LAST_PLAN = null
+function updateSummary() {
+  const now = new Date()
+  const wd = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()]
+  $("ss-date").textContent = `${dayOfLocal(now)} 周${wd}`
+  $("ss-plan").textContent = LAST_PLAN ? (LAST_PLAN.exists ? `${LAST_PLAN.done}/${LAST_PLAN.total}` : "无计划") : "…"
+  const next = LAST_SCHED.find((a) => a.at > Date.now())
+  $("ss-next").textContent = next
+    ? `${pad2(new Date(next.at).getHours())}:${pad2(new Date(next.at).getMinutes())} · ${fmtDuration(next.at - Date.now())}`
+    : "接下来没有闹钟"
+  $("ss-count").textContent = `${LAST_SCHED.length} 条`
+}
 function renderSchedule(list) {
   const el = $("schedule"), cnt = $("schedule-count")
-  const rows = Array.isArray(list) ? list : []
+  const rows = (Array.isArray(list) ? list : [])
+    .map((a) => ({ ...a, at: Date.parse(a.at) }))
+    .filter((a) => Number.isFinite(a.at))
+    .sort((a, b) => a.at - b.at)
+  LAST_SCHED = rows
   cnt.textContent = rows.length ? `${rows.length} 条` : "无"
-  if (!rows.length) { el.innerHTML = '<div class="muted">暂无日程；等 AI 用 plan_next 排。</div>'; return }
-  el.innerHTML = ""
+  updateSummary()
+  if (!rows.length) { el.innerHTML = '<div class="tl-empty">接下来没有闹钟；等 AI 用 plan_next 排。</div>'; return }
   const now = Date.now()
+  const groups = new Map()
   for (const a of rows) {
-    const at = Date.parse(a.at)
-    if (!Number.isFinite(at)) continue
-    const d = new Date(at)
+    const d = new Date(a.at)
     const day = dayOfLocal(d)
     const today = dayOfLocal()
     const tomorrow = dayOfLocal(new Date(now + 86_400_000))
-    const dayLabel = day === today ? "今天" : day === tomorrow ? "明天" : day.slice(5)
-    const diff = at - now
-    const due = diff <= 0
-    const rel = due ? (diff > -60_000 ? "已到点" : `逾期 ${fmtDuration(-diff)}`) : `还有 ${fmtDuration(diff)}`
-    const model = a.model === "local" ? "本地模型" : a.model === "cloud" ? "在线模型" : (a.model || "当前模型")
-    const item = document.createElement("div")
-    item.className = "sched-item" + (due ? " due" : "")
-    const time = document.createElement("div"); time.className = "sched-time"
-    const hm = document.createElement("span"); hm.textContent = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-    const dayEl = document.createElement("span"); dayEl.className = "day"; dayEl.textContent = dayLabel
-    time.append(hm, dayEl)
-    const note = document.createElement("div"); note.className = "sched-note"; note.textContent = a.note || "（没有备注）"
-    const meta = document.createElement("div"); meta.className = "sched-meta"
-    const m1 = document.createElement("span"); m1.className = "m"; m1.textContent = model
-    const m2 = document.createElement("span"); m2.textContent = rel
-    meta.append(m1, m2)
-    item.append(time, note, meta)
-    el.append(item)
+    const label = day === today ? "今天" : day === tomorrow ? "明天" : day.slice(5)
+    if (!groups.has(label)) groups.set(label, [])
+    groups.get(label).push({ ...a, d })
   }
+  const html = []
+  for (const [label, items] of groups) {
+    html.push(`<div class="tl-group"><div class="tl-day">${label}</div>`)
+    for (const a of items) {
+      const diff = a.at - now
+      const due = diff <= 0
+      const rel = due ? (diff > -60_000 ? "已到点" : `逾期 ${fmtDuration(-diff)}`) : `还有 ${fmtDuration(diff)}`
+      const model = a.model === "local" ? "本地" : a.model === "cloud" ? "在线" : (a.model || "当前")
+      html.push(`<div class="tl-item${due ? " due" : ""}">
+        <div class="tl-time">${pad2(a.d.getHours())}:${pad2(a.d.getMinutes())}</div>
+        <div class="tl-dot"></div>
+        <div class="tl-note">${esc2(a.note || "（没有备注）")}</div>
+        <div class="tl-meta"><span class="m">${model}</span><span>${rel}</span></div>
+      </div>`)
+    }
+    html.push("</div>")
+  }
+  el.innerHTML = html.join("")
 }
 
 function renderUsage(u) {  if (!u) return
@@ -747,13 +803,24 @@ async function loadHealth() {
 async function loadPlan() {
   try {
     const d = await getJson("/api/plan")
+    LAST_PLAN = d
     const el = $("plan")
-    if (!d.exists) { el.innerHTML = '<div class="muted">今天还没有计划</div>'; $("plan-note").textContent = "无"; return }
+    if (!d.exists) {
+      el.innerHTML = '<div class="muted">今天还没有计划，等 AI 用 plan_next 排。</div>'
+      $("plan-note").textContent = "无"
+      updateSummary()
+      return
+    }
     $("plan-note").textContent = `${d.done}/${d.total}`
-    if (!d.total) { el.innerHTML = '<div class="muted">计划里还没有勾选项</div>'; return }
+    if (!d.total) { el.innerHTML = '<div class="muted">计划里还没有勾选项</div>'; updateSummary(); return }
     const pct = Math.round((d.done / d.total) * 100)
-    el.innerHTML = `<div class="plan-bar"><i style="width:${pct}%"></i></div>` + d.items.slice(0, 8).map((x) =>
-      `<div class="plan-item${x.done ? " done" : ""}"><span class="box">${x.done ? "✓" : ""}</span><span>${esc2(x.text)}</span></div>`).join("")
+    const undone = d.items.filter((x) => !x.done)
+    const done = d.items.filter((x) => x.done)
+    const item = (x) => `<div class="plan-item${x.done ? " done" : ""}"><span class="box">${x.done ? "✓" : ""}</span><span class="txt" title="${esc2(x.text)}">${esc2(x.text)}</span></div>`
+    el.innerHTML = `<div class="plan-ring"><span class="num">${d.done}/${d.total}</span><div class="bar"><i style="width:${pct}%"></i></div></div>` +
+      (undone.length ? undone.slice(0, 12).map(item).join("") : '<div class="muted">全部做完了</div>') +
+      (done.length ? `<details class="plan-group"><summary>已完成 ${done.length}</summary>${done.slice(0, 20).map(item).join("")}</details>` : "")
+    updateSummary()
   } catch { /* ignore */ }
 }
 async function loadEvents() {
@@ -892,12 +959,24 @@ async function loadDay(date, btn) {
 }
 $("today").onclick = () => loadDay(dayOfLocal())
 
+function escHtml(s) {
+  return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))
+}
 async function loadLog() {
   const target = $("log-target").value
   try {
     const d = await getJson(`/api/logs?target=${target}&n=120`)
-    $("log").textContent = d.text || "（空）"
-    $("log").scrollTop = $("log").scrollHeight
+    const el = $("log")
+    const html = String(d.text || "").split("\n").map((line) => {
+      let cls = ""
+      if (/sent private|private in/.test(line)) cls = "lg-msg"
+      else if (/afterglow/.test(line)) cls = "lg-glow"
+      else if (/error|failed|Error|失败/.test(line)) cls = "lg-err"
+      else if (/pi start|bridge started/.test(line)) cls = "lg-boot"
+      return `<span class="${cls}">${escHtml(line) || "&nbsp;"}</span>`
+    }).join("\n")
+    el.innerHTML = html || "（空）"
+    if ($("log-follow")?.checked) el.scrollTop = el.scrollHeight
   } catch (e) { $("log").textContent = "读取失败：" + e.message }
 }
 $("log-refresh").onclick = loadLog
