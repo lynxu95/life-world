@@ -509,6 +509,27 @@ const server = http.createServer(async (req, res) => {
       const st = await waitAck(seq)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
     }
+    if (req.method === "POST" && url.pathname === "/api/restart") {
+      const data = await body(req)
+      const target = String(data.target || "")
+      if (!target) return json(res, 400, { ok: false, msg: "缺少 target" })
+      // home 单独重启；qq 与群会话都挂在同一个桥接进程上，重启桥接即可
+      const which = target === "home" ? "home" : (target === "qq" || target.startsWith("group-")) ? "qq" : ""
+      if (!which) return json(res, 400, { ok: false, msg: "这个会话不支持重启" })
+      const lwctl = [join(HERE, "lwctl"), join(HERE, "lwctl.mjs")].find((p) => existsSync(p))
+      if (!lwctl) return json(res, 500, { ok: false, msg: "找不到 lwctl" })
+      const r = await new Promise((resolve) => {
+        const child = spawn(process.execPath, [lwctl, "restart", which], { cwd: ROOT, env: { ...process.env, LIFE_WORLD_ROOT: ROOT } })
+        let out = ""
+        child.stdout.on("data", (d) => { out += String(d) })
+        child.stderr.on("data", (d) => { out += String(d) })
+        const timer = setTimeout(() => { try { child.kill() } catch { /* ignore */ } resolve({ code: -1, out }) }, 30_000)
+        child.on("exit", (code) => { clearTimeout(timer); resolve({ code, out }) })
+        child.on("error", (e) => { clearTimeout(timer); resolve({ code: -1, out: String(e) }) })
+      })
+      const msg = String(r.out || "").trim().slice(0, 300)
+      return json(res, 200, { ok: r.code === 0, msg: msg || (r.code === 0 ? "已重启" : "重启失败") })
+    }
     if (req.method === "POST" && url.pathname === "/api/care") {
       const data = await body(req)
       let cfg = {}

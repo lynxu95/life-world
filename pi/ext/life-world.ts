@@ -1585,18 +1585,34 @@ async function probeUrl(url: string, headers: Record<string, string>, timeoutMs:
 }
 
 /** 模型是否可用（15 秒内复用结果，避免每轮都探） */
-async function modelUp(id: string): Promise<boolean> {
+/**
+ * 健康检查地址：优先用 life-world.json 的显式配置；没配就跟随模型，
+ * 从 provider 的 baseUrl 推导 `${baseUrl}/models`，换模型后自动跟着换。
+ */
+function healthTarget(id: string, ctx?: any): { url: string; headers: Record<string, string> } | null {
+  const ref = parseModelRef(id)
+  if (!ref) return null
+  const o = config().models
+  const key = providerKey(ref.provider)
+  const explicit = id === o.local ? o.localHealthUrl : id === o.cloud ? o.cloudHealthUrl : ""
+  if (explicit) {
+    return { url: explicit, headers: id === o.local || !key ? {} : { Authorization: `Bearer ${key}` } }
+  }
+  let model: any = null
+  try { model = (ctx || lastCtx)?.modelRegistry?.find?.(ref.provider, ref.id) } catch { /* stale ctx */ }
+  const base = String(model?.baseUrl || "").replace(/\/+$/, "")
+  if (!base) return null
+  return { url: `${base}/models`, headers: key ? { Authorization: `Bearer ${key}` } : {} }
+}
+
+async function modelUp(id: string, ctx?: any): Promise<boolean> {
   const o = config().models
   const cached = modelHealthCache.get(id)
   if (cached && Date.now() - cached.at < 15_000) return cached.up
-  const ref = parseModelRef(id)
-  let up = true
-  if (ref && id === o.local) {
-    up = await probeUrl(o.localHealthUrl, {}, o.probeTimeoutMs)
-  } else if (ref && id === o.cloud) {
-    const key = providerKey(ref.provider)
-    up = await probeUrl(o.cloudHealthUrl, key ? { Authorization: `Bearer ${key}` } : {}, o.probeTimeoutMs)
-  }
+  const h = healthTarget(id, ctx)
+  // 不知道探哪里就别判死，避免误触发自动切换
+  const up = h ? await probeUrl(h.url, h.headers, o.probeTimeoutMs) : true
+  if (!up && h) log(`model health down · ${id} · ${h.url}`)
   modelHealthCache.set(id, { at: Date.now(), up })
   return up
 }
@@ -1643,9 +1659,9 @@ async function ensureModelAlive(ctx: any): Promise<void> {
   if (Date.now() - lastSwitch.at < o.cooldownMs) return
   failingOver = true
   try {
-    if (await modelUp(cur)) return
+    if (await modelUp(cur, ctx)) return
     const alt = cur === o.local ? o.cloud : o.local
-    if (!(await modelUp(alt))) {
+    if (!(await modelUp(alt, ctx))) {
       log(`failover skipped · both down (${cur}, ${alt})`)
       return
     }

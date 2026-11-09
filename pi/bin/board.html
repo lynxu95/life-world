@@ -489,6 +489,21 @@ function renderSessions(list, models) {
     }
     if (models?.local) act.append(mk("本地", "local"))
     if (models?.cloud) act.append(mk("在线", "cloud"))
+    if (s.roleKey === "qq" || s.roleKey === "home" || String(s.roleKey).startsWith("group-")) {
+      const rb = document.createElement("button")
+      rb.textContent = "重启"
+      rb.title = s.roleKey === "home" ? "重启家会话" : "重启 QQ 桥接（私聊与群会话一起重连）"
+      rb.onclick = async () => {
+        if (!confirm(`重启 ${s.roleKey}？会话会断开重连。`)) return
+        rb.disabled = true; rb.textContent = "重启中…"
+        try {
+          const r = await getJson("/api/restart", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target: s.roleKey }) })
+          rb.textContent = r.ok ? "已重启" : "失败"
+        } catch { rb.textContent = "失败" }
+        setTimeout(loadOverview, 2500)
+      }
+      act.append(rb)
+    }
     if (!act.childElementCount) act.append(Object.assign(document.createElement("span"), { className: "muted", textContent: "未配置模型" }))
     card.append(top, model, act)
     el.append(card)
