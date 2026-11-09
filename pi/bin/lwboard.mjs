@@ -226,6 +226,46 @@ function dayOfLocal(d = new Date()) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
+/** 健康探活：显式地址优先，否则从 models.json 或内置 provider 表推导 /models */
+const PROVIDER_BASE = {
+  deepseek: "https://api.deepseek.com",
+  "qwen-token-plan-cn": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  openai: "https://api.openai.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+}
+function providerBase(provider) {
+  try {
+    const custom = String(readJson(join(homedir(), ".pi/agent/models.json"), {})?.providers?.[provider]?.baseUrl || "")
+    if (custom) return custom
+  } catch { /* ignore */ }
+  return PROVIDER_BASE[provider] || ""
+}
+function providerKey(provider) {
+  try {
+    const k = String(readJson(join(homedir(), ".pi/agent/auth.json"), {})?.[provider]?.key || "")
+    if (k) return k
+  } catch { /* ignore */ }
+  try { return String(readJson(join(homedir(), ".pi/agent/models.json"), {})?.providers?.[provider]?.apiKey || "") } catch { return "" }
+}
+async function probeModel(ref, explicitUrl) {
+  const id = String(ref || "")
+  const provider = id.includes("/") ? id.slice(0, id.indexOf("/")) : ""
+  const base = providerBase(provider).replace(/\/+$/, "")
+  const url = String(explicitUrl || (base ? `${base}/models` : ""))
+  if (!url) return { state: "unknown", url: "", detail: "没配健康地址" }
+  const key = providerKey(provider)
+  try {
+    const r = await fetch(url, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(4000) })
+    return { state: r.ok ? "ok" : "bad", url, code: r.status }
+  } catch (e) {
+    return { state: "bad", url, error: String(e?.message || e) }
+  }
+}
+function readTail(file, max) {
+  try { const s = readFileSync(file, "utf8"); return s.slice(-max) } catch { return "" }
+}
+
 /** 从印象 meta 里解析「来源：」段的日期；全日期与 MM-DD 分开处理，避免把 2026-11-05 切成 26-11 */
 function sourceDays(meta) {
   const text = String(meta || "")
@@ -446,6 +486,13 @@ const server = http.createServer(async (req, res) => {
         models: c.models || {},
         subagent: c.subagent || {},
         modelMode: readJson(join(ROOT, "model-mode.json"), null),
+        mood: (() => {
+          try {
+            const s = readFileSync(join(WORLD, "identity", "心情.md"), "utf8")
+            const line = s.split("\n").map((x) => x.trim()).find((x) => x && !x.startsWith("#"))
+            return line ? line.slice(0, 200) : ""
+          } catch { return "" }
+        })(),
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
         schedule: scheduleList(),
@@ -455,6 +502,63 @@ const server = http.createServer(async (req, res) => {
         pid: process.pid,
         now: new Date().toISOString(),
       })
+    }
+    if (req.method === "GET" && url.pathname === "/api/health") {
+      const c = readJson(CONFIG_FILE, {})
+      const m = c.models || {}
+      const [local, cloud] = await Promise.all([
+        probeModel(m.local, m.localHealthUrl),
+        probeModel(m.cloud, m.cloudHealthUrl),
+      ])
+      let bridge = { state: "unknown", lastSeen: "" }
+      try {
+        const s = readJson(join(ROOT, "qq-bridge-state.json"), {})
+        const ts = Date.parse(s.lastSeen || 0)
+        bridge = { state: ts && Date.now() - ts < 120_000 ? "ok" : "bad", lastSeen: s.lastSeen || "" }
+      } catch { /* ignore */ }
+      const backup = { size: backupSize(), last: (backupLog(1) || [])[0] || "" }
+      return json(res, 200, { local, cloud, bridge, backup, now: new Date().toISOString() })
+    }
+    if (req.method === "GET" && url.pathname === "/api/plan") {
+      const date = url.searchParams.get("date") || dayOfLocal()
+      const file = join(WORLD, "plan", `${date}.md`)
+      let text = ""
+      try { text = readFileSync(file, "utf8") } catch { /* ignore */ }
+      const items = []
+      for (const line of text.split("\n")) {
+        const m = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/)
+        if (m) items.push({ done: m[1].toLowerCase() === "x", text: m[2].trim().slice(0, 200) })
+      }
+      return json(res, 200, { date, exists: !!text, total: items.length, done: items.filter((x) => x.done).length, items: items.slice(0, 30) })
+    }
+    if (req.method === "GET" && url.pathname === "/api/activity") {
+      const date = url.searchParams.get("date") || dayOfLocal()
+      const hours = Array(24).fill(0)
+      let total = 0
+      const db = openMem()
+      if (db) {
+        try {
+          const rows = db.prepare("select t from msg where day = ?").all(date)
+          total = rows.length
+          for (const r of rows) {
+            const d = new Date(String(r.t || ""))
+            if (!Number.isNaN(d.getTime())) hours[d.getHours()]++
+          }
+        } catch { /* ignore */ }
+      }
+      return json(res, 200, { date, hours, total })
+    }
+    if (req.method === "GET" && url.pathname === "/api/events") {
+      const events = []
+      let m
+      const re = /^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z) (model switch|failover|alarm model|backup ·|impression ·|sendTime)(.*)$/gm
+      const debug = readTail(join(ROOT, "debug.log"), 200_000)
+      while ((m = re.exec(debug))) events.push({ t: m[1], text: `${m[2]}${m[3]}`.trim().slice(0, 180) })
+      const re2 = /^\[(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)\] (sent private|pi start|bridge started|judge SKIP)(.*)$/gm
+      const qb = readTail(join(ROOT, "qq-bridge.log"), 120_000)
+      while ((m = re2.exec(qb))) events.push({ t: m[1], text: `${m[2]}${m[3]}`.trim().slice(0, 180) })
+      events.sort((a, b) => String(a.t).localeCompare(String(b.t)))
+      return json(res, 200, { events: events.slice(-30) })
     }
     if (req.method === "GET" && url.pathname === "/api/memory") {
       const q = url.searchParams.get("q") || ""
@@ -509,6 +613,8 @@ const server = http.createServer(async (req, res) => {
       if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
       const seq = Date.now()
       writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
+      // 全部切换只下发，不逐个等回执；会话 5 秒内自己轮询生效
+      if (target === "all") return json(res, 200, { ok: true, msg: "已下发全部切换" })
       const st = await waitAck(seq)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
     }
