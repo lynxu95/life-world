@@ -94,6 +94,7 @@ const MODEL_RULES_MARK = "## 模型使用规范"
 const FORMS_FILE = join(IDENTITY_DIR, "化形表.md")
 const FORMS_MARK = "## 化形表"
 const AUTH_FILE = join(homedir(), ".pi/agent/auth.json")
+const MODELS_FILE = join(homedir(), ".pi/agent/models.json")
 /** 机密抽屉：切到云端前把这段对话（含机密文件内容）收起来，切回本地再打开 */
 const DRAWER_DIR = join(WORLD, "机密抽屉")
 const DRAWER_SESSIONS = join(DRAWER_DIR, "sessions")
@@ -1613,7 +1614,11 @@ async function healthAuth(provider: string, ctx?: any, model?: any): Promise<{ h
     }
   } catch { /* ignore */ }
   if (!Object.keys(headers).length) {
-    const key = providerKey(provider) || String(model?.apiKey || "")
+    let key = providerKey(provider) || String(model?.apiKey || "")
+    // 自建 provider 常把 apiKey 写在 models.json 的 provider 上
+    if (!key) {
+      try { key = String(readJson<any>(MODELS_FILE, {})?.providers?.[provider]?.apiKey || "") } catch { /* ignore */ }
+    }
     if (key) headers.Authorization = `Bearer ${key}`
   }
   if (!Object.keys(headers).length && !healthAuthLogged.has(provider)) {
