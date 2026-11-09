@@ -149,7 +149,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "cloud": "deepseek/deepseek-flash",
     "autoFailover": true,
     "localHealthUrl": "http://127.0.0.1:8081/health",
-    "cloudHealthUrl": "https://api.deepseek.com/models",
+    "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
     "cooldownMs": 60000
   },

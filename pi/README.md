@@ -155,7 +155,7 @@ pi          # TUI，已经带 life-world
     "cloud": "deepseek/deepseek-flash",
     "autoFailover": true,
     "localHealthUrl": "http://127.0.0.1:8081/health",
-    "cloudHealthUrl": "https://api.deepseek.com/models",
+    "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
     "cooldownMs": 60000
   }

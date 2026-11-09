@@ -1596,32 +1596,51 @@ async function probeUrl(url: string, headers: Record<string, string>, timeoutMs:
   } catch { return false } finally { clearTimeout(timer) }
 }
 
-/** 模型是否可用（15 秒内复用结果，避免每轮都探） */
+/** 取 provider 的请求鉴权：优先用 pi 解析出的 auth，再回退 auth.json / models.json */
+async function healthHeaders(provider: string, ctx?: any, model?: any): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {}
+  try {
+    const auth: any = await (ctx || lastCtx)?.modelRegistry?.getProviderAuth?.(provider)
+    const a = auth?.auth || auth
+    if (a && typeof a === "object") {
+      if (a.headers && typeof a.headers === "object") Object.assign(headers, a.headers)
+      const key = String(a.apiKey || "")
+      if (key && !headers.Authorization && !headers.authorization) headers.Authorization = `Bearer ${key}`
+    }
+  } catch { /* ignore */ }
+  if (!Object.keys(headers).length) {
+    const key = providerKey(provider) || String(model?.apiKey || "")
+    if (key) headers.Authorization = `Bearer ${key}`
+  }
+  return headers
+}
+
 /**
  * 健康检查地址：优先用 life-world.json 的显式配置；没配就跟随模型，
  * 从 provider 的 baseUrl 推导 `${baseUrl}/models`，换模型后自动跟着换。
  */
-function healthTarget(id: string, ctx?: any): { url: string; headers: Record<string, string> } | null {
+async function healthTarget(id: string, ctx?: any): Promise<{ url: string; headers: Record<string, string> } | null> {
   const ref = parseModelRef(id)
   if (!ref) return null
   const o = config().models
-  const key = providerKey(ref.provider)
   const explicit = id === o.local ? o.localHealthUrl : id === o.cloud ? o.cloudHealthUrl : ""
-  if (explicit) {
-    return { url: explicit, headers: id === o.local || !key ? {} : { Authorization: `Bearer ${key}` } }
-  }
   let model: any = null
   try { model = (ctx || lastCtx)?.modelRegistry?.find?.(ref.provider, ref.id) } catch { /* stale ctx */ }
+  const headers = await healthHeaders(ref.provider, ctx, model)
+  if (explicit) {
+    return { url: explicit, headers: id === o.local ? {} : headers }
+  }
   const base = String(model?.baseUrl || "").replace(/\/+$/, "")
   if (!base) return null
-  return { url: `${base}/models`, headers: key ? { Authorization: `Bearer ${key}` } : {} }
+  return { url: `${base}/models`, headers }
 }
 
+/** 模型是否可用（15 秒内复用结果，避免每轮都探） */
 async function modelUp(id: string, ctx?: any): Promise<boolean> {
   const o = config().models
   const cached = modelHealthCache.get(id)
   if (cached && Date.now() - cached.at < 15_000) return cached.up
-  const h = healthTarget(id, ctx)
+  const h = await healthTarget(id, ctx)
   // 不知道探哪里就别判死，避免误触发自动切换
   const up = h ? await probeUrl(h.url, h.headers, o.probeTimeoutMs) : true
   if (!up && h) log(`model health down · ${id} · ${h.url}`)
@@ -1708,7 +1727,6 @@ function activeSessionSummaries(): Array<{ roleKey: string; model: string; updat
       if (!f.endsWith(".json")) continue
       const s = readJson<any>(join(STATUS_DIR, f), null)
       if (!s || !s.roleKey || !s.model) continue
-      if (s.roleKey === "cli" || s.roleKey === "subagent") continue
       try { process.kill(Number(s.pid), 0) } catch { continue }
       if (Date.now() - Date.parse(s.updated || 0) >= 90_000) continue
       out.push({ roleKey: String(s.roleKey), model: String(s.model), updated: String(s.updated || ""), pid: Number(s.pid) })
@@ -1825,7 +1843,7 @@ export default function (pi: ExtensionAPI) {
       if (!seq || seq <= lastControlSeq) return
       const at = Number(c?.at || 0)
       // 进程重启前留下的旧命令只作废，不再执行一遍
-      if (!at || Date.now() - at > 5 * 60_000) {
+      if (!at || Date.now() - at > 60_000) {
         lastControlSeq = seq
         try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString(), skipped: "stale" })) } catch { /* ignore */ }
         return
@@ -2258,7 +2276,8 @@ export default function (pi: ExtensionAPI) {
     },
   })
 
-  addTool(pi, {
+  // 群聊强制云端，不给切换工具（避免群成员把 home/私聊一起切走）
+  if (CHANNEL !== "group") addTool(pi, {
     name: "switch_model",
     label: "Switch model",
     description: "本地 / 在线模型热切换，也能查看和切换其他会话。target: local=本地小模型，cloud=在线大模型，provider/model；不传 target 查所有会话状态。session: self（默认）/ all / roleKey（home、qq、group-...）。",
@@ -2294,19 +2313,24 @@ export default function (pi: ExtensionAPI) {
       if (scope === "self" || scope === roleKey) {
         if (target === cur) return ok(`已经是 ${target} 了。`)
         const r = await switchTo(ctx, target, reason)
+        writeStatus()
         writeModelMode()
         return ok(r)
       }
 
       // 切别的会话 / 全部：下发控制命令，逐个等回执
       const active = activeSessionSummaries().map((s) => s.roleKey)
-      const roles = scope === "all" ? active : [scope]
+      // all 永远包含自己：TUI 可能还没写心跳，不能把自己漏掉
+      const roles = scope === "all" ? Array.from(new Set([...active, roleKey])) : [scope]
       if (!roles.length) return ok("没有活跃会话可切。")
       const missing = roles.filter((rk) => rk !== roleKey && !active.includes(rk))
-      if (missing.length) return ok(`这些会话没在跑：${missing.join("、")}`)
+      if (missing.length) return ok(`这些会话没在跑或没心跳（可能刚重启/正忙）：${missing.join("、")}`)
 
       const seq = Date.now()
       atomicWrite(CONTROL_FILE, JSON.stringify({ seq, at: seq, target: scope, model: raw, reason }, null, 2))
+      // 自己已经直接切了，别再让自己的轮询重复执行
+      lastControlSeq = seq
+      try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString() })) } catch { /* ignore */ }
       const waitMs = scope === "all" ? 12_000 : 8_000
       const results = await Promise.all(roles.map(async (rk) => {
         if (rk === roleKey) {
@@ -2316,6 +2340,7 @@ export default function (pi: ExtensionAPI) {
         const st = await waitRoleAck(seq, rk, waitMs)
         return { rk, ok: !!st?.ok, msg: (st && st.msg) || "未响应（可能卡在任务里）" }
       }))
+      writeStatus()
       writeModelMode()
       const lines = results.map((x) => `- ${x.rk} ${x.ok ? "✓" : "✗"} ${x.msg}`).join("\n")
       const allOk = results.every((x) => x.ok)

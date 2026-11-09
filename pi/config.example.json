@@ -54,7 +54,7 @@
     "cloud": "deepseek/deepseek-flash",
     "autoFailover": true,
     "localHealthUrl": "",
-    "cloudHealthUrl": "https://api.deepseek.com/models",
+    "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
     "cooldownMs": 60000
   },

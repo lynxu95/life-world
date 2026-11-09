@@ -286,16 +286,16 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="sessions" id="sessions"><div class="muted">加载中…</div></div>
       </section>
         <section>
+          <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
+          <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
+          <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
+        </section>
+        <section>
         <div class="sec-head"><h2>用量 · 7 天</h2></div>
         <div class="tiles" id="tiles"></div>
         <div class="bars" id="bars"></div>
         <div class="hint" id="usage-hint"></div>
       </section>
-        <section>
-          <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
-          <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
-          <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
-        </section>
       </main>
       <aside class="rail">
         <section>
@@ -308,6 +308,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <span class="muted" id="m-hint"></span>
         </div>
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
+        <div class="hint" id="mode-hint"></div>
       </section>
         <section>
         <div class="sec-head"><h2>主动关怀</h2></div>
@@ -456,6 +457,7 @@ async function loadOverview() {
       fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
       fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
       fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
+      $("mode-hint").textContent = d.modelMode ? `当前：${d.modelMode.mode === "local" ? "本地" : d.modelMode.mode === "cloud" ? "在线" : "混合"}` : ""
     }
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])

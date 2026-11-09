@@ -444,6 +444,7 @@ const server = http.createServer(async (req, res) => {
         sessions: sessions(),
         models: c.models || {},
         subagent: c.subagent || {},
+        modelMode: readJson(join(ROOT, "model-mode.json"), null),
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
         schedule: scheduleList(),
