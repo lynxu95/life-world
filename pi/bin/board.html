@@ -302,11 +302,12 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="sec-head"><h2>模型</h2></div>
         <label class="field">本地<select id="m-local"></select></label>
         <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
+        <label class="field" style="margin-top:8px">分身<select id="m-subagent"></select></label>
         <div class="row" style="margin-top:10px">
           <button class="primary" id="m-save">保存</button>
           <span class="muted" id="m-hint"></span>
         </div>
-        <div class="hint">改完保存，重启或切一次模型后生效。</div>
+        <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
       </section>
         <section>
         <div class="sec-head"><h2>主动关怀</h2></div>
@@ -454,6 +455,7 @@ async function loadOverview() {
     if (!mTouched) {
       fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
       fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
+      fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
     }
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
@@ -614,10 +616,11 @@ function fillSelect(el, current, list, noneLabel) {
 }
 $("m-local").addEventListener("change", () => { mTouched = true })
 $("m-cloud").addEventListener("change", () => { mTouched = true })
+$("m-subagent").addEventListener("change", () => { mTouched = true })
 $("m-save").onclick = async () => {
   const b = $("m-save"); b.disabled = true; b.textContent = "保存中…"
   try {
-    const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim() }) })
+    const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim(), subagent: $("m-subagent").value.trim() }) })
     $("m-hint").textContent = r.ok ? "已保存" : "保存失败"
     mTouched = false
   } catch (e) { $("m-hint").textContent = "保存失败：" + e.message }

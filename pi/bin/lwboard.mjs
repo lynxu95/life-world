@@ -443,6 +443,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         sessions: sessions(),
         models: c.models || {},
+        subagent: c.subagent || {},
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
         schedule: scheduleList(),
@@ -576,8 +577,12 @@ const server = http.createServer(async (req, res) => {
       cfg.models = cfg.models || {}
       if (typeof data.local === "string") cfg.models.local = data.local.trim()
       if (typeof data.cloud === "string") cfg.models.cloud = data.cloud.trim()
+      if (typeof data.subagent === "string") {
+        cfg.subagent = cfg.subagent || {}
+        cfg.subagent.model = data.subagent.trim()
+      }
       writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
-      return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud } })
+      return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud }, subagent: cfg.subagent || {} })
     }
     if (req.method === "POST" && url.pathname === "/api/backup") {
       const ok = await new Promise((resolve) => {
