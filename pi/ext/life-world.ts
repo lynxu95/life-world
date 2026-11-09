@@ -2448,7 +2448,7 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "delegate",
     label: "Delegate subagent",
-    description: "派一个分身去机房并行跑任务（独立上下文，最多一层）。必要的时候才用，比如耗时或要并行的活；它不是你在另一个会话。",
+    description: "把一个耗时/并发的任务交给独立 pi 子进程（隔离上下文）。零第三方扩展，最多一层。",
     parameters: { type: "object", properties: { task: { type: "string", description: "完整任务、输入和验收标准" }, model: { type: "string", description: "可选模型，默认 deepseek-flash" } }, required: ["task"] },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能用子代理。")
