@@ -216,8 +216,19 @@ input[type=checkbox]{accent-color:var(--accent)}
 .ss-item{display:flex;flex-direction:column;gap:1px;min-width:0}
 .ss-item .k{color:var(--faint);font-size:11px;letter-spacing:.04em}
 .ss-item .v{font-size:13px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sched-cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:18px;align-items:start}
-@media (max-width:900px){.sched-cols{grid-template-columns:1fr}.sched-summary{grid-template-columns:1fr 1fr}}
+.sched-cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:18px;align-items:stretch}
+.sched-cols > section{display:flex;flex-direction:column;min-height:0;height:clamp(460px,56vh,600px)}
+.sched-cols > section > .sec-head{flex:none}
+.sched-cols #schedule{flex:1;overflow:auto;min-height:0;padding-right:4px;max-height:none}
+.sched-cols #plan{flex:1;min-height:0;overflow:hidden}
+.plan-list{flex:1;overflow:auto;min-height:0;padding-right:4px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:900px){
+  .sched-cols{grid-template-columns:1fr}
+  .sched-summary{grid-template-columns:1fr 1fr}
+  .sched-cols > section{height:auto}
+  .sched-cols #schedule,.sched-cols #plan{overflow:visible;max-height:none}
+  .plan-list{overflow:visible}
+}
 .timeline{display:flex;flex-direction:column;gap:0;max-height:none;overflow:visible}
 .tl-group{margin-left:52px;border-left:1px solid var(--line-strong);padding:0 0 12px 14px}
 .tl-day{margin-left:-52px;font-family:var(--mono);font-size:11px;color:var(--faint);padding:2px 0 6px}
@@ -818,8 +829,10 @@ async function loadPlan() {
     const done = d.items.filter((x) => x.done)
     const item = (x) => `<div class="plan-item${x.done ? " done" : ""}"><span class="box">${x.done ? "✓" : ""}</span><span class="txt" title="${esc2(x.text)}">${esc2(x.text)}</span></div>`
     el.innerHTML = `<div class="plan-ring"><span class="num">${d.done}/${d.total}</span><div class="bar"><i style="width:${pct}%"></i></div></div>` +
+      `<div class="plan-list">` +
       (undone.length ? undone.slice(0, 12).map(item).join("") : '<div class="muted">全部做完了</div>') +
-      (done.length ? `<details class="plan-group"><summary>已完成 ${done.length}</summary>${done.slice(0, 20).map(item).join("")}</details>` : "")
+      (done.length ? `<details class="plan-group"><summary>已完成 ${done.length}</summary>${done.slice(0, 20).map(item).join("")}</details>` : "") +
+      `</div>`
     updateSummary()
   } catch { /* ignore */ }
 }
