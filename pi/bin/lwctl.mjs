@@ -36,7 +36,7 @@ function sessions() {
   return readdirSync(STATUS_DIR)
     .filter((f) => f.endsWith(".json"))
     .map((f) => ({ file: f, ...readJson(join(STATUS_DIR, f), {}) }))
-    .filter((s) => s && s.roleKey)
+    .filter((s) => s && s.roleKey && s.model)
     .filter((s) => { try { process.kill(Number(s.pid), 0); return true } catch { return false } })
     .filter((s) => Date.now() - Date.parse(s.updated || 0) < 90_000)
     .sort((a, b) => String(a.roleKey).localeCompare(String(b.roleKey)))

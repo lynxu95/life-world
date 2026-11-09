@@ -148,7 +148,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "local": "basalt/abliterated-iq3_xxs",
     "cloud": "deepseek/deepseek-flash",
     "autoFailover": true,
-    "localHealthUrl": "http://127.0.0.1:8081/health",
+    "localHealthUrl": "",
     "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
     "cooldownMs": 60000

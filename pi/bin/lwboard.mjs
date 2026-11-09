@@ -100,6 +100,7 @@ function sessions() {
     .map((f) => readJson(join(STATUS_DIR, f), null))
     .filter((s) => s && s.roleKey)
     .map((s) => ({ roleKey: s.roleKey, model: s.model || "", updated: s.updated || "", pid: s.pid, sessionId: s.sessionId || "" }))
+    .filter((s) => s.model)
     .filter((s) => pidAlive(Number(s.pid)) && Date.now() - Date.parse(s.updated || 0) < 90_000)
     .sort((a, b) => String(a.roleKey).localeCompare(String(b.roleKey)))
 }

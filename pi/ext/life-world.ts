@@ -75,6 +75,7 @@ const QQ_GROUP_BODY = [
   "- 不要用情侣/伴侣称呼，不要提亲密关系、私聊内容、日记、画像、心情。",
   "- 学习群友的聊天风格：友好又诙谐，口语化能接梗；像日常聊天，别文言、别书面语；一次 1~3 条短句；可以发表情/颜文字。",
   "- 你知道你们的关系，但在这里只以朋友身份说话；不该接就只回 [SILENT]。",
+  "- 群聊强制在云端：这里没有切换模型的工具，不要提切换。",
 ].join("\n")
 
 /** 后台工作间：只对 ROLE=home 注入（home 与 TUI 的 CHANNEL 都是 cli，不能靠 CHANNEL 区分） */
@@ -1487,6 +1488,7 @@ let lastSwitch = { at: 0, from: "", to: "" }
 let failingOver = false
 let toolFailures = 0
 const modelHealthCache = new Map<string, { at: number; up: boolean }>()
+const healthAuthLogged = new Set<string>()
 
 interface DrawerState { active: boolean; cutoff: number; hidden: number; stashed?: boolean }
 /** 抽屉按会话隔离：一个进程合抽屉不影响另一个云端会话 */
@@ -1597,22 +1599,28 @@ async function probeUrl(url: string, headers: Record<string, string>, timeoutMs:
 }
 
 /** 取 provider 的请求鉴权：优先用 pi 解析出的 auth，再回退 auth.json / models.json */
-async function healthHeaders(provider: string, ctx?: any, model?: any): Promise<Record<string, string>> {
+async function healthAuth(provider: string, ctx?: any, model?: any): Promise<{ headers: Record<string, string>; baseUrl: string }> {
   const headers: Record<string, string> = {}
+  let baseUrl = ""
   try {
     const auth: any = await (ctx || lastCtx)?.modelRegistry?.getProviderAuth?.(provider)
     const a = auth?.auth || auth
     if (a && typeof a === "object") {
       if (a.headers && typeof a.headers === "object") Object.assign(headers, a.headers)
-      const key = String(a.apiKey || "")
+      const key = String(a.apiKey || a.key || "")
       if (key && !headers.Authorization && !headers.authorization) headers.Authorization = `Bearer ${key}`
+      if (a.baseUrl) baseUrl = String(a.baseUrl)
     }
   } catch { /* ignore */ }
   if (!Object.keys(headers).length) {
     const key = providerKey(provider) || String(model?.apiKey || "")
     if (key) headers.Authorization = `Bearer ${key}`
   }
-  return headers
+  if (!Object.keys(headers).length && !healthAuthLogged.has(provider)) {
+    healthAuthLogged.add(provider)
+    log(`health auth empty · ${provider}`)
+  }
+  return { headers, baseUrl }
 }
 
 /**
@@ -1626,13 +1634,13 @@ async function healthTarget(id: string, ctx?: any): Promise<{ url: string; heade
   const explicit = id === o.local ? o.localHealthUrl : id === o.cloud ? o.cloudHealthUrl : ""
   let model: any = null
   try { model = (ctx || lastCtx)?.modelRegistry?.find?.(ref.provider, ref.id) } catch { /* stale ctx */ }
-  const headers = await healthHeaders(ref.provider, ctx, model)
+  const auth = await healthAuth(ref.provider, ctx, model)
   if (explicit) {
-    return { url: explicit, headers: id === o.local ? {} : headers }
+    return { url: explicit, headers: auth.headers }
   }
-  const base = String(model?.baseUrl || "").replace(/\/+$/, "")
+  const base = String(auth.baseUrl || model?.baseUrl || "").replace(/\/+$/, "")
   if (!base) return null
-  return { url: `${base}/models`, headers }
+  return { url: `${base}/models`, headers: auth.headers }
 }
 
 /** 模型是否可用（15 秒内复用结果，避免每轮都探） */
@@ -1649,6 +1657,11 @@ async function modelUp(id: string, ctx?: any): Promise<boolean> {
 }
 
 async function switchTo(ctx: any, target: string, reason: string): Promise<string> {
+  // 群聊强制云端：任何路径都不许把群会话切到别的模型
+  if (CHANNEL === "group") {
+    const g = config().models
+    if (!g.cloud || target !== g.cloud) return "群聊强制云端，不切换"
+  }
   const ref = parseModelRef(target)
   if (!ref) return `模型写法不对：${target}（要 provider/model）`
   const model = ctx?.modelRegistry?.find?.(ref.provider, ref.id)
@@ -1682,6 +1695,7 @@ async function switchTo(ctx: any, target: string, reason: string): Promise<strin
  * 不依赖模型自己判断，避免模型挂掉之后没人接手。
  */
 async function ensureModelAlive(ctx: any): Promise<void> {
+  if (CHANNEL === "group") return
   const o = config().models
   if (!o.autoFailover || !o.local || !o.cloud) return
   const cur = modelIdOf(ctx)
@@ -1707,6 +1721,7 @@ async function ensureModelAlive(ctx: any): Promise<void> {
 
 /** 出错兜底：同一模型连续两次报错就切另一个（不等健康检查） */
 async function failoverToOther(ctx: any, reason: string, opts: { onlyToCloud?: boolean } = {}): Promise<boolean> {
+  if (CHANNEL === "group") return false
   const o = config().models
   if (!o.local || !o.cloud) return false
   const cur = modelIdOf(ctx)
@@ -1748,9 +1763,8 @@ let lastModeText = ""
 function writeModelMode(): void {
   try {
     const list = activeSessionSummaries()
-    if (!list.length) return
     const kinds = list.map((s) => modelKind(s.model))
-    const mode = kinds.every((k) => k === "local") ? "local" : kinds.every((k) => k === "cloud") ? "cloud" : "mixed"
+    const mode = !list.length ? "none" : kinds.every((k) => k === "local") ? "local" : kinds.every((k) => k === "cloud") ? "cloud" : "mixed"
     const doc = {
       mode,
       updated: new Date().toISOString(),
@@ -1850,6 +1864,8 @@ export default function (pi: ExtensionAPI) {
       }
       lastControlSeq = seq
       try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString() })) } catch { /* ignore */ }
+      // 群聊强制云端：不执行任何切换/整理命令
+      if (CHANNEL === "group") return
       const targetRole = String(c?.target || "")
       if (targetRole !== roleKey && targetRole !== "all") return
       const o = config().models
@@ -1914,7 +1930,7 @@ export default function (pi: ExtensionAPI) {
     if (!o.local || modelIdOf(ctx) === o.local) return
     const name = String(event?.toolName || "")
     const input: any = event?.input ?? {}
-    const HINT = "需要看就调用 switch_model 切回本地模型。"
+    const HINT = CHANNEL === "group" ? "群聊不能切回本地；需要看请私聊或在终端里看。" : "需要看就调用 switch_model 切回本地模型。"
     const hitsDrawer = (s: string) => s.includes(DRAWER_DIR) || s.includes("机密抽屉")
 
     // 写类：只看目标路径，别因为正文里提到“机密抽屉”就误拦

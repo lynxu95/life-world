@@ -457,7 +457,12 @@ async function loadOverview() {
       fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
       fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
       fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
-      $("mode-hint").textContent = d.modelMode ? `当前：${d.modelMode.mode === "local" ? "本地" : d.modelMode.mode === "cloud" ? "在线" : "混合"}` : ""
+    }
+    if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
+      const m = d.modelMode.mode
+      $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`
+    } else {
+      $("mode-hint").textContent = ""
     }
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
