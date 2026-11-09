@@ -98,6 +98,7 @@ h1{font-size:20px;line-height:1.15;margin:0;font-weight:650;letter-spacing:.02em
 /* —— 骨架 —— */
 .dash{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
 .dash.memory{grid-template-columns:minmax(0,1fr)}
+.dash.single{grid-template-columns:minmax(0,1fr)}
 #tab-memory #graph{height:clamp(460px,62vh,720px)}
 @media (max-width:1080px){.dash{grid-template-columns:1fr}}
 main,.rail{display:flex;flex-direction:column;gap:18px;min-width:0}
@@ -310,6 +311,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
     </div>
     <nav class="tabs" role="tablist" aria-label="看板分区">
       <button class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
+      <button class="tab-btn" data-tab="schedule" role="tab" aria-selected="false">日程</button>
       <button class="tab-btn" data-tab="memory" role="tab" aria-selected="false">记忆</button>
     </nav>
     <div class="top-right">
@@ -341,19 +343,6 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <div class="hint" id="heat-hint">按小时统计今天的消息</div>
         </section>
         <section>
-          <div class="sec-head"><h2>健康</h2><span class="spacer"></span><span class="sec-note" id="health-note">…</span></div>
-          <div class="health-grid" id="health"></div>
-        </section>
-        <section>
-          <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
-          <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
-          <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
-        </section>
-        <section>
-          <div class="sec-head"><h2>今日计划</h2><span class="spacer"></span><span class="sec-note" id="plan-note">…</span></div>
-          <div class="plan" id="plan"><div class="muted">加载中…</div></div>
-        </section>
-        <section>
         <div class="sec-head"><h2>用量 · 7 天</h2></div>
         <div class="tiles" id="tiles"></div>
         <div class="bars" id="bars"></div>
@@ -376,6 +365,10 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         </div>
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
         <div class="hint" id="mode-hint"></div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>健康</h2><span class="spacer"></span><span class="sec-note" id="health-note">…</span></div>
+        <div class="health-grid" id="health"></div>
       </section>
         <section>
         <div class="sec-head"><h2>快捷操作</h2></div>
@@ -403,6 +396,38 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint">关掉随机想起 = 全天不主动找你，闹钟和晨间唤醒不受影响。</div>
       </section>
       </aside>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-schedule" hidden>
+    <div class="dash single">
+      <main>
+        <section>
+          <div class="sec-head"><h2>今日计划</h2><span class="spacer"></span><span class="sec-note" id="plan-note">…</span></div>
+          <div class="plan" id="plan"><div class="muted">加载中…</div></div>
+        </section>
+        <section>
+          <div class="sec-head"><h2>AI 日程</h2><span class="spacer"></span><span class="sec-note" id="schedule-count">…</span></div>
+          <div class="schedule" id="schedule"><div class="muted">加载中…</div></div>
+          <div class="hint">来自 plan_next 的闹钟；随机想起不在这里。</div>
+        </section>
+        <section>
+        <div class="sec-head">
+          <h2>日志</h2>
+          <div class="log-tools">
+            <select id="log-target">
+              <option value="qq">QQ 桥接</option>
+              <option value="home">家会话</option>
+              <option value="debug">调试</option>
+            </select>
+            <button id="log-refresh">刷新</button>
+            <button id="backup">打快照</button>
+            <span class="muted" id="backup-hint"></span>
+          </div>
+        </div>
+        <pre class="log" id="log">（加载中…）</pre>
+      </section>
+      </main>
     </div>
   </div>
 
@@ -465,22 +490,6 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           </div>
         </section>
         </div>
-        <section>
-        <div class="sec-head">
-          <h2>日志</h2>
-          <div class="log-tools">
-            <select id="log-target">
-              <option value="qq">QQ 桥接</option>
-              <option value="home">家会话</option>
-              <option value="debug">调试</option>
-            </select>
-            <button id="log-refresh">刷新</button>
-            <button id="backup">打快照</button>
-            <span class="muted" id="backup-hint"></span>
-          </div>
-        </div>
-        <pre class="log" id="log">（加载中…）</pre>
-      </section>
       </main>
     </div>
   </div>
@@ -1670,7 +1679,7 @@ $("imp-run").onclick = async () => {
   setTimeout(() => { b.disabled = false; b.textContent = "立即整理"; loadImpressions(); loadBrain() }, 4000)
 }
 
-const TAB_IDS = ["overview", "memory"]
+const TAB_IDS = ["overview", "schedule", "memory"]
 function setTab(name, remember = true) {
   if (!TAB_IDS.includes(name)) name = "overview"
   for (const id of TAB_IDS) {
