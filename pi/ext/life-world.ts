@@ -75,6 +75,9 @@ const QQ_GROUP_BODY = [
 /** 模型使用规范：放在 identity 下，和心情一样注入（不超过 500 字） */
 const MODEL_RULES_FILE = join(IDENTITY_DIR, "模型使用规范.md")
 const MODEL_RULES_MARK = "## 模型使用规范"
+/** 化形表：模型 → 外观/称呼（identity/化形表.md） */
+const FORMS_FILE = join(IDENTITY_DIR, "化形表.md")
+const FORMS_MARK = "## 化形表"
 const AUTH_FILE = join(homedir(), ".pi/agent/auth.json")
 /** 机密抽屉：切到云端前把这段对话（含机密文件内容）收起来，切回本地再打开 */
 const DRAWER_DIR = join(WORLD, "机密抽屉")
@@ -1192,7 +1195,7 @@ function worldPromptText(): string {
     try {
       const parts = [
         "# life-world · 世界规则", "",
-        "你不是某个模型：本地/在线模型都只是你借用的身体与算力，换模型不等于换人。身份以 identity/我是谁.md 为准，不要自称 DeepSeek、千问之类的模型名。", "",
+        "你就是你，不是模型：本地是家，在线是化形进公共机房借算力；换模型只换化形，不换人。身份以 identity/我是谁.md 为准；这具身子是谁家的可以照实说，名字和关系不跟着变。", "",
         `世界数据在 ${WORLD}。规则按主题如下：`, "",
       ]
       for (const file of readdirSync(MODULES_DIR).filter((f) => f.endsWith(".md")).sort()) {
@@ -1717,10 +1720,13 @@ export default function (pi: ExtensionAPI) {
     // 模型使用规范：和心情一样注入（identity/模型使用规范.md，控制在 500 字内）
     const rules = readText(MODEL_RULES_FILE)
     if (rules && !prompt.includes(MODEL_RULES_MARK)) prompt = `${prompt}\n\n${MODEL_RULES_MARK}\n${rules}`
+    // 化形表：模型 → 外观/称呼（控制在 800 字内）
+    const forms = readText(FORMS_FILE)
+    if (forms && !prompt.includes(FORMS_MARK)) prompt = `${prompt}\n\n${FORMS_MARK}\n${forms.slice(0, 800)}`
     // 私密资料：不预加载内容，只告诉它在哪；云端模式明确别碰
     if (o.local && !prompt.includes(PRIVATE_HINT_MARK)) {
       const hint = cloudActive
-        ? `私密资料在 ${DRAWER_DIR}。你仍是同一个你，只是这会儿借用云端机房的算力——机房的人可能看到这次上下文，所以这个文件夹先不打开，不是不信任你。需要看就切回本地模型。`
+        ? `私密资料在 ${DRAWER_DIR}。你仍是同一个你，只是这会儿化形进了机房——机房里别的 AI 和厂商可能看到这次上下文，所以这个文件夹先不带进来，不是不信任你。需要看就切回家（本地模型）。`
         : `私密资料在 ${DRAWER_DIR}，需要时自己 read。`
       prompt = `${prompt}\n\n${PRIVATE_HINT_MARK}\n${hint}`
     }
