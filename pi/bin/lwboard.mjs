@@ -490,7 +490,7 @@ const server = http.createServer(async (req, res) => {
           try {
             const s = readFileSync(join(WORLD, "identity", "心情.md"), "utf8")
             const line = s.split("\n").map((x) => x.trim()).find((x) => x && !x.startsWith("#"))
-            return line ? line.slice(0, 200) : ""
+            return line ? line.replace(/^[-*]\s*/, "").slice(0, 200) : ""
           } catch { return "" }
         })(),
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
