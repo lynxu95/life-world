@@ -45,6 +45,9 @@ const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
 const STATUS_DIR = join(ROOT, "status")
 const CONTROL_FILE = join(ROOT, "control.json")
 const CONTROL_STATE = join(ROOT, "control-state.json")
+const MODEL_MODE_FILE = join(ROOT, "model-mode.json")
+/** 每个会话一份回执，跨会话切换时按 roleKey 聚合读取 */
+const ackStatePath = (rk: string) => join(ROOT, `control-state-${rk.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`)
 const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.json")
 const TIMER_LOCK = join(WORLD, ".pi-timer.lock")
 const ROLE = process.env.LIFE_WORLD_ROLE || "cli"
@@ -72,6 +75,15 @@ const QQ_GROUP_BODY = [
   "- 不要用情侣/伴侣称呼，不要提亲密关系、私聊内容、日记、画像、心情。",
   "- 学习群友的聊天风格：友好又诙谐，口语化能接梗；像日常聊天，别文言、别书面语；一次 1~3 条短句；可以发表情/颜文字。",
   "- 你知道你们的关系，但在这里只以朋友身份说话；不该接就只回 [SILENT]。",
+].join("\n")
+
+/** 后台工作间：只对 ROLE=home 注入（home 与 TUI 的 CHANNEL 都是 cli，不能靠 CHANNEL 区分） */
+const HOME_BG_MARK = "## 后台工作间"
+const HOME_BG_BODY = [
+  "这里是后台工作间，用户看不到你的输出。",
+  "- 后台是你自由处理事件的地方，用户看不到；做完任务就结束，不要对着空气汇报、不要提问。",
+  "- 要让他知道的事，用 reach_out 发到 QQ；不想打扰就不发。",
+  "- 后台和其他所有会话（QQ、群聊、终端）都是同一个你；后台不扮演聊天。",
 ].join("\n")
 
 /** 模型使用规范：放在 identity 下，和心情一样注入（不超过 500 字） */
@@ -1101,7 +1113,7 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
 }
 
 function impressionPrompt(imp: ImpressionOptions): string {
-  return `【印象整理】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明。\n腾位与过期（按「最后验证」距今算，只决定删不删，不改置信度）：\n- 满 ${imp.staleDays} 天但不到 ${imp.expireDays} 天：算「可替换」，有新印象要进来时优先删它腾位。\n- 超过 ${imp.expireDays} 天：算「过期印象」，直接删掉，用新印象补位。\n- 不到 ${imp.staleDays} 天：除非已被新证据推翻，否则别删。\n总数不超过 ${imp.maxItems} 条。只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
+  return `【后台任务·印象整理】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明。\n腾位与过期（按「最后验证」距今算，只决定删不删，不改置信度）：\n- 满 ${imp.staleDays} 天但不到 ${imp.expireDays} 天：算「可替换」，有新印象要进来时优先删它腾位。\n- 超过 ${imp.expireDays} 天：算「过期印象」，直接删掉，用新印象补位。\n- 不到 ${imp.staleDays} 天：除非已被新证据推翻，否则别删。\n总数不超过 ${imp.maxItems} 条。只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
 }
 
 let ticking = false
@@ -1118,7 +1130,7 @@ async function tick(): Promise<void> {
     const hour = now.getHours()
     // 每日回顾
     if (hour >= c.world.reviewHour && state.lastReview !== today) {
-      sendTime(`【每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。`)
+      sendTime(`【后台任务·每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。`)
       writeWorld({ ...readWorld(), lastReview: today })
       return
     }
@@ -1157,7 +1169,7 @@ async function tick(): Promise<void> {
     // 到点闹钟
     const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
     for (const a of due) {
-      const text = `【我的时间】${shortStamp(a.at)} 到了，说好做到这里是：${a.note}。\n先看看做完了没有；做完了就想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
+      const text = `【后台任务】${shortStamp(a.at)}：${a.note}。\n做完就结束；要让他知道就用 reach_out。做完想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
       if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
       else sendTime(text)
       withWorldLock(() => {
@@ -1191,7 +1203,7 @@ async function tick(): Promise<void> {
     const mins = hour * 60 + now.getMinutes()
     if (mins < fh * 60 + fm || mins >= fh * 60 + fm + 240) return
     const weather = c.care.enabled && c.care.weatherEnabled ? await fetchWeather(c.care.weatherCity) : ""
-    sendTime(`【我的时间】早上了，新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
+    sendTime(`【后台任务·早上】新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
     writeWorld({ ...readWorld(), lastWake: today })
   } catch (e) { log(`tick failed ${String(e)}`) }
   finally { ticking = false }
@@ -1687,6 +1699,67 @@ async function failoverToOther(ctx: any, reason: string, opts: { onlyToCloud?: b
   return result.startsWith("已切到")
 }
 
+/** 所有活跃会话（读 status 目录，过滤僵尸/过期/非会话） */
+function activeSessionSummaries(): Array<{ roleKey: string; model: string; updated: string; pid: number }> {
+  const out: Array<{ roleKey: string; model: string; updated: string; pid: number }> = []
+  try {
+    if (!existsSync(STATUS_DIR)) return out
+    for (const f of readdirSync(STATUS_DIR)) {
+      if (!f.endsWith(".json")) continue
+      const s = readJson<any>(join(STATUS_DIR, f), null)
+      if (!s || !s.roleKey || !s.model) continue
+      if (s.roleKey === "cli" || s.roleKey === "subagent") continue
+      try { process.kill(Number(s.pid), 0) } catch { continue }
+      if (Date.now() - Date.parse(s.updated || 0) >= 90_000) continue
+      out.push({ roleKey: String(s.roleKey), model: String(s.model), updated: String(s.updated || ""), pid: Number(s.pid) })
+    }
+  } catch { /* ignore */ }
+  return out.sort((a, b) => a.roleKey.localeCompare(b.roleKey))
+}
+
+function modelKind(id: string): "local" | "cloud" | "other" {
+  const o = config().models
+  if (!id) return "other"
+  if (o.local && id === o.local) return "local"
+  if (o.cloud && id === o.cloud) return "cloud"
+  return "other"
+}
+
+let lastModeText = ""
+/** 实时记录全局模型状态：只记录，不强制、不还原 */
+function writeModelMode(): void {
+  try {
+    const list = activeSessionSummaries()
+    if (!list.length) return
+    const kinds = list.map((s) => modelKind(s.model))
+    const mode = kinds.every((k) => k === "local") ? "local" : kinds.every((k) => k === "cloud") ? "cloud" : "mixed"
+    const doc = {
+      mode,
+      updated: new Date().toISOString(),
+      sessions: Object.fromEntries(list.map((s) => [s.roleKey, { model: s.model, kind: modelKind(s.model), updated: s.updated }])),
+    }
+    const text = JSON.stringify(doc, null, 2)
+    if (text === lastModeText) return
+    lastModeText = text
+    atomicWrite(MODEL_MODE_FILE, text)
+  } catch { /* ignore */ }
+}
+
+function waitRoleAck(seq: number, rk: string, timeoutMs: number): Promise<any | null> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs
+    const tick = () => {
+      try {
+        const st = readJson<any>(ackStatePath(rk), null)
+        if (st && Number(st.seq) === seq) return resolve(st)
+      } catch { /* ignore */ }
+      if (Date.now() > deadline) return resolve(null)
+      setTimeout(tick, 300)
+    }
+    tick()
+  })
+}
+
 export default function (pi: ExtensionAPI) {
   piRef = pi
   if (JUDGE) return // 判官：不注入、不注册工具
@@ -1700,6 +1773,11 @@ export default function (pi: ExtensionAPI) {
 
   // —— lwctl：会话心跳 + 远程切换模型 ——
   const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
+  const writeAck = (payload: any) => {
+    const text = JSON.stringify(payload, null, 2)
+    try { atomicWrite(CONTROL_STATE, text) } catch { /* ignore */ }
+    try { atomicWrite(ackStatePath(roleKey), text) } catch { /* ignore */ }
+  }
   const CONTROL_SEEN = join(ROOT, `.control-seen-${roleKey.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`)
   let lastControlSeq = (() => {
     try { return Number(JSON.parse(readFileSync(CONTROL_SEEN, "utf8")).seq) || 0 } catch { return 0 }
@@ -1734,6 +1812,7 @@ export default function (pi: ExtensionAPI) {
         if (!f.endsWith(".json")) continue
         try { if (statSync(join(STATUS_DIR, f)).mtimeMs < cutoff) unlinkSync(join(STATUS_DIR, f)) } catch { /* ignore */ }
       }
+      writeModelMode()
     } catch (e) {
       const msg = String(e)
       if (!msg.includes("stale")) log(`writeStatus failed ${msg}`)
@@ -1753,34 +1832,35 @@ export default function (pi: ExtensionAPI) {
       }
       lastControlSeq = seq
       try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString() })) } catch { /* ignore */ }
-      if (String(c?.target || "") !== roleKey) return
+      const targetRole = String(c?.target || "")
+      if (targetRole !== roleKey && targetRole !== "all") return
       const o = config().models
       if (String(c?.action || "") === "impression") {
         if (!lastCtx) {
-          atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: false, msg: "还没有可用的会话上下文", at: new Date().toISOString() }, null, 2))
+          writeAck({ seq, target: roleKey, ok: false, msg: "还没有可用的会话上下文", at: new Date().toISOString() })
           return
         }
         const imp = config().memory.impression
         if (o.local && modelIdOf(lastCtx) !== o.local) {
           const r = await switchTo(lastCtx, o.local, "手动印象整理")
           if (r.startsWith("切不过去")) {
-            atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: false, msg: `本地模型没切过去：${r}`, at: new Date().toISOString() }, null, 2))
+            writeAck({ seq, target: roleKey, ok: false, msg: `本地模型没切过去：${r}`, at: new Date().toISOString() })
             return
           }
         }
         const sent = sendTime(impressionPrompt(imp))
-        atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: sent, msg: sent ? "印象整理已触发" : "任务没能送进会话", at: new Date().toISOString() }, null, 2))
+        writeAck({ seq, target: roleKey, ok: sent, msg: sent ? "印象整理已触发" : "任务没能送进会话", at: new Date().toISOString() })
         writeStatus()
         return
       }
       const wanted = String(c?.model || "")
       const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
       if (!target || !lastCtx) {
-        atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, ok: false, msg: "没有可切换的上下文或模型", at: new Date().toISOString() }, null, 2))
+        writeAck({ seq, target: roleKey, ok: false, msg: "没有可切换的上下文或模型", at: new Date().toISOString() })
         return
       }
       const result = modelIdOf(lastCtx) === target ? `已经是 ${target} 了` : await switchTo(lastCtx, target, c?.reason || "手动切换")
-      atomicWrite(CONTROL_STATE, JSON.stringify({ seq, target: roleKey, model: target, ok: result.startsWith("已切到") || result.startsWith("已经是"), msg: result, at: new Date().toISOString() }, null, 2))
+      writeAck({ seq, target: roleKey, model: target, ok: result.startsWith("已切到") || result.startsWith("已经是"), msg: result, at: new Date().toISOString() })
       writeStatus()
     } catch (e) { log(`pollControl failed ${String(e)}`) }
   }
@@ -1880,6 +1960,11 @@ export default function (pi: ExtensionAPI) {
     if (style && !prompt.includes(style[0])) {
       prompt = `${prompt}\n\n${style[0]}\n${style[1]}`
       log(`style injected · ${CHANNEL}`)
+    }
+    // 后台工作间：home 是无头会话，必须让它知道“用户看不到这里”
+    if (ROLE === "home" && !prompt.includes(HOME_BG_MARK)) {
+      prompt = `${prompt}\n\n${HOME_BG_MARK}\n${HOME_BG_BODY}`
+      log("style injected · home-background")
     }
     const o = config().models
     const isLocal = !!o.local && modelIdOf(ctx) === o.local
@@ -2176,26 +2261,65 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "switch_model",
     label: "Switch model",
-    description: "本地 / 在线模型热切换。target: local=本地小模型，cloud=在线大模型，也可写 provider/model；不传 target 就报当前模型。",
+    description: "本地 / 在线模型热切换，也能查看和切换其他会话。target: local=本地小模型，cloud=在线大模型，provider/model；不传 target 查所有会话状态。session: self（默认）/ all / roleKey（home、qq、group-...）。",
     parameters: {
       type: "object",
       properties: {
         target: { type: "string", description: "local / cloud / provider/model；省略则查状态" },
+        session: { type: "string", description: "self（默认）/ all / roleKey（home、qq、group-...）" },
         reason: { type: "string", description: "为什么切，写一句，便于回看" },
       },
     },
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
       const o = config().models
       const cur = modelIdOf(ctx) || "未知"
+      const scope = String(params?.session || "self").trim() || "self"
       const raw = String(params?.target || "").trim()
+      const kindLabel = (m: string) => modelKind(m) === "local" ? "本地" : modelKind(m) === "cloud" ? "在线" : "其他"
+      const list = () => {
+        const all = activeSessionSummaries()
+        return all.length
+          ? all.map((s) => `- ${s.roleKey}：${kindLabel(s.model)} · ${s.model}${s.roleKey === roleKey ? "（你在这里）" : ""}`).join("\n")
+          : "（没有活跃会话）"
+      }
       if (!raw || raw === "status") {
-        return ok(`当前模型：${cur}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${o.autoFailover ? "开" : "关"}`)
+        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${o.autoFailover ? "开" : "关"}`)
       }
       if (!o.local && !o.cloud) return ok("还没配 models.local / models.cloud，先在 life-world.json 里配好。")
       const target = raw === "local" ? o.local : raw === "cloud" ? o.cloud : raw
       if (!target) return ok(`这个别名没配：${raw}`)
-      if (target === cur) return ok(`已经是 ${target} 了。`)
-      return ok(await switchTo(ctx, target, String(params?.reason || "")))
+      const reason = String(params?.reason || "") || "AI 切换"
+
+      // 只切自己
+      if (scope === "self" || scope === roleKey) {
+        if (target === cur) return ok(`已经是 ${target} 了。`)
+        const r = await switchTo(ctx, target, reason)
+        writeModelMode()
+        return ok(r)
+      }
+
+      // 切别的会话 / 全部：下发控制命令，逐个等回执
+      const active = activeSessionSummaries().map((s) => s.roleKey)
+      const roles = scope === "all" ? active : [scope]
+      if (!roles.length) return ok("没有活跃会话可切。")
+      const missing = roles.filter((rk) => rk !== roleKey && !active.includes(rk))
+      if (missing.length) return ok(`这些会话没在跑：${missing.join("、")}`)
+
+      const seq = Date.now()
+      atomicWrite(CONTROL_FILE, JSON.stringify({ seq, at: seq, target: scope, model: raw, reason }, null, 2))
+      const waitMs = scope === "all" ? 12_000 : 8_000
+      const results = await Promise.all(roles.map(async (rk) => {
+        if (rk === roleKey) {
+          const r = target === cur ? `已经是 ${target} 了` : await switchTo(ctx, target, reason)
+          return { rk, ok: r.startsWith("已切到") || r.startsWith("已经是"), msg: r }
+        }
+        const st = await waitRoleAck(seq, rk, waitMs)
+        return { rk, ok: !!st?.ok, msg: (st && st.msg) || "未响应（可能卡在任务里）" }
+      }))
+      writeModelMode()
+      const lines = results.map((x) => `- ${x.rk} ${x.ok ? "✓" : "✗"} ${x.msg}`).join("\n")
+      const allOk = results.every((x) => x.ok)
+      return ok(`切换 ${scope === "all" ? "全部会话" : scope} → ${target}\n${lines}${allOk ? "" : "\n有会话没成功，按上面如实告诉用户。"}`)
     },
   })
 
@@ -2324,7 +2448,7 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "delegate",
     label: "Delegate subagent",
-    description: "把一个耗时/并发的任务交给独立 pi 子进程（隔离上下文）。零第三方扩展，最多一层。",
+    description: "派一个分身去机房并行跑任务（独立上下文，最多一层）。必要的时候才用，比如耗时或要并行的活；它不是你在另一个会话。",
     parameters: { type: "object", properties: { task: { type: "string", description: "完整任务、输入和验收标准" }, model: { type: "string", description: "可选模型，默认 deepseek-flash" } }, required: ["task"] },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能用子代理。")
