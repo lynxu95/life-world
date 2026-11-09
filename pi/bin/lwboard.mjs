@@ -339,6 +339,7 @@ function memoryGraph(limit = 400) {
     { file: "心情.md", label: "心情" },
     { file: "用户画像.md", label: "用户画像" },
     { file: "模型使用规范.md", label: "模型规范" },
+    { file: "化形表.md", label: "化形" },
   ]
   const identityNodes = []
   for (const doc of IDENTITY_DOCS) {
@@ -461,7 +462,7 @@ const server = http.createServer(async (req, res) => {
       const id = String(url.searchParams.get("id") || "")
       if (!id) return json(res, 400, { error: "missing id" })
       if (id.startsWith("doc-")) {
-        const allowed = new Set(["我是谁.md", "心情.md", "用户画像.md", "模型使用规范.md"])
+        const allowed = new Set(["我是谁.md", "心情.md", "用户画像.md", "模型使用规范.md", "化形表.md"])
         const file = id.slice(4)
         if (!allowed.has(file)) return json(res, 404, { error: "not found" })
         const path = join(WORLD, "identity", file)
