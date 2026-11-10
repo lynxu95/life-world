@@ -2161,7 +2161,7 @@ export default function (pi: ExtensionAPI) {
         log(`privacy drawer · hid ${hidden} messages from cloud`)
         const stub = {
           role: "system",
-          content: `[机密抽屉] 切换到云端之前有 ${hidden} 条对话已收进本地机密抽屉（${DRAWER_DIR}），本次请求不包含它们；回到本地模型时会重新打开。`,
+          content: "【机密内容，请回家后再看】",
         }
         event.messages = [stub, ...kept]
         filtered = true
