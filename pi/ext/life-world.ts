@@ -359,9 +359,18 @@ function moodLine(): string {
   return "无"
 }
 
+function currentModelLine(): string {
+  let id = ""
+  try { id = lastCtx ? modelIdOf(lastCtx) : "" } catch { /* stale ctx */ }
+  if (!id) return ""
+  const o = config().models
+  const kind = o.local && id === o.local ? "本地" : o.cloud && id === o.cloud ? "在线" : "其他"
+  return `模型：${kind} · ${id}`
+}
+
 function stateText(withMood = true): string {
-  const tail = withMood ? `（心情：${moodLine()}；OneBot 桥接：${bridgeStatus()}）` : `（OneBot 桥接：${bridgeStatus()}）`
-  return `[本地时间 ${stamp()} ${zone()}]\n${tail}`
+  const parts = [currentModelLine(), withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
+  return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）`
 }
 
 // ———————— 归档 / 记忆 ————————
@@ -385,7 +394,7 @@ function cleanUserText(text: string): string {
   return text
     .replace(/^\[本地时间 [^\]]*\]\s*/, "")
     .split("\n")
-    .filter((line) => !line.startsWith("（心情：") && !line.startsWith("（OneBot 桥接："))
+    .filter((line) => !line.startsWith("（模型：") && !line.startsWith("（心情：") && !line.startsWith("（OneBot 桥接："))
     .join("\n")
     .trim()
 }
