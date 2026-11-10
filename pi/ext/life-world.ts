@@ -35,6 +35,11 @@ const STICKER_DIR = join(WORLD, "表情包")
 const VOICE_DIR = join(WORLD, "语音")
 const TMP_DIR = join(WORLD, "tmp")
 const OUTBOX_DIR = join(WORLD, "outbox")
+/** 技能库：自制 / 下载分开；索引文件按需查 */
+const SKILLS_DIR = join(WORLD, "skills")
+const SKILL_OWN_DIR = join(SKILLS_DIR, "own")
+const SKILL_DL_DIR = join(SKILLS_DIR, "downloaded")
+const SKILL_INDEX = join(SKILLS_DIR, "INDEX.md")
 const WORLD_FILE = join(WORLD, "world.json")
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const BRIDGE_STATE = join(ROOT, "qq-bridge-state.json")
@@ -133,7 +138,7 @@ function readText(path: string): string { try { return existsSync(path) ? readFi
 function readJson<T>(path: string, fallback: T): T { try { return JSON.parse(readFileSync(path, "utf8")) as T } catch { return fallback } }
 
 function ensureDirs(): void {
-  for (const dir of [CONV_DIR, DIARY_DIR, PLAN_DIR, IDENTITY_DIR, ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR, OUTBOX_DIR]) {
+  for (const dir of [CONV_DIR, DIARY_DIR, PLAN_DIR, IDENTITY_DIR, ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR, OUTBOX_DIR, SKILLS_DIR, SKILL_OWN_DIR, SKILL_DL_DIR]) {
     try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch { /* ignore */ }
   }
 }
@@ -1797,12 +1802,74 @@ function waitRoleAck(seq: number, rk: string, timeoutMs: number): Promise<any | 
   })
 }
 
+interface SkillInfo { name: string; description: string; tags: string[]; source: "own" | "downloaded"; dir: string; file: string }
+function mdCell(v: string): string { return String(v || "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim() }
+function readSkillMeta(file: string): { fm: Record<string, string>; text: string } {
+  let text = ""
+  try { text = readFileSync(file, "utf8") } catch { /* ignore */ }
+  const fm: Record<string, string> = {}
+  const m = text.match(/^---\s*\n([\s\S]*?)\n---/)
+  if (m) {
+    for (const line of m[1].split("\n")) {
+      const i = line.indexOf(":")
+      if (i <= 0) continue
+      const k = line.slice(0, i).trim().toLowerCase()
+      const v = line.slice(i + 1).trim().replace(/^["']|["']$/g, "")
+      if (k) fm[k] = v
+    }
+  }
+  return { fm, text }
+}
+function scanSkills(): SkillInfo[] {
+  const out: SkillInfo[] = []
+  for (const source of ["own", "downloaded"] as const) {
+    const base = join(SKILLS_DIR, source)
+    if (!existsSync(base)) continue
+    let dirs: string[] = []
+    try { dirs = readdirSync(base, { withFileTypes: true }).filter((d: any) => d.isDirectory()).map((d: any) => String(d.name)) } catch { continue }
+    for (const dirName of dirs.sort()) {
+      const dir = join(base, dirName)
+      const file = join(dir, "SKILL.md")
+      if (!existsSync(file)) continue
+      const { fm } = readSkillMeta(file)
+      out.push({
+        name: fm.name || dirName,
+        description: fm.description || "",
+        tags: String(fm.tags || "").split(/[,，]/).map((x) => x.trim()).filter(Boolean),
+        source, dir, file,
+      })
+    }
+  }
+  return out
+}
+function skillIndexMarkdown(list: SkillInfo[] = scanSkills()): string {
+  const lines = ["# 技能索引", "", "> 自制在 `own/`，下载在 `downloaded/`。下载的技能先读正文，再决定要不要用。", ""]
+  if (!list.length) { lines.push("（还没有技能）"); return lines.join("\n") + "\n" }
+  lines.push("| 技能 | 说明 | 标签 | 来源 | 路径 |", "|---|---|---|---|---|")
+  for (const s of list) {
+    const dirName = s.dir.split(/[\\/]/).pop() || ""
+    lines.push(`| ${mdCell(s.name)} | ${mdCell(s.description).slice(0, 120)} | ${mdCell(s.tags.join("、"))} | ${s.source === "own" ? "自制" : "下载"} | ${s.source}/${mdCell(dirName)}/SKILL.md |`)
+  }
+  return lines.join("\n") + "\n"
+}
+function writeSkillIndex(): SkillInfo[] {
+  const list = scanSkills()
+  try { atomicWrite(SKILL_INDEX, skillIndexMarkdown(list)) } catch { /* ignore */ }
+  return list
+}
+function findSkill(name: string): SkillInfo | null {
+  const key = String(name || "").trim()
+  if (!key || /[\\/]/.test(key)) return null
+  return scanSkills().find((s) => s.name === key || s.dir.split(/[\\/]/).pop() === key) || null
+}
+
 export default function (pi: ExtensionAPI) {
   piRef = pi
   if (JUDGE) return // 判官：不注入、不注册工具
   if (!config().world.enabled) { log("life-world disabled · world.enabled=false"); return }
   rotateLog(LOG_FILE)
   ensureDirs()
+  writeSkillIndex()
   loadArchived()
   // 索引回填放到后台，不挡启动
   const backfillTimer = setTimeout(() => { backfillMemoryIndex() }, 3000)
@@ -2394,6 +2461,39 @@ export default function (pi: ExtensionAPI) {
       }
     },
   })
+
+  if (CHANNEL !== "group") {
+    addTool(pi, {
+      name: "skill_list",
+      label: "Skill list",
+      description: "列出技能库里的技能（自制 + 下载），并刷新 skills/INDEX.md。只返回索引，不读正文。",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        const list = writeSkillIndex()
+        return ok(list.length ? skillIndexMarkdown(list) : "技能库还是空的：把自己的技能放 skills/own/<名字>/SKILL.md，下载的放 skills/downloaded/<名字>/SKILL.md。")
+      },
+    })
+    addTool(pi, {
+      name: "skill_read",
+      label: "Skill read",
+      description: "读一个技能的 SKILL.md 正文和绝对路径；下载的技能会提示先确认内容。",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "技能名（目录名或 frontmatter 里的 name）" } },
+        required: ["name"],
+      },
+      async execute(_id: string, params: any) {
+        const s = findSkill(String(params?.name || ""))
+        if (!s) {
+          const names = scanSkills().map((x) => x.name)
+          return ok(`没找到这个技能：${String(params?.name || "")}。现有：${names.length ? names.join("、") : "（空）"}`)
+        }
+        const { text } = readSkillMeta(s.file)
+        const caution = s.source === "downloaded" ? "这是下载的技能；先看清正文和脚本，再决定要不要执行。\n\n" : ""
+        return ok(`${caution}技能：${s.name}（${s.source === "own" ? "自制" : "下载"}）\n路径：${s.dir}\n\n${text}`)
+      },
+    })
+  }
 
   addTool(pi, {
     name: "memory_search",

@@ -23,6 +23,10 @@
   - `memory_day({ date: "2026-10-31" })`
   - `memory_timeline({ from: "2026-10-01", to: "2026-10-31" })`
 
+## 技能
+- 查技能：`skill_list()`
+- 读技能：`skill_read({ name: "技能名" })`
+
 ## 模型
 - 切换：`switch_model({ target: "local|cloud", reason: "为什么切" })`
 - 查状态：`switch_model()`，或 `switch_model({ target: "status" })`
