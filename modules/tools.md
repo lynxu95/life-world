@@ -20,7 +20,7 @@
 ## 内容
 - 颜文字：`kaomoji({ scene: "害羞", count: 3, remember: false })`
 - 联网搜索：`web_search({ query: "…", limit: 5 })`（免费，不需要 key）
-- 看视频 / 听音频：`perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })`；也支持公网 URL。图片主模型自己能看就直接 `read`，不用 perceive。
+- 看视频 / 听音频 / 主模型看不了的图片：`perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })`。只接受本地文件或**媒体直链**；B 站/抖音网页地址、BV 号不是直链，要自己解析出真实媒体地址，见《看视频、听音频、看图（辅助感知）》。图片主模型自己能看就直接 `read`，不用 perceive。
 - 翻记忆：
   - `memory_search({ query: "法考 出分", from: "2026-09-01", to: "2026-11-06", role: "user|assistant", scope: "chat|diary|notes|all", limit: 8, context: 1 })`
   - `memory_day({ date: "2026-10-31" })`

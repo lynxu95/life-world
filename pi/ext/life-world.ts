@@ -3361,11 +3361,11 @@ export default function (pi: ExtensionAPI) {
     addTool(pi, {
       name: "perceive",
       label: "Perceive media",
-      description: "辅助感知：只在主模型缺能力时用——视频、音频，或主模型不支持图片时的图片。图片主模型能看就直接 read，别调这个。本地文件超限会自动压缩；公网 URL 直接传，不中转。",
+      description: "辅助感知：只在主模型缺能力时用——视频、音频，或主模型不支持图片时的图片。path 可以是本地文件或媒体直链；B站/抖音网页地址、BV 号不是直链，需要你自己解析出真实媒体 URL，工具不解析网页。图片主模型能看就直接 read，别调这个。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "本地文件路径（相对 world）或公网媒体 URL" },
+          path: { type: "string", description: "本地文件路径（相对 world），或打开就是媒体文件的直链（.mp4/.mp3/.jpg 等；网页地址不算）" },
           question: { type: "string", description: "要它看/听什么" },
           kind: { type: "string", enum: ["image", "video", "audio"], description: "不传按扩展名判断" },
         },
