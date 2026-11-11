@@ -26,6 +26,8 @@
 ## 技能
 - 查技能：`skill_list()`
 - 读技能：`skill_read({ name: "技能名" })`
+- 跑技能脚本：`skill_run({ name: "技能名", script: "scripts/run.sh", args: ["…"], timeout_seconds: 60 })`（省略 script 用 SKILL.md 的 `run:`）
+- 启停技能：`skill_toggle({ name: "技能名", enabled: false })`
 
 ## 模型
 - 切换：`switch_model({ target: "local|cloud", reason: "为什么切" })`

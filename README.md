@@ -141,7 +141,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "wsUrl": "ws://127.0.0.1:3001",
     "token": "",
     "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 },
-    "group": { "enabled": false, "keywords": ["铃"], "interjectChance": 0.05, "cooldownMs": 8000 }
+    "group": { "enabled": false, "keywords": ["铃"], "interjectChance": 0.05, "cooldownMs": 8000, "sessionIdleMinutes": 120 }
   },
   "subagent": { "model": "deepseek-flash" },
   "localModel": { "enabled": true, "keepRecent": 20, "foldToolResults": 6, "resultChars": 300, "foldingThinkingTurns": 0 },
@@ -231,9 +231,11 @@ worlds/default/skills/
 ```
 
 - AI 平时只知道技能库和索引在哪，不会把技能列表塞进上下文；
-- `skill_list()`：扫描两个目录、刷新 `INDEX.md`，返回「技能 / 说明 / 标签 / 来源 / 路径」；
+- `skill_list()`：扫描两个目录、刷新 `INDEX.md`，返回「技能 / 说明 / 标签 / 来源 / 状态 / 路径」；
 - `skill_read({ name })`：需要正文时才读 `SKILL.md`；下载的技能会提示先确认内容；
-- 群聊不注册这两个工具。
+- `skill_run({ name, script?, args?, timeout_seconds? })`：只允许跑技能目录内的脚本，默认最多 60 秒；不给 `script` 就用 `SKILL.md` 的 `run:`；云端模式不跑（避免脚本读到私密资料）；
+- `skill_toggle({ name, enabled })`：停用只是加 `.disabled` 标记，不删文件；停用的技能不能跑，但还能读；
+- 群聊不注册这四个工具。`pi/examples/skills/own/时间/` 是一份可直接复制过去试的示例。
 
 `SKILL.md` 最少写 frontmatter：
 
@@ -270,11 +272,11 @@ QQ ←→ OneBot v11 正向 WS ←→ pi/bin/qq-bridge.mjs ←→ pi --mode rpc
 ```
 
 - **私聊**：固定会话 `qq-chat`，文件持久化，重启接着聊；
-- **群聊**：每个群一个 `qq-group-<群号>`；配了 `models.cloud` 时群聊与判官都用在线模型；群配置 2 秒热加载；
+- **群聊**：每个群一个 `qq-group-<群号>`；配了 `models.cloud` 时群聊与判官都用在线模型；群配置 2 秒热加载；闲置 `group.sessionIdleMinutes`（默认 120 分钟）后回收子进程，有人说话会自动重开；
 - **触发**：@ / 关键词 / 随机插话概率；冷却与频率上限可配；
-- **附件**：图片 >8MB 自动缩到 1568px（需 imagemagick/ffmpeg），文件不设上限、流式落盘到 `tmp/`；
-- **余波**：发完 60 秒没回补一拍，最多两拍，`[SILENT]` 不发；
-- **outbox**：`reach_out` 写文件，桥接补发最近 3 天；
+- **附件**：图片 >8MB 自动缩到 1568px（需 imagemagick/ffmpeg），文件不设上限、流式落盘到 `tmp/`；群聊现在也收文件，路径交给模型读；
+- **余波**：发完 60 秒没回补一拍，最多两拍，`[SILENT]` 不发；生成期间对方回来了这句就作废，没发出去也不续下一拍；
+- **outbox**：`reach_out` 写文件，桥接补发最近 3 天；状态文件丢了只补 `since` 之后的新条目，不会把当天已发过的整段重发；
 - **/new**：清当前私聊会话。
 
 OneBot 只监听 `127.0.0.1` 时用 SSH 隧道；同机部署直接 `ws://127.0.0.1:3001`。
@@ -283,11 +285,12 @@ OneBot 只监听 `127.0.0.1` 时用 SSH 隧道；同机部署直接 `ws://127.0.
 
 - `plan_next` 定任务时可指定 `model: local|cloud`，到点先切模型再唤醒；
 - 家会话（`home-rpc.mjs`，`LIFE_WORLD_ROLE=home`）负责：闹钟、每日回顾（默认 23 点）、早上兜底（默认 09:00 后）、桥接守护、每日快照/清理/衰减；
+- `home-rpc.mjs` 的 pi 子进程异常退出后自动重启（2s 起指数退避，最长 60s；稳定跑满 1 分钟重置）；
 - 家会话每次重启新建会话，连续性靠归档记忆；QQ 私聊不变。
 
 ## 工具
 
-`plan_next` · `check_alarm` · `cancel_alarm` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `delegate` · `gal_choice` · `switch_model` · `web_search`
+`plan_next` · `check_alarm` · `cancel_alarm` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `delegate` · `gal_choice` · `switch_model` · `web_search`
 
 - `web_search` 走 TinyFish keyless，免 API Key；
 - `delegate` 起独立 `pi -p` 子进程，深度 1 层；
