@@ -247,6 +247,20 @@ input[type=checkbox]{accent-color:var(--accent)}
 .plan-item .txt{overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .plan-group{margin-top:8px}
 .plan-group summary{cursor:pointer;color:var(--faint);font-size:12px;padding:4px 0}
+.subs{display:flex;flex-direction:column;gap:8px;max-height:380px;overflow:auto;padding-right:2px}
+.sub-card{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--panel-2)}
+.sub-head{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
+.sub-head b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-state{margin-left:auto;font-size:11px;color:var(--accent);white-space:nowrap}
+.sub-meta{font-size:11px;color:var(--faint);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-item{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted);padding:4px 0;border-top:1px dashed var(--line)}
+.sub-item .t{font-family:var(--mono);color:var(--fg);white-space:nowrap}
+.sub-item .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-item button,.sub-actions button{font-size:11px;padding:2px 7px;border-radius:6px;border:1px solid var(--line-strong);background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap}
+.sub-item button:hover,.sub-actions button:hover{border-color:var(--accent);color:var(--accent)}
+.sub-actions{display:flex;gap:6px;margin-top:6px}
+.sub-skip{font-size:11px;color:var(--faint);margin-top:6px;overflow-wrap:anywhere}
+.sub-empty{color:var(--faint);font-size:12px;padding:4px 0}
 .log-wrap pre.log{max-height:360px}
 .lg-msg{color:var(--fg)} .lg-glow{color:var(--accent-2)} .lg-err{color:var(--bad)} .lg-boot{color:var(--accent)}
 .tile{border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;background:var(--panel-2);min-width:0}
@@ -399,11 +413,13 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <label class="field">本地<select id="m-local"></select></label>
         <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
         <label class="field" style="margin-top:8px">分身<select id="m-subagent"></select></label>
+        <label class="field" style="margin-top:8px">辅助感知<select id="m-vision"></select></label>
         <div class="row" style="margin-top:10px">
           <button class="primary" id="m-save">保存</button>
           <span class="muted" id="m-hint"></span>
         </div>
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
+        <div class="hint">辅助感知只补主模型缺的能力（视频/音频，或主模型不支持图片时）；留空即停用，推荐 qwen3.8-omni-flash。</div>
         <div class="hint" id="mode-hint"></div>
       </section>
         <section>
@@ -444,9 +460,9 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
       <main>
         <section class="sched-summary">
           <div class="ss-date" id="ss-date">…</div>
-          <div class="ss-item"><span class="k">计划</span><span class="v" id="ss-plan">…</span></div>
+          <div class="ss-item"><span class="k">活动</span><span class="v" id="ss-plan">…</span></div>
           <div class="ss-item"><span class="k">下一条</span><span class="v" id="ss-next">…</span></div>
-          <div class="ss-item"><span class="k">日程</span><span class="v" id="ss-count">…</span></div>
+          <div class="ss-item"><span class="k">子闹钟</span><span class="v" id="ss-count">…</span></div>
         </section>
         <div class="sched-cols">
           <section>
@@ -454,9 +470,13 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <div class="schedule timeline" id="schedule"><div class="muted">加载中…</div></div>
           </section>
           <section>
-            <div class="sec-head"><h2>今日计划</h2><span class="spacer"></span><span class="sec-note" id="plan-note">…</span></div>
-            <div class="plan" id="plan"><div class="muted">加载中…</div></div>
-            <div class="hint">计划赶不上变化，这里可能慢半拍，以左侧 AI 日程为准。</div>
+            <div class="sec-head"><h2>活动 / 子闹钟</h2><span class="spacer"></span><span class="sec-note" id="subs-note">…</span></div>
+            <div class="subs" id="subs"><div class="muted">加载中…</div></div>
+            <div class="hint">子闹钟到点时如果 AI 正忙，会自动跳过，等它下次醒来自己 review。</div>
+            <details class="plan-group" style="margin-top:10px">
+              <summary>今日计划原文（折叠）</summary>
+              <div class="plan" id="plan" style="margin-top:8px"><div class="muted">加载中…</div></div>
+            </details>
           </section>
         </div>
         <section class="log-wrap">
@@ -574,6 +594,7 @@ async function getJson(url, opts) {
   if (!r.ok) throw new Error((await r.text()) || r.status)
   return r.json()
 }
+const postJson = (url, data) => getJson(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}) })
 
 async function loadOverview() {
   try {
@@ -594,6 +615,7 @@ async function loadOverview() {
       fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
       fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
       fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
+      fillSelect($("m-vision"), (d.multimodal && d.multimodal.model) || "", d.available || [], "（不启用）")
     }
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
@@ -669,16 +691,19 @@ function fmtDuration(ms) {
 
 let LAST_SCHED = []
 let LAST_PLAN = null
+let LAST_ALARMS = []
 function updateSummary() {
   const now = new Date()
   const wd = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()]
   $("ss-date").textContent = `${dayOfLocal(now)} 周${wd}`
-  $("ss-plan").textContent = LAST_PLAN ? (LAST_PLAN.exists ? `${LAST_PLAN.done}/${LAST_PLAN.total}` : "无计划") : "…"
-  const next = LAST_SCHED.find((a) => a.at > Date.now())
-  $("ss-next").textContent = next
-    ? `${pad2(new Date(next.at).getHours())}:${pad2(new Date(next.at).getMinutes())} · ${fmtDuration(next.at - Date.now())}`
+  const mains = LAST_ALARMS.filter((a) => a.kind === "main")
+  const active = mains.filter((a) => a.status === "active").length
+  $("ss-plan").textContent = mains.length ? `${active}/${mains.length} 进行中` : (LAST_ALARMS.length ? "旧闹钟" : "无活动")
+  const nextT = LAST_ALARMS.map((a) => Date.parse(a.at)).filter((t) => Number.isFinite(t) && t > Date.now()).sort((a, b) => a - b)[0]
+  $("ss-next").textContent = nextT
+    ? `${pad2(new Date(nextT).getHours())}:${pad2(new Date(nextT).getMinutes())} · ${fmtDuration(nextT - Date.now())}`
     : "接下来没有闹钟"
-  $("ss-count").textContent = `${LAST_SCHED.length} 条`
+  $("ss-count").textContent = `${LAST_ALARMS.filter((a) => a.kind === "sub").length} 条`
 }
 function renderSchedule(list) {
   const el = $("schedule"), cnt = $("schedule-count")
@@ -818,12 +843,9 @@ async function loadPlan() {
     LAST_PLAN = d
     const el = $("plan")
     if (!d.exists) {
-      el.innerHTML = '<div class="muted">今天还没有计划，等 AI 用 plan_next 排。</div>'
-      $("plan-note").textContent = "无"
-      updateSummary()
+      el.innerHTML = '<div class="muted">今天还没有计划。</div>'
       return
     }
-    $("plan-note").textContent = `${d.done}/${d.total}`
     if (!d.total) { el.innerHTML = '<div class="muted">计划里还没有勾选项</div>'; updateSummary(); return }
     const pct = Math.round((d.done / d.total) * 100)
     const undone = d.items.filter((x) => !x.done)
@@ -834,9 +856,67 @@ async function loadPlan() {
       (undone.length ? undone.slice(0, 12).map(item).join("") : '<div class="muted">全部做完了</div>') +
       (done.length ? `<details class="plan-group"><summary>已完成 ${done.length}</summary>${done.slice(0, 20).map(item).join("")}</details>` : "") +
       `</div>`
-    updateSummary()
   } catch { /* ignore */ }
 }
+function fmtClock(iso) {
+  const d = new Date(iso)
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+function relTime(iso) {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return "时间异常"
+  const ms = t - Date.now()
+  return ms <= 0 ? "已到点" : fmtDuration(ms)
+}
+function renderSubs(list) {
+  const el = $("subs")
+  const all = Array.isArray(list) ? list : []
+  LAST_ALARMS = all
+  const mains = all.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+  const legacy = all.filter((a) => !a.kind).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+  const subsOf = (id) => all.filter((a) => a.kind === "sub" && a.parentId === id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+  $("subs-note").textContent = `${mains.length} 个活动 · ${all.filter((a) => a.kind === "sub").length} 条子闹钟`
+  updateSummary()
+  if (!mains.length && !legacy.length) {
+    el.innerHTML = '<div class="sub-empty">还没有活动。AI 用 plan_next 建活动，再用 parent 排子闹钟。</div>'
+    return
+  }
+  const cards = mains.map((m) => {
+    const subs = subsOf(m.id)
+    const state = m.status === "active" ? (m.paused ? "已暂停" : "进行中") : "待开始"
+    const items = subs.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${esc2(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
+    const skip = (m.skipped || []).length
+      ? `<div class="sub-skip">跳过：${m.skipped.map((s) => `${fmtClock(s.scheduled)} ${esc2(s.note)}`).join("、")}</div>`
+      : ""
+    return `<div class="sub-card"><div class="sub-head"><b>《${esc2(m.note)}》</b><span class="sub-state">${state}</span></div>
+      <div class="sub-meta">${fmtClock(m.at)} 开始 · ${subs.length} 条子闹钟 · id ${m.id}</div>
+      ${items || '<div class="sub-empty">没有子闹钟</div>'}
+      <div class="sub-actions"><button data-op="${m.paused ? "resume" : "pause"}" data-id="${m.id}">${m.paused ? "继续活动" : "暂停活动"}</button><button data-op="close" data-id="${m.id}">关闭活动</button></div>
+      ${skip}</div>`
+  }).join("")
+  const legacyHtml = legacy.length
+    ? `<div class="sub-card"><div class="sub-head"><b>旧版一次性闹钟</b></div>${legacy.map((a) => `<div class="sub-item"><span class="t">${fmtClock(a.at)}</span><span class="n">${esc2(a.note)}</span><span>${relTime(a.at)}</span><button data-op="close" data-id="${a.id}">取消</button></div>`).join("")}</div>`
+    : ""
+  el.innerHTML = cards + legacyHtml
+}
+async function loadSubs() {
+  try {
+    const d = await getJson("/api/alarms")
+    renderSubs(d.alarms || [])
+  } catch { /* ignore */ }
+}
+async function postAlarm(op, id) {
+  try {
+    const r = await postJson("/api/alarm", { op, id })
+    $("subs-note").textContent = r.ok ? "已执行" : (r.msg || "失败")
+    setTimeout(loadSubs, 500)
+  } catch { /* ignore */ }
+}
+$("subs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-op]")
+  if (!b) return
+  void postAlarm(b.dataset.op, b.dataset.id)
+})
 async function loadEvents() {
   try {
     const d = await getJson("/api/events")
@@ -912,10 +992,11 @@ function fillSelect(el, current, list, noneLabel) {
 $("m-local").addEventListener("change", () => { mTouched = true })
 $("m-cloud").addEventListener("change", () => { mTouched = true })
 $("m-subagent").addEventListener("change", () => { mTouched = true })
+$("m-vision").addEventListener("change", () => { mTouched = true })
 $("m-save").onclick = async () => {
   const b = $("m-save"); b.disabled = true; b.textContent = "保存中…"
   try {
-    const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim(), subagent: $("m-subagent").value.trim() }) })
+    const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim(), subagent: $("m-subagent").value.trim(), multimodal: $("m-vision").value.trim() }) })
     $("m-hint").textContent = r.ok ? "已保存" : "保存失败"
     mTouched = false
   } catch (e) { $("m-hint").textContent = "保存失败：" + e.message }
@@ -1790,16 +1871,18 @@ function setTab(name, remember = true) {
     BRAIN.dirty = true
     setTimeout(() => { resizeBrain(); drawBrain(performance.now()) }, 80)
   }
+  if (name === "schedule") { loadSubs(); loadPlan() }
 }
 document.querySelectorAll(".tab-btn").forEach((btn) => { btn.onclick = () => setTab(btn.dataset.tab) })
 try { setTab(localStorage.getItem("lw-tab") || "overview", false) } catch { setTab("overview", false) }
 
 loadOverview(); loadDates(); loadLog(); loadBrain(); loadDay(dayOfLocal())
-loadHealth(); loadPlan(); loadActivity(); loadEvents(); loadNowImps(); bindQuick()
+loadHealth(); loadPlan(); loadSubs(); loadActivity(); loadEvents(); loadNowImps(); bindQuick()
 setInterval(loadOverview, 10000)
 setInterval(loadLog, 15000)
 setInterval(loadHealth, 20000)
-setInterval(loadPlan, 20000)
+setInterval(loadSubs, 10000)
+setInterval(loadPlan, 60000)
 setInterval(loadEvents, 20000)
 setInterval(loadActivity, 60000)
 setInterval(loadNowImps, 60000)

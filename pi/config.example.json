@@ -44,6 +44,13 @@
   "subagent": {
     "model": "deepseek-flash"
   },
+  "multimodal": {
+    "enabled": false,
+    "model": "",
+    "timeoutMs": 300000,
+    "warnImageBytes": 8388608,
+    "warnVideoBytes": 209715200
+  },
   "localModel": {
     "enabled": false,
     "keepRecent": 20,

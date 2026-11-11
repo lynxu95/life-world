@@ -144,6 +144,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "group": { "enabled": false, "keywords": ["铃"], "interjectChance": 0.05, "cooldownMs": 8000, "sessionIdleMinutes": 120, "maxFileBytes": 104857600, "maxBatchBytes": 209715200 }
   },
   "subagent": { "model": "deepseek-flash" },
+  "multimodal": { "enabled": false, "model": "", "timeoutMs": 300000, "warnImageBytes": 8388608, "warnVideoBytes": 209715200 },
   "localModel": { "enabled": true, "keepRecent": 20, "foldToolResults": 6, "resultChars": 300, "foldingThinkingTurns": 0 },
   "models": {
     "local": "basalt/abliterated-iq3_xxs",
@@ -253,6 +254,30 @@ run: bash scripts/weather.sh
 
 制作规范：一个技能一个文件夹，脚本 / 参考 / 素材都收在里面；实在要放外面，在 `SKILL.md` 写清绝对路径、原因和恢复方法；下载的技能不要改上游文件。
 
+## 辅助感知（多模态）
+
+主模型只负责它本来就有的能力；**缺的模态**才交给辅助感知模型（推荐 Qwen3.8-Omni-Flash）：
+
+- **视频、音频**：pi 的输入模态只有 `text/image`，必须走辅助模型；
+- **图片**：主模型 `input` 含 `image` 就直接 `read`，**不走辅助**；只有主模型不支持图片时才交给辅助；
+- `perceive({ path, question })`：本地文件或公网 URL。本地 Base64 超过 10MB 会先压缩（图片缩图、音视频按目标码率转码；需要 `ffmpeg` 或 `imagemagick`），压不进去就如实告诉 AI 去和用户商量分段；URL 直接交给百炼服务端拉取，不本地中转；
+- 看板「模型 → 辅助感知」选 `provider/model`，留空即停用。
+
+Qwen3.8-Omni-Flash 官方限制：图片 URL 20MB/张、音频 2GB/3 小时、视频 2GB/2 小时；Base64 一律**编码后 <10MB**。推荐在 `~/.pi/agent/models.json` 注册 DashScope provider：
+
+```json
+"dashscope": {
+  "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "api": "openai-completions",
+  "apiKey": "sk-…",
+  "models": [{ "id": "qwen3.8-omni-flash", "contextWindow": 1000000, "maxTokens": 8192, "input": ["text", "image"] }]
+}
+```
+
+然后把 `multimodal.model` 设成 `dashscope/qwen3.8-omni-flash`。`input` 写 `text/image` 只是让 pi 的模型列表认识它；音视频由扩展直接调 API。
+
+**边界**：`perceive` 只读 `room/`、`表情包/`、`语音/`、`tmp/`，机密抽屉直接拒绝；不会把主模型能做的事默认丢给 Omni。
+
 ## 隐私：机密抽屉
 
 - 切到**任意非本地模型**前，先按会话打开 `worlds/default/机密抽屉/sessions/<sessionId>.json`，把切换前的对话与工具结果对云端屏蔽；写不进去就拒绝切换（fail-closed）。
@@ -284,14 +309,15 @@ OneBot 只监听 `127.0.0.1` 时用 SSH 隧道；同机部署直接 `ws://127.0.
 
 ## 定时与家会话
 
-- `plan_next` 定任务时可指定 `model: local|cloud`，到点先切模型再唤醒；
+- `plan_next` 开活动时可指定 `model: local|cloud`，到点先切模型再唤醒；
+- **活动 / 子闹钟**：活动开始后可以挂一组短间隔的子闹钟（`plan_next({ parent, times/after_minutes })`），同一活动任意 30 分钟最多 3 条；子闹钟到点若 AI 正忙就跳过并记一笔，下次醒来时提醒它 review；下一条主活动开始时上一项还没关，会强制关闭并提醒；安静时段只管随机想念，不管主/子闹钟；
 - 家会话（`home-rpc.mjs`，`LIFE_WORLD_ROLE=home`）负责：闹钟、每日回顾（默认 23 点）、早上兜底（默认 09:00 后）、桥接守护、每日快照/清理/衰减；
 - `home-rpc.mjs` 的 pi 子进程退出后自动重启（2s 起指数退避，最长 60s；稳定跑满 1 分钟重置）；
 - 家会话每次重启新建会话，连续性靠归档记忆；QQ 私聊不变。
 
 ## 工具
 
-`plan_next` · `check_alarm` · `cancel_alarm` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `delegate` · `gal_choice` · `switch_model` · `web_search`
+`plan_next` · `check_alarm` · `cancel_alarm` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `web_search`
 
 - `web_search` 走 TinyFish keyless，免 API Key；
 - `delegate` 起独立 `pi -p` 子进程，深度 1 层；
@@ -316,7 +342,7 @@ lwctl board host <地址>                   # 只改监听地址（0.0.0.0 = 局
 lwctl board port <端口>                   # 只改监听端口
 ```
 
-心跳：每个 pi 进程每 5 秒写 `status/<role>-<pid>.json`；看板/lwctl 只显示 PID 存活且 90 秒内有过心跳的会话。`lwctl set` 通过 `control.json` 下发，目标进程回执到 `control-state.json`。
+心跳：每个 pi 进程每 5 秒写 `status/<role>-<pid>.json`；看板/lwctl 只显示 PID 存活且 90 秒内有过心跳的会话。`lwctl set` / 看板操作追加到 `control/commands-YYYY-MM-DD.jsonl`，目标进程按 `(at, id)` 水位消费、回执到 `control-acks/`；连点/并发不会被覆盖，同一毫秒也不会吞命令。
 
 ## Web 看板
 
@@ -353,7 +379,9 @@ lwctl board stop                # 停止
 ├── memory-index.db          # FTS5 + 强度 + 激活/联想索引（可重建）
 ├── pi-sessions/             # pi 会话文件
 ├── status/                  # 会话心跳
-├── control.json / control-state.json
+├── control/                   # 控制命令队列（commands-YYYY-MM-DD.jsonl）
+├── control-acks/              # 每条命令的回执
+├── control.json / control-state.json   # 旧版兼容（只读一次）
 ├── life-world.json          # 配置
 ├── pi-kaomoji.json
 └── bin/                     # 安装的脚本

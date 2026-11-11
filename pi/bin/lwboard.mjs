@@ -16,14 +16,13 @@ import { createRequire } from "node:module"
 import { spawn } from "node:child_process"
 import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
 import { usageStats } from "./usage-stats.mjs"
+import { appendCommand, waitAck } from "./control-queue.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const WORLD = join(ROOT, "worlds/default")
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const STATUS_DIR = join(ROOT, "status")
-const CONTROL_FILE = join(ROOT, "control.json")
-const CONTROL_STATE = join(ROOT, "control-state.json")
 const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
 const boardCfg = (() => {
   try {
@@ -174,18 +173,6 @@ function tail(target, n) {
   if (!existsSync(file)) return `（没有 ${file}）`
   const lines = readFileSync(file, "utf8").trimEnd().split("\n")
   return lines.slice(-Math.max(1, Math.min(500, n))).join("\n")
-}
-function waitAck(seq, timeoutMs = 10000) {
-  return new Promise((resolve) => {
-    const deadline = Date.now() + timeoutMs
-    const tick = () => {
-      const st = readJson(CONTROL_STATE, null)
-      if (st && Number(st.seq) === seq) return resolve(st)
-      if (Date.now() > deadline) return resolve(null)
-      setTimeout(tick, 300)
-    }
-    tick()
-  })
 }
 
 function body(req) {
@@ -499,6 +486,7 @@ const server = http.createServer(async (req, res) => {
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
         available: await availableModels(),
+        multimodal: (c.multimodal || {}),
         pid: process.pid,
         now: new Date().toISOString(),
       })
@@ -530,6 +518,20 @@ const server = http.createServer(async (req, res) => {
         if (m) items.push({ done: m[1].toLowerCase() === "x", text: m[2].trim().slice(0, 200) })
       }
       return json(res, 200, { date, exists: !!text, total: items.length, done: items.filter((x) => x.done).length, items: items.slice(0, 30) })
+    }
+    if (req.method === "GET" && url.pathname === "/api/alarms") {
+      const state = readJson(join(WORLD, "world.json"), {})
+      const alarms = Array.isArray(state.alarms) ? state.alarms : []
+      return json(res, 200, { alarms, now: Date.now() })
+    }
+    if (req.method === "POST" && url.pathname === "/api/alarm") {
+      const data = await body(req)
+      const op = String(data.op || "")
+      const id = String(data.id || "")
+      if (!id || !["pause", "resume", "close", "fire_now"].includes(op)) return json(res, 400, { ok: false, msg: "缺少 id 或操作不支持" })
+      const cmd = appendCommand(ROOT, { target: "home", action: "alarm", op, alarmId: id, reason: "lwboard 闹钟操作" })
+      const st = await waitAck(ROOT, cmd.id, "home", 8000)
+      return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（闹钟由 home 进程执行）" })
     }
     if (req.method === "GET" && url.pathname === "/api/activity") {
       const date = url.searchParams.get("date") || dayOfLocal()
@@ -611,11 +613,10 @@ const server = http.createServer(async (req, res) => {
       const m = c.models || {}
       const resolved = value === "local" ? m.local : value === "cloud" ? m.cloud : value
       if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
-      const seq = Date.now()
-      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target, model: value, reason: "lwboard 手动切换" }, null, 2))
+      const cmd = appendCommand(ROOT, { target, action: "model", model: value, reason: "lwboard 手动切换" })
       // 全部切换只下发，不逐个等回执；会话 5 秒内自己轮询生效
       if (target === "all") return json(res, 200, { ok: true, msg: "已下发全部切换" })
-      const st = await waitAck(seq)
+      const st = await waitAck(ROOT, cmd.id, target)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
     }
     if (req.method === "POST" && url.pathname === "/api/restart") {
@@ -665,9 +666,8 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, parseImpressions())
     }
     if (req.method === "POST" && url.pathname === "/api/impressions/run") {
-      const seq = Date.now()
-      writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target: "home", action: "impression", reason: "看板手动整理" }, null, 2))
-      const st = await waitAck(seq, 15000)
+      const cmd = appendCommand(ROOT, { target: "home", action: "impression", reason: "看板手动整理" })
+      const st = await waitAck(ROOT, cmd.id, "home", 15000)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（可能没在跑）" })
     }
     if (req.method === "GET" && url.pathname === "/api/memory-graph") {
@@ -689,8 +689,13 @@ const server = http.createServer(async (req, res) => {
         cfg.subagent = cfg.subagent || {}
         cfg.subagent.model = data.subagent.trim()
       }
+      if (typeof data.multimodal === "string") {
+        cfg.multimodal = cfg.multimodal || {}
+        cfg.multimodal.model = data.multimodal.trim()
+        cfg.multimodal.enabled = !!cfg.multimodal.model
+      }
       writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
-      return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud }, subagent: cfg.subagent || {} })
+      return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud }, subagent: cfg.subagent || {}, multimodal: cfg.multimodal || {} })
     }
     if (req.method === "POST" && url.pathname === "/api/backup") {
       const ok = await new Promise((resolve) => {

@@ -16,11 +16,10 @@ import { stdin, stdout } from "node:process"
 import { spawn, spawnSync } from "node:child_process"
 import { backupWorld, backupLog, backupSize } from "./world-backup.mjs"
 import { usageStats } from "./usage-stats.mjs"
+import { appendCommand, waitAck } from "./control-queue.mjs"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const STATUS_DIR = join(ROOT, "status")
-const CONTROL_FILE = join(ROOT, "control.json")
-const CONTROL_STATE = join(ROOT, "control-state.json")
 const CONFIG_FILE = join(ROOT, "life-world.json")
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
@@ -60,18 +59,6 @@ function describeModel(value) {
   if (value === "cloud") return `在线（${c.cloud || "未配置"}）`
   return value
 }
-function waitAck(seq, timeoutMs = 12_000) {
-  return new Promise((resolve) => {
-    const deadline = Date.now() + timeoutMs
-    const tick = () => {
-      const st = readJson(CONTROL_STATE, null)
-      if (st && Number(st.seq) === seq) return resolve(st)
-      if (Date.now() > deadline) return resolve(null)
-      setTimeout(tick, 400)
-    }
-    tick()
-  })
-}
 async function applySwitch(target, value, reason) {
   const c = models()
   const resolved = value === "local" ? c.local : value === "cloud" ? c.cloud : value
@@ -79,10 +66,10 @@ async function applySwitch(target, value, reason) {
     console.log(`✗ ${value} 没配置（life-world.json 的 models 段）`)
     return false
   }
-  const seq = Date.now()
-  writeFileSync(CONTROL_FILE, JSON.stringify({ seq, at: seq, target, model: value, reason: reason || "lwctl 手动切换" }, null, 2))
+  const cmd = appendCommand(ROOT, { target, action: "model", model: value, reason: reason || "lwctl 手动切换" })
   process.stdout.write(`  已下发：${target} → ${describeModel(value)} …`)
-  const st = await waitAck(seq)
+  if (target === "all") { console.log("\n（全部会话已下发，不等逐个回执）"); return true }
+  const st = await waitAck(ROOT, cmd.id, target)
   console.log("")
   if (!st) { console.log("✗ 超时：目标会话没响应（可能没在跑，或 target 写错）"); return false }
   console.log(`${st.ok ? "✓" : "✗"} ${st.msg}`)

@@ -10,7 +10,7 @@
 
 把 life-world 从 opencode 插件搬到 pi 的原生扩展点：
 
-- **工具**：`plan_next` / `check_alarm` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `delegate` / `gal_choice` / `switch_model` / `web_search`
+- **工具**：`plan_next` / `check_alarm` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `perceive` / `delegate` / `gal_choice` / `switch_model` / `web_search`
 - **模型热切换**：`switch_model` 让角色自己决定本地 / 在线；模型无响应立即切、工具连续失败两次切云端，另有脚本探活兜底
 - **机密抽屉**：切云端前把之前的对话与机密文件收进 `worlds/default/机密抽屉/`，`用户画像-私密.md` 不预加载、本地需要时自己读，云端禁止打开该目录；没配本地模型则整个抽屉不启用
 - **闹钟带模型**：`plan_next` 可指定到点用 `local` / `cloud`，定时器触发前先切过去
@@ -150,6 +150,7 @@ pi          # TUI，已经带 life-world
     "group": { "enabled": false, "keywords": ["铃"] }
   },
   "subagent": { "model": "deepseek-flash" },
+  "multimodal": { "enabled": false, "model": "", "timeoutMs": 300000, "warnImageBytes": 8388608, "warnVideoBytes": 209715200 },
   "localModel": { "enabled": true, "keepRecent": 20, "foldToolResults": 6, "resultChars": 300 },
   "models": {
     "local": "basalt/abliterated-iq3_xxs",
@@ -209,7 +210,7 @@ lwctl restart [qq|home|all]        # 重启常驻窗口
 lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次数
 ```
 
-原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` 下发命令到 `control.json`，目标进程轮询后调用 `pi.setModel` 并回执到 `control-state.json`。命令带时间戳，超过 5 分钟或本进程已处理过就作废，重启不会重放旧命令。配了本地模型时，切到在线会打开该会话的机密抽屉；没配本地模型（纯云端实例）则不启用抽屉，云端可看全量上下文与记忆块。
+原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` / 看板把命令**追加**到 `control/commands-YYYY-MM-DD.jsonl`（每行一条，唯一 id），目标进程按 `(at, id)` 水位轮询、执行后回执到 `control-acks/<id>-<roleKey>.json`。超过 60 秒的命令只推进水位不执行，重启不会重放；同一秒连发多条也不会互相覆盖。旧版 `control.json` 只做一次性兼容读取。配了本地模型时，切到在线会打开该会话的机密抽屉；没配本地模型（纯云端实例）则不启用抽屉，云端可看全量上下文与记忆块。
 
 ### 用量统计
 
@@ -245,9 +246,18 @@ lwctl board stop
 - 群聊不注册这四个工具；下载的技能会提示先确认内容；
 - 脚本 / 参考 / 素材收在技能文件夹里，放外面的要在 `SKILL.md` 写清绝对路径和原因；`pi/examples/skills/own/时间/` 是示例。
 
-### 闹钟带模型
+### 活动 / 子闹钟
 
-`plan_next({ note, at|after_minutes, model: "local"|"cloud" })`：到点时定时器先切到指定模型再唤醒。《模型使用规范》建议定任务时就写清楚用哪个。
+- `plan_next({ note, at|after_minutes, model })` 开一个**活动**，到点唤醒并保持 `active`；
+- `plan_next({ parent, times: [...], after_minutes, note })` 给活动排**子闹钟**，同一活动任意 30 分钟最多 3 条；
+- 子闹钟到点若 home 正在跑一轮，自动跳过并记进活动的 `skipped`；下次这个活动醒来时把跳过列表带给 AI review；
+- 下一条主活动开始时，上一条还 `active` 的活动会被强制关闭并提醒；
+- `cancel_alarm({ id })` 关闭活动会连带关闭子闹钟；看板日程页可暂停/继续/关闭/立即触发；
+- 安静时段只限制「随机想念」，不拦主活动/子闹钟。
+
+### 辅助感知
+
+`perceive({ path, question, kind? })`：本地文件或公网 URL。图片主模型能看就直接 `read`，不走辅助；视频/音频、以及主模型不支持图片时的图片才交给 `multimodal.model`。本地 Base64 超 10MB 会先压缩，压不进去会返回建议分段；URL 直接传给百炼。完整限制和 DashScope provider 模板见根 README《辅助感知（多模态）》。
 
 ## 界面整洁
 

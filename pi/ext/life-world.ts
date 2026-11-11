@@ -4,8 +4,8 @@ import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, 
 import { basename, dirname, extname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
-import { spawn } from "node:child_process"
-import { createHash } from "node:crypto"
+import { spawn, spawnSync } from "node:child_process"
+import { createHash, randomBytes } from "node:crypto"
 import { createRequire } from "node:module"
 
 /**
@@ -49,10 +49,11 @@ const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
 /** 会话心跳与控制：给 lwctl 用 */
 const STATUS_DIR = join(ROOT, "status")
 const CONTROL_FILE = join(ROOT, "control.json")
-const CONTROL_STATE = join(ROOT, "control-state.json")
+const CONTROL_DIR = join(ROOT, "control")
+const ACK_DIR = join(ROOT, "control-acks")
 const MODEL_MODE_FILE = join(ROOT, "model-mode.json")
-/** 每个会话一份回执，跨会话切换时按 roleKey 聚合读取 */
-const ackStatePath = (rk: string) => join(ROOT, `control-state-${rk.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`)
+const safeRoleKey = (rk: string) => rk.replace(/[^A-Za-z0-9_.-]/g, "_")
+const controlAckFile = (id: string, rk: string) => join(ACK_DIR, `${id}-${safeRoleKey(rk)}.json`)
 const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.json")
 const TIMER_LOCK = join(WORLD, ".pi-timer.lock")
 const ROLE = process.env.LIFE_WORLD_ROLE || "cli"
@@ -180,10 +181,21 @@ interface ModelSwitchOptions {
   cooldownMs: number
 }
 
+/** 辅助感知：只补主模型缺的模态（视频/音频；主模型不支持图片时的图片） */
+interface MultimodalOptions {
+  enabled: boolean
+  /** provider/model；空 = 停用 */
+  model: string
+  timeoutMs: number
+  warnImageBytes: number
+  warnVideoBytes: number
+}
+
 interface Config {
   world: { enabled: boolean; running: boolean; reviewHour: number; fallbackWakeTime: string; recentLimit: number; hydrate: { hours: number; chars: number; mapDays: number } }
   bridge: { enabled: boolean; ownerQQ: number; wsUrl: string; group: { enabled: boolean; id?: string } }
   subagent: { model: string }
+  multimodal: MultimodalOptions
   localModel: LocalModelOptions
   models: ModelSwitchOptions
   care: CareOptions
@@ -269,6 +281,7 @@ function config(): Config {
     world: { enabled: true, running: true, reviewHour: 23, fallbackWakeTime: "09:00", recentLimit: 80, hydrate: { hours: 48, chars: 2000, mapDays: 3 } },
     bridge: { enabled: false, ownerQQ: 0, wsUrl: "ws://127.0.0.1:3001", group: { enabled: false } },
     subagent: { model: "deepseek-flash" },
+    multimodal: { enabled: false, model: "", timeoutMs: 300_000, warnImageBytes: 8 * 1024 * 1024, warnVideoBytes: 200 * 1024 * 1024 },
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
@@ -289,6 +302,7 @@ function config(): Config {
     world: { ...base.world, ...(raw.world || {}), hydrate: { ...base.world.hydrate, ...((raw.world || {}).hydrate || {}) } },
     bridge: { ...base.bridge, ...(raw.bridge || {}), group: { ...base.bridge.group, ...((raw.bridge || {}).group || {}) } },
     subagent: { ...base.subagent, ...(raw.subagent || {}) },
+    multimodal: { ...base.multimodal, ...(raw.multimodal || {}) },
     localModel: { ...base.localModel, ...(raw.localModel || {}) },
     models: { ...base.models, ...(raw.models || {}) },
     care: { ...base.care, ...(raw.care || {}) },
@@ -306,8 +320,22 @@ function config(): Config {
 
 function localModelOptions(): LocalModelOptions { return config().localModel }
 
-interface Alarm { id: string; at: string; note: string; setAt: string; model?: "local" | "cloud" }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string }
+interface Alarm {
+  id: string
+  at: string
+  note: string
+  setAt: string
+  model?: "local" | "cloud"
+  /** main = 活动；sub = 子闹钟；不写 = 旧版一次性闹钟 */
+  kind?: "main" | "sub"
+  parentId?: string
+  status?: "pending" | "active" | "closed"
+  paused?: boolean
+  activatedAt?: string
+  /** 忙时跳过的子闹钟，下次这个活动醒来时提醒 AI review */
+  skipped?: Array<{ at: string; scheduled: string; note: string }>
+}
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastControlPrune?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string }
 function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
@@ -339,6 +367,72 @@ function withWorldLock<T>(fn: () => T): T | undefined {
   }
   log("world lock timeout")
   return undefined
+}
+
+// ———————— 控制队列（lwctl / lwboard → 各会话） ————————
+interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; reason?: string; op?: string; alarmId?: string }
+function controlCommandsFile(day = dayOf()): string { return join(CONTROL_DIR, `commands-${day}.jsonl`) }
+
+/** 追加一条命令；id 唯一，不再用毫秒时间戳当序号 */
+function appendControl(cmd: Partial<ControlCmd> & { target: string }): { id: string; at: number } {
+  const at = Date.now()
+  const id = `${at.toString(36)}-${randomBytes(4).toString("hex")}`
+  mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 })
+  const line = JSON.stringify({ id, at, action: "model", model: "", reason: "", ...cmd }) + "\n"
+  appendFileSync(controlCommandsFile(), line, { mode: 0o600 })
+  return { id, at }
+}
+
+/** 读今天和昨天的命令，按 (at,id) 升序 */
+function readControlQueue(): ControlCmd[] {
+  const out: ControlCmd[] = []
+  for (let i = 0; i < 2; i++) {
+    const d = new Date()
+    d.setDate(d.getDate() - i)
+    const file = controlCommandsFile(dayOf(d))
+    if (!existsSync(file)) continue
+    let text = ""
+    try { text = readFileSync(file, "utf8") } catch { continue }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue
+      try {
+        const c = JSON.parse(line)
+        if (c && c.id) out.push(c as ControlCmd)
+      } catch { /* 跳过半行 */ }
+    }
+  }
+  out.sort((a, b) => Number(a.at) - Number(b.at) || String(a.id).localeCompare(String(b.id)))
+  return out
+}
+
+function waitRoleAck(id: string, rk: string, timeoutMs: number): Promise<any | null> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs
+    const tick = () => {
+      const st = readJson<any>(controlAckFile(id, rk), null)
+      if (st) return resolve(st)
+      if (Date.now() > deadline) return resolve(null)
+      setTimeout(tick, 300)
+    }
+    tick()
+  })
+}
+
+/** 清掉 3 天前的命令与回执（家会话每天一次） */
+function pruneControlQueue(keepDays = 3): void {
+  try {
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - keepDays)
+    const cut = dayOf(cutoff)
+    for (const f of readdirSync(CONTROL_DIR)) {
+      const m = f.match(/^commands-(\d{4}-\d{2}-\d{2})\.jsonl$/)
+      if (m && m[1] < cut) { try { unlinkSync(join(CONTROL_DIR, f)) } catch { /* ignore */ } }
+    }
+    const acut = Date.now() - keepDays * 86_400_000
+    for (const f of readdirSync(ACK_DIR)) {
+      try { if (statSync(join(ACK_DIR, f)).mtimeMs < acut) unlinkSync(join(ACK_DIR, f)) } catch { /* ignore */ }
+    }
+  } catch { /* 目录不存在就算了 */ }
 }
 
 function bridgeStatus(): string {
@@ -1210,6 +1304,82 @@ async function fetchWeather(city: string): Promise<string> {
   } catch { return "" }
 }
 
+// ———————— 活动 / 子闹钟 ————————
+/** agent 是否正在跑一轮；子闹钟到点时正忙就跳过，不排队 */
+let agentBusy = false
+let agentBusyAt = 0
+const AGENT_BUSY_TIMEOUT = 10 * 60_000
+function setAgentBusy(v: boolean): void {
+  if (v) agentBusyAt = Date.now()
+  agentBusy = v
+}
+function isAgentBusy(): boolean {
+  // 看门狗：卡死的轮次不能把后面所有子闹钟都吞掉
+  if (agentBusy && Date.now() - agentBusyAt > AGENT_BUSY_TIMEOUT) agentBusy = false
+  return agentBusy
+}
+
+/** 解析 AI 给的时间：ISO 带时区，或 HH:MM（今天，已过就报错） */
+function parseWhen(raw: string): number {
+  const s = String(raw || "").trim()
+  if (!s) return NaN
+  const iso = Date.parse(s)
+  if (Number.isFinite(iso)) return iso
+  const m = s.match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return NaN
+  const h = Number(m[1]); const mm = Number(m[2])
+  if (h > 23 || mm > 59) return NaN
+  const d = new Date()
+  d.setHours(h, mm, 0, 0)
+  return d.getTime()
+}
+
+/** 子闹钟密度：同一活动任意 30 分钟窗口最多 3 条 */
+function checkSubDensity(existing: Alarm[], parentId: string, times: number[]): string {
+  const list = existing
+    .filter((a) => a.kind === "sub" && a.parentId === parentId && a.status !== "closed")
+    .map((a) => Date.parse(a.at))
+    .filter((t) => Number.isFinite(t))
+  const all = [...list, ...times].sort((a, b) => a - b)
+  const WIN = 30 * 60_000
+  for (let i = 0; i < all.length; i++) {
+    let n = 0
+    for (let j = i; j < all.length && all[j] - all[i] < WIN; j++) n++
+    if (n > 3) return `30 分钟内最多 3 条子闹钟，当前排不下（${new Date(all[i]).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 起 30 分钟内已有 ${n} 条）`
+  }
+  return ""
+}
+
+function findParentAlarm(list: Alarm[], ref: string): { parent?: Alarm; error?: string } {
+  const key = String(ref || "").trim()
+  if (!key) return { error: "没给 parent（主活动 id 或标题）" }
+  const byId = list.find((a) => a.id === key)
+  if (byId) {
+    if (byId.kind !== "main") return { error: `那是个子闹钟，不是活动：${key}` }
+    if (byId.status === "closed") return { error: `活动已经关闭：${key}` }
+    return { parent: byId }
+  }
+  const matches = list.filter((a) => a.kind === "main" && a.status !== "closed" && a.note.includes(key))
+  if (matches.length === 1) return { parent: matches[0] }
+  if (matches.length > 1) return { error: `有 ${matches.length} 个活动都含「${key}」，请用 id 指定` }
+  return { error: `找不到这个活动：${key}` }
+}
+
+/** 每天回顾时提醒还开着的活动，避免 AI 忘了关 */
+function openActivitiesLine(): string {
+  const open = (readWorld().alarms || []).filter((a) => a.kind === "main" && a.status === "active")
+  if (!open.length) return ""
+  const items = open.map((a) => `《${a.note}》（id ${a.id}${a.activatedAt ? `，${shortStamp(a.activatedAt)} 开始` : ""}）`)
+  return `\n还有活动开着：${items.join("、")}。做完了就 cancel_alarm({ id }) 关掉，别一直挂着。`
+}
+
+function skippedLine(skipped?: Array<{ scheduled: string; note: string }>, max = 6): string {
+  if (!skipped?.length) return ""
+  const shown = skipped.slice(-max).map((s) => `${shortStamp(s.scheduled)} ${s.note}`)
+  const more = skipped.length > max ? ` 等 ${skipped.length} 条` : ""
+  return `上次因为忙跳过了 ${skipped.length} 条子闹钟：${shown.join("、")}${more}。要补做就重新 plan_next，不想做就忽略。`
+}
+
 /** 闹钟到点前，先切到任务指定的模型（local / cloud） */
 async function switchForAlarm(alarm: Alarm): Promise<void> {
   if (!alarm.model) return
@@ -1239,7 +1409,7 @@ async function tick(): Promise<void> {
     const hour = now.getHours()
     // 每日回顾
     if (hour >= c.world.reviewHour && state.lastReview !== today) {
-      sendTime(`【后台任务·每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。`)
+      sendTime(`【后台任务·每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。${openActivitiesLine()}`)
       writeWorld({ ...readWorld(), lastReview: today })
       return
     }
@@ -1271,13 +1441,21 @@ async function tick(): Promise<void> {
     if (state.lastCleanup !== today) {
       if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) writeWorld({ ...readWorld(), lastCleanup: today })
     }
+    if (state.lastControlPrune !== today) {
+      pruneControlQueue(3)
+      writeWorld({ ...readWorld(), lastControlPrune: today })
+    }
     // 记忆强度与联想边各自每天一次；边衰减不再依赖 decay 开关
     if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) decayStrengths()
     if (!state.lastEdgeDecay || dayOf(new Date(state.lastEdgeDecay)) !== today) decayEdges()
     guardBridge()
-    // 到点闹钟
-    const due = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= Date.now())
-    for (const a of due) {
+    // 到点闹钟：旧一次性 → 主活动 → 子闹钟；一轮最多唤醒一次
+    const nowMs = Date.now()
+    const alarmsNow = (state.alarms || []).filter((a) => Number.isFinite(Date.parse(a.at)) && Date.parse(a.at) <= nowMs)
+    let woke = false
+    // 旧版一次性闹钟：保持原行为
+    for (const a of alarmsNow.filter((x) => !x.kind && !x.status)) {
+      if (woke) break
       const text = `【后台任务】${shortStamp(a.at)}：${a.note}。\n做完就结束；要让他知道就用 reach_out。做完想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
       if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
       else sendTime(text)
@@ -1287,8 +1465,86 @@ async function tick(): Promise<void> {
         fresh.lastWake = today
         return writeWorld(fresh)
       })
+      woke = true
     }
-    if (due.length) return
+    // 主活动：开始前先把还开着的上一个强制关掉，并提醒 AI
+    for (const a of alarmsNow.filter((x) => x.kind === "main" && (x.status || "pending") === "pending")) {
+      if (woke) break
+      const closing = (readWorld().alarms || []).filter((x) => x.kind === "main" && x.status === "active" && x.id !== a.id)
+      const closedNotes: string[] = []
+      const closedSkips: Array<{ scheduled: string; note: string }> = []
+      for (const o of closing) {
+        closedNotes.push(o.note)
+        for (const s of o.skipped || []) closedSkips.push(s)
+      }
+      const saved = withWorldLock(() => {
+        const fresh = readWorld()
+        const list = fresh.alarms || []
+        const closedIds = new Set(closing.map((x) => x.id))
+        const keep = list.filter((x) => !closedIds.has(x.id) && !(x.kind === "sub" && x.parentId && closedIds.has(x.parentId)))
+        const self = keep.find((x) => x.id === a.id)
+        if (!self) return false
+        self.status = "active"
+        self.activatedAt = new Date().toISOString()
+        fresh.alarms = keep
+        fresh.lastWake = today
+        return writeWorld(fresh)
+      })
+      if (!saved) continue
+      const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
+      const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
+      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要把它拆成几步、过一会儿再醒来，就用 plan_next({ parent: "${a.id}", after_minutes: 20, note: "这一步要看什么/做什么" }) 排子闹钟；一次排几条也行。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动（子闹钟一起关）。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
+      if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
+      else sendTime(text)
+      withWorldLock(() => {
+        const fresh = readWorld()
+        const self = (fresh.alarms || []).find((x) => x.id === a.id)
+        if (self) delete self.skipped
+        return writeWorld(fresh)
+      })
+      woke = true
+    }
+    // 子闹钟：忙就跳过并记录，闲才唤醒
+    if (!woke) {
+      for (const a of alarmsNow.filter((x) => x.kind === "sub" && x.status !== "closed")) {
+        const parent = (readWorld().alarms || []).find((x) => x.id === a.parentId && x.kind === "main" && x.status !== "closed")
+        if (!parent) {
+          withWorldLock(() => {
+            const f = readWorld()
+            f.alarms = (f.alarms || []).filter((x) => x.id !== a.id)
+            return writeWorld(f)
+          })
+          continue
+        }
+        if (parent.paused || a.paused) continue
+        if (isAgentBusy()) {
+          withWorldLock(() => {
+            const f = readWorld()
+            const p = (f.alarms || []).find((x) => x.id === parent.id)
+            if (p) p.skipped = [...(p.skipped || []), { at: new Date().toISOString(), scheduled: a.at, note: a.note }].slice(-20)
+            f.alarms = (f.alarms || []).filter((x) => x.id !== a.id)
+            return writeWorld(f)
+          })
+          log(`sub alarm skipped (busy) · ${a.note.slice(0, 40)}`)
+          continue
+        }
+        const skipNote = skippedLine(parent.skipped)
+        const text = `【后台任务·子闹钟】${shortStamp(a.at)}：${a.note}\n（活动《${parent.note}》，id ${parent.id}）\n做完这一步就结束；要继续就再 plan_next 排下一条；要收尾就 cancel_alarm({ id: "${parent.id}" })。${skipNote ? `\n${skipNote}` : ""}`
+        if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
+        else sendTime(text)
+        withWorldLock(() => {
+          const f = readWorld()
+          const p = (f.alarms || []).find((x) => x.id === parent.id)
+          if (p) delete p.skipped
+          f.alarms = (f.alarms || []).filter((x) => x.id !== a.id)
+          f.lastWake = today
+          return writeWorld(f)
+        })
+        woke = true
+        break
+      }
+    }
+    if (woke) return
     maybeRandomCare()
     // 印象整理：每天一次，固定 hour（默认 05:00）后；配了本地模型先切本地再跑
     const impCfg = c.memory.impression
@@ -1889,21 +2145,6 @@ function writeModelMode(): void {
   } catch { /* ignore */ }
 }
 
-function waitRoleAck(seq: number, rk: string, timeoutMs: number): Promise<any | null> {
-  return new Promise((resolve) => {
-    const deadline = Date.now() + timeoutMs
-    const tick = () => {
-      try {
-        const st = readJson<any>(ackStatePath(rk), null)
-        if (st && Number(st.seq) === seq) return resolve(st)
-      } catch { /* ignore */ }
-      if (Date.now() > deadline) return resolve(null)
-      setTimeout(tick, 300)
-    }
-    tick()
-  })
-}
-
 interface SkillInfo { name: string; description: string; tags: string[]; source: "own" | "downloaded"; dir: string; file: string; enabled: boolean; run: string }
 function mdCell(v: string): string { return String(v || "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim() }
 function readSkillMeta(file: string): { fm: Record<string, string>; text: string } {
@@ -2060,6 +2301,157 @@ function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: 
   })
 }
 
+// ———————— 辅助感知（多模态） ————————
+type MediaKind = "image" | "video" | "audio"
+/** Base64 上限 10MB；原始文件留 7MB 余量 */
+const MEDIA_INLINE_BYTES = 7_000_000
+
+function isHttpUrl(s: string): boolean { return /^https?:\/\//i.test(String(s || "")) }
+
+function mediaKindOf(name: string, explicit?: string): MediaKind | "" {
+  const k = String(explicit || "").toLowerCase()
+  if (k === "image" || k === "video" || k === "audio") return k
+  const ext = (String(name).match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/)?.[1] || "").toLowerCase()
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(ext)) return "image"
+  if (["mp4", "mov", "mkv", "webm", "avi", "flv", "wmv", "m4v"].includes(ext)) return "video"
+  if (["mp3", "wav", "m4a", "aac", "ogg", "flac", "amr", "3gp", "3gpp"].includes(ext)) return "audio"
+  return ""
+}
+
+function findBin(name: string): string {
+  try { return spawnSync("sh", ["-c", `command -v ${name}`], { stdio: "ignore" }).status === 0 ? name : "" } catch { return "" }
+}
+
+function runCmd(cmd: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; err: string }> {
+  return new Promise((resolve) => {
+    let err = ""
+    let done = false
+    let timer: any = null
+    const child = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] })
+    const finish = (ok: boolean) => { if (done) return; done = true; if (timer) clearTimeout(timer); resolve({ ok, err: err.slice(0, 2000) }) }
+    timer = setTimeout(() => { try { child.kill("SIGKILL") } catch { /* ignore */ } finish(false) }, timeoutMs)
+    child.stderr.on("data", (d) => { err += String(d) })
+    child.on("error", (e) => { err += String(e); finish(false) })
+    child.on("close", (code) => finish(code === 0))
+  })
+}
+
+async function probeDuration(path: string): Promise<number> {
+  const ffprobe = findBin("ffprobe")
+  if (!ffprobe) return 0
+  return new Promise((resolve) => {
+    let out = ""
+    const child = spawn(ffprobe, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path], { stdio: ["ignore", "pipe", "ignore"] })
+    child.stdout.on("data", (d) => { out += String(d) })
+    child.on("error", () => resolve(0))
+    child.on("close", () => { const n = Number(out.trim()); resolve(Number.isFinite(n) ? n : 0) })
+  })
+}
+
+async function compressImage(src: string, outDir: string): Promise<string> {
+  const magick = findBin("magick") || findBin("convert")
+  const ffmpeg = findBin("ffmpeg")
+  const out = join(outDir, `perceive-${Date.now()}.jpg`)
+  const tries: Array<{ cmd: string; args: string[] }> = []
+  if (magick) {
+    for (const q of [82, 70, 60]) for (const size of [1568, 1024, 768]) {
+      tries.push({ cmd: magick, args: [src, "-auto-orient", "-resize", `${size}x${size}>`, "-quality", String(q), out] })
+    }
+  }
+  if (ffmpeg) {
+    for (const size of [1568, 1024, 768]) for (const q of ["4", "8"]) {
+      tries.push({ cmd: ffmpeg, args: ["-y", "-i", src, "-frames:v", "1", "-vf", `scale='min(${size},iw)':-2`, "-q:v", q, out] })
+    }
+  }
+  for (const t of tries) {
+    const r = await runCmd(t.cmd, t.args, 60_000)
+    if (!r.ok) continue
+    try { if (statSync(out).size <= MEDIA_INLINE_BYTES) return out } catch { /* ignore */ }
+  }
+  return ""
+}
+
+async function compressAudio(src: string, outDir: string, duration: number): Promise<string> {
+  const ffmpeg = findBin("ffmpeg")
+  if (!ffmpeg || !duration) return ""
+  const out = join(outDir, `perceive-${Date.now()}.mp3`)
+  const kbps = Math.max(16, Math.min(128, Math.floor((MEDIA_INLINE_BYTES * 8) / duration / 1000)))
+  const r = await runCmd(ffmpeg, ["-y", "-i", src, "-ac", "1", "-b:a", `${kbps}k`, out], 180_000)
+  if (!r.ok) return ""
+  try { return statSync(out).size <= MEDIA_INLINE_BYTES ? out : "" } catch { return "" }
+}
+
+async function compressVideo(src: string, outDir: string, duration: number): Promise<string> {
+  const ffmpeg = findBin("ffmpeg")
+  if (!ffmpeg || !duration) return ""
+  const totalKbps = Math.floor((MEDIA_INLINE_BYTES * 8) / duration / 1000)
+  if (totalKbps < 120) return "" // 这个时长压进去必然糊到没法看
+  const out = join(outDir, `perceive-${Date.now()}.mp4`)
+  const vk = Math.max(60, totalKbps - 64)
+  const scale = totalKbps < 300 ? 360 : 480
+  const r = await runCmd(ffmpeg, ["-y", "-i", src, "-vf", `scale=-2:${scale}`, "-c:v", "libx264", "-preset", "veryfast", "-b:v", `${vk}k`, "-maxrate", `${vk}k`, "-bufsize", `${vk * 2}k`, "-c:a", "aac", "-b:a", "48k", out], 300_000)
+  if (!r.ok) return ""
+  try { return statSync(out).size <= MEDIA_INLINE_BYTES ? out : "" } catch { return "" }
+}
+
+function audioFormatOf(mediaUrl: string, raw: string): string {
+  const m = String(mediaUrl).match(/^data:audio\/([a-z0-9.+-]+);/i)
+  if (m) {
+    const sub = m[1].toLowerCase()
+    return sub === "mpeg" ? "mp3" : sub === "mp4" ? "m4a" : sub
+  }
+  const ext = (String(raw).match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/)?.[1] || "").toLowerCase()
+  return ext || "wav"
+}
+
+function mediaMime(kind: MediaKind, ext: string): string {
+  if (kind === "image") return ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg"
+  if (kind === "audio") return ext === "wav" ? "audio/wav" : ext === "mp3" ? "audio/mpeg" : ext === "m4a" ? "audio/mp4" : ext === "aac" ? "audio/aac" : ext === "ogg" ? "audio/ogg" : ext === "amr" ? "audio/amr" : ext === "flac" ? "audio/flac" : "audio/wav"
+  return "video/mp4"
+}
+
+/** 本地媒体 → data URL；超限先压缩，压不进去返回错误 + 建议 */
+async function mediaDataUrl(path: string, kind: MediaKind, outDir: string): Promise<{ url?: string; warning?: string; error?: string }> {
+  let size = 0
+  try { size = statSync(path).size } catch { return { error: `读不到文件：${path}` } }
+  const mm = config().multimodal
+  const warnAt = kind === "image" ? mm.warnImageBytes : kind === "video" ? mm.warnVideoBytes : 0
+  let warning = warnAt && size > warnAt ? `文件较大（${(size / 1024 / 1024).toFixed(1)}MB），模型处理会慢一些。` : ""
+  let target = path
+  if (size > MEDIA_INLINE_BYTES) {
+    const duration = kind === "image" ? 0 : await probeDuration(path)
+    const small = kind === "image" ? await compressImage(path, outDir) : kind === "audio" ? await compressAudio(path, outDir, duration) : await compressVideo(path, outDir, duration)
+    if (!small) {
+      const tooLong = kind === "video" && duration > 0 && Math.floor((MEDIA_INLINE_BYTES * 8) / duration / 1000) < 120
+      return { error: tooLong
+        ? "视频太长，压到 Base64 上限（10MB）会糊得没法看。建议给公网直链，或和用户商量分段发送。"
+        : "压缩后仍超过 Base64 上限（约 7.5MB）。建议给公网直链，或和用户商量分段发送。" }
+    }
+    let smallSize = 0
+    try { smallSize = statSync(small).size } catch { /* ignore */ }
+    target = small
+    warning = `原文件 ${(size / 1024 / 1024).toFixed(1)}MB，已压缩到 ${(smallSize / 1024 / 1024).toFixed(1)}MB。${warning}`
+  }
+  const b64 = readFileSync(target).toString("base64")
+  if (b64.length >= 10 * 1024 * 1024) return { error: "Base64 后仍超过 10MB 上限；建议给公网直链，或和用户商量分段发送。" }
+  const ext = (target.match(/\.([A-Za-z0-9]{1,8})$/)?.[1] || "").toLowerCase()
+  return { url: `data:${mediaMime(kind, ext)};base64,${b64}`, warning }
+}
+
+/** 解析辅助感知模型的 endpoint 与鉴权 */
+async function auxPerceiveModel(): Promise<{ id: string; url: string; headers: Record<string, string> } | null> {
+  const mm = config().multimodal
+  if (!mm.enabled || !mm.model) return null
+  const ref = parseModelRef(mm.model)
+  if (!ref) return null
+  let model: any = null
+  try { model = (lastCtx as any)?.modelRegistry?.find?.(ref.provider, ref.id) } catch { /* stale ctx */ }
+  const auth = await healthAuth(ref.provider, lastCtx, model)
+  const base = String(auth.baseUrl || model?.baseUrl || "").replace(/\/+$/, "")
+  if (!base) return null
+  return { id: ref.id, url: `${base}/chat/completions`, headers: { "Content-Type": "application/json", ...auth.headers } }
+}
+
 export default function (pi: ExtensionAPI) {
   piRef = pi
   if (JUDGE) return // 判官：不注入、不注册工具
@@ -2074,15 +2466,23 @@ export default function (pi: ExtensionAPI) {
 
   // —— lwctl：会话心跳 + 远程切换模型 ——
   const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
-  const writeAck = (payload: any) => {
-    const text = JSON.stringify(payload, null, 2)
-    try { atomicWrite(CONTROL_STATE, text) } catch { /* ignore */ }
-    try { atomicWrite(ackStatePath(roleKey), text) } catch { /* ignore */ }
+  const writeAck = (id: string, payload: any) => {
+    const text = JSON.stringify({ id, target: roleKey, roleKey, at: new Date().toISOString(), ...payload }, null, 2)
+    try { atomicWrite(controlAckFile(id, roleKey), text) } catch { /* ignore */ }
   }
-  const CONTROL_SEEN = join(ROOT, `.control-seen-${roleKey.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`)
-  let lastControlSeq = (() => {
-    try { return Number(JSON.parse(readFileSync(CONTROL_SEEN, "utf8")).seq) || 0 } catch { return 0 }
+  // 控制队列水位：(at, id) 字典序；重启后从文件恢复
+  const CONTROL_SEEN = join(ROOT, `.control-seen-${safeRoleKey(roleKey)}.json`)
+  let controlMark = (() => {
+    try {
+      const x = JSON.parse(readFileSync(CONTROL_SEEN, "utf8"))
+      return { at: Number(x.at) || 0, id: String(x.id) || "" }
+    } catch { return { at: 0, id: "" } }
   })()
+  const isNewCmd = (c: ControlCmd) => c.at > controlMark.at || (c.at === controlMark.at && c.id > controlMark.id)
+  const markCmd = (c: ControlCmd) => {
+    controlMark = { at: c.at, id: c.id }
+    try { atomicWrite(CONTROL_SEEN, JSON.stringify(controlMark)) } catch { /* ignore */ }
+  }
   const statusPayload = () => {
     // ctx 在 newSession / 进程收尾后可能失效，逐项安全读取
     let model = "", sessionId = "", sessionFile = ""
@@ -2119,52 +2519,79 @@ export default function (pi: ExtensionAPI) {
       if (!msg.includes("stale")) log(`writeStatus failed ${msg}`)
     }
   }
+  const handleAlarmCommand = async (c: ControlCmd) => {
+    const op = String(c.op || "")
+    const id = String(c.alarmId || "")
+    if (!id || !["pause", "resume", "close", "fire_now"].includes(op)) {
+      writeAck(c.id, { ok: false, msg: "闹钟命令参数不对" })
+      return
+    }
+    const res = withWorldLock(() => {
+      const st = readWorld()
+      const all = st.alarms || []
+      const target = all.find((a) => a.id === id)
+      if (!target) return { ok: false, msg: "找不到这个活动/闹钟" }
+      if (op === "pause") target.paused = true
+      else if (op === "resume") target.paused = false
+      else if (op === "fire_now") {
+        if (target.kind !== "sub") return { ok: false, msg: "只能对子闹钟立即触发" }
+        target.at = new Date().toISOString()
+      } else if (op === "close") {
+        st.alarms = target.kind === "main"
+          ? all.filter((a) => a.id !== target.id && !(a.kind === "sub" && a.parentId === target.id))
+          : all.filter((a) => a.id !== target.id)
+        return { ok: writeWorld(st), msg: target.kind === "main" ? "活动已关闭（子闹钟一起关了）" : "子闹钟已取消" }
+      }
+      return { ok: writeWorld(st), msg: op === "pause" ? "已暂停" : op === "resume" ? "已继续" : "已排到下一轮触发" }
+    })
+    writeAck(c.id, { ok: !!res?.ok, msg: res?.msg || "world.json 暂时被占用" })
+    writeStatus()
+  }
+  const handleControl = async (c: ControlCmd) => {
+    const o = config().models
+    if (String(c.action || "") === "impression") {
+      if (!lastCtx) { writeAck(c.id, { ok: false, msg: "还没有可用的会话上下文" }); return }
+      const imp = config().memory.impression
+      if (o.local && modelIdOf(lastCtx) !== o.local) {
+        const r = await switchTo(lastCtx, o.local, "手动印象整理")
+        if (r.startsWith("切不过去")) { writeAck(c.id, { ok: false, msg: `本地模型没切过去：${r}` }); return }
+      }
+      const sent = sendTime(impressionPrompt(imp))
+      writeAck(c.id, { ok: sent, msg: sent ? "印象整理已触发" : "任务没能送进会话" })
+      writeStatus()
+      return
+    }
+    if (String(c.action || "") === "alarm") { await handleAlarmCommand(c); return }
+    const wanted = String(c.model || "")
+    const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
+    if (!target || !lastCtx) { writeAck(c.id, { ok: false, msg: "没有可切换的上下文或模型" }); return }
+    const result = modelIdOf(lastCtx) === target ? `已经是 ${target} 了` : await switchTo(lastCtx, target, c.reason || "手动切换")
+    writeAck(c.id, { ok: result.startsWith("已切到") || result.startsWith("已经是"), model: target, msg: result })
+    writeStatus()
+  }
   const pollControl = async () => {
     try {
-      const c = readJson<{ seq?: number; at?: number; target?: string; model?: string; reason?: string; action?: string }>(CONTROL_FILE, {})
-      const seq = Number(c?.seq || 0)
-      if (!seq || seq <= lastControlSeq) return
-      const at = Number(c?.at || 0)
-      // 进程重启前留下的旧命令只作废，不再执行一遍
-      if (!at || Date.now() - at > 60_000) {
-        lastControlSeq = seq
-        try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString(), skipped: "stale" })) } catch { /* ignore */ }
-        return
+      for (const c of readControlQueue()) {
+        if (!isNewCmd(c)) continue
+        try {
+          if (!c.at || Date.now() - c.at > 60_000) continue
+          if (c.target !== roleKey && c.target !== "all") continue
+          if (CHANNEL === "group") continue
+          await handleControl(c)
+        } finally { markCmd(c) }
       }
-      lastControlSeq = seq
-      try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString() })) } catch { /* ignore */ }
-      // 群聊强制云端：不执行任何切换/整理命令
-      if (CHANNEL === "group") return
-      const targetRole = String(c?.target || "")
-      if (targetRole !== roleKey && targetRole !== "all") return
-      const o = config().models
-      if (String(c?.action || "") === "impression") {
-        if (!lastCtx) {
-          writeAck({ seq, target: roleKey, ok: false, msg: "还没有可用的会话上下文", at: new Date().toISOString() })
-          return
-        }
-        const imp = config().memory.impression
-        if (o.local && modelIdOf(lastCtx) !== o.local) {
-          const r = await switchTo(lastCtx, o.local, "手动印象整理")
-          if (r.startsWith("切不过去")) {
-            writeAck({ seq, target: roleKey, ok: false, msg: `本地模型没切过去：${r}`, at: new Date().toISOString() })
-            return
+      // 兼容升级过程中旧进程还在写的 control.json
+      const legacy = readJson<any>(CONTROL_FILE, null)
+      const lat = Number(legacy?.at || 0)
+      if (lat && Date.now() - lat <= 60_000) {
+        const c: ControlCmd = { ...legacy, id: `legacy-${lat}`, action: legacy.action || "model" }
+        if (isNewCmd(c)) {
+          if (c.target === roleKey || c.target === "all") {
+            try { await handleControl(c) } catch { /* ignore */ }
           }
+          markCmd(c)
         }
-        const sent = sendTime(impressionPrompt(imp))
-        writeAck({ seq, target: roleKey, ok: sent, msg: sent ? "印象整理已触发" : "任务没能送进会话", at: new Date().toISOString() })
-        writeStatus()
-        return
       }
-      const wanted = String(c?.model || "")
-      const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
-      if (!target || !lastCtx) {
-        writeAck({ seq, target: roleKey, ok: false, msg: "没有可切换的上下文或模型", at: new Date().toISOString() })
-        return
-      }
-      const result = modelIdOf(lastCtx) === target ? `已经是 ${target} 了` : await switchTo(lastCtx, target, c?.reason || "手动切换")
-      writeAck({ seq, target: roleKey, model: target, ok: result.startsWith("已切到") || result.startsWith("已经是"), msg: result, at: new Date().toISOString() })
-      writeStatus()
     } catch (e) { log(`pollControl failed ${String(e)}`) }
   }
   writeStatus()
@@ -2244,6 +2671,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     lastCtx = ctx
+    setAgentBusy(true)
     // 脚本级兜底：当前模型探活失败就自动切另一个（不依赖模型自己判断）
     await ensureModelAlive(ctx)
     const patch: any = {}
@@ -2369,6 +2797,8 @@ export default function (pi: ExtensionAPI) {
     archive(message)
     if (message?.role !== "assistant") return
     const stop = String(message?.stopReason || "")
+    // 工具轮只是中间态；正常收尾/出错才算这一轮结束
+    if (stop !== "toolUse") setAgentBusy(false)
     if (stop === "error") {
       // 回复不了就直接切，不计数
       log(`model error · ${modelIdOf(ctx)} · ${String(message?.errorMessage || "").slice(0, 200)}`)
@@ -2398,13 +2828,15 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "plan_next",
     label: "Plan next",
-    description: "说好接下来做什么、做到什么时候、到点用哪个模型跑。note 要写清做什么、怎么算做成；at 与 after_minutes 二选一；model 定好 local / cloud，到点会先切过去。",
+    description: "定活动或子闹钟。不带 parent = 开始一个活动，到点唤醒并保持 active；带 parent = 给这个活动排子闹钟（times 可一次排多条，同一活动 30 分钟内最多 3 条）。note 写清做什么、怎么算做成。",
     parameters: {
       type: "object",
       properties: {
         note: { type: "string", description: "做什么，以及怎么算做成了" },
-        at: { type: "string", description: "带时区的完整时间，如 2026-11-07T18:00:00+08:00" },
-        after_minutes: { type: "number", description: "从现在起多少分钟（至少 1）" },
+        at: { type: "string", description: "活动开始时间，或子闹钟的单条时间；带时区 ISO 或 HH:MM" },
+        times: { type: "array", items: { type: "string" }, description: "子闹钟：一次排多个时间点（ISO 或 HH:MM）" },
+        after_minutes: { type: "number", description: "从现在起多少分钟" },
+        parent: { type: "string", description: "主活动 id 或标题关键词；给了就是排子闹钟" },
         model: { type: "string", enum: ["local", "cloud"], description: "到点用哪个模型跑；不传就沿用当前模型" },
       },
       required: ["note"],
@@ -2413,14 +2845,64 @@ export default function (pi: ExtensionAPI) {
       if (JUDGE) return ok("判官会话不能定闹钟。")
       if (CHANNEL === "group") return ok("群聊里不能定闹钟。")
       const now = Date.now()
-      const target = typeof params.after_minutes === "number" ? now + params.after_minutes * 60_000 : Date.parse(String(params.at || ""))
-      if (!Number.isFinite(target) || target < now + 60_000) return ok("时间不对：至少定在 1 分钟之后，at 要带时区。")
       const c = config().models
       const current = lastCtx ? modelIdOf(lastCtx) : ""
       const model: Alarm["model"] = params.model === "local" || params.model === "cloud"
         ? params.model
         : current && current === c.local ? "local" : current && current === c.cloud ? "cloud" : undefined
-      const alarm: Alarm = { id: `a-${now}-${Math.random().toString(36).slice(2, 6)}`, at: new Date(target).toISOString(), note: String(params.note || ""), setAt: new Date(now).toISOString(), model }
+      const parentRef = String(params.parent || "").trim()
+
+      // —— 子闹钟：挂到一个进行中/待开始的活动上 ——
+      if (parentRef) {
+        const state = readWorld()
+        const found = findParentAlarm(state.alarms || [], parentRef)
+        if (!found.parent) return ok(found.error || "找不到这个活动。")
+        const times: number[] = []
+        if (Array.isArray(params.times)) {
+          for (const t of params.times) { const v = parseWhen(String(t)); if (Number.isFinite(v)) times.push(v) }
+        }
+        if (typeof params.after_minutes === "number") times.push(now + params.after_minutes * 60_000)
+        if (params.at) { const v = parseWhen(String(params.at)); if (Number.isFinite(v)) times.push(v) }
+        if (!times.length) return ok("子闹钟没给时间：用 at、times 或 after_minutes。")
+        const bad = times.filter((t) => t < now + 10_000)
+        if (bad.length) return ok("子闹钟时间至少要在 10 秒之后。")
+        const density = checkSubDensity(state.alarms || [], found.parent.id, times)
+        if (density) return ok(density)
+        const pending = (state.alarms || []).filter((a) => a.kind === "sub" && a.parentId === found.parent!.id).length
+        if (pending + times.length > 24) return ok("这个活动的子闹钟太多了（上限 24 条），先取消一些。")
+        const parent = found.parent
+        const unique = [...new Set(times)].sort((a, b) => a - b)
+        const subs: Alarm[] = unique.map((t, i) => ({
+          id: `s-${now}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+          at: new Date(t).toISOString(),
+          note: String(params.note || ""),
+          setAt: new Date(now).toISOString(),
+          model,
+          kind: "sub",
+          parentId: parent.id,
+          status: "pending",
+        }))
+        const saved = withWorldLock(() => {
+          const st = readWorld()
+          st.alarms = [...(st.alarms || []), ...subs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+          return writeWorld(st)
+        })
+        if (!saved) return ok("子闹钟没能写进 world.json。")
+        return ok(`给活动《${parent.note}》排了 ${subs.length} 条子闹钟：\n${subs.map((s) => `- ${isoLocal(new Date(s.at))} ${s.note}`).join("\n")}`)
+      }
+
+      // —— 主活动 ——
+      const target = typeof params.after_minutes === "number" ? now + params.after_minutes * 60_000 : parseWhen(String(params.at || ""))
+      if (!Number.isFinite(target) || target < now + 60_000) return ok("时间不对：活动至少定在 1 分钟之后，at 要带时区。")
+      const alarm: Alarm = {
+        id: `a-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        at: new Date(target).toISOString(),
+        note: String(params.note || ""),
+        setAt: new Date(now).toISOString(),
+        model,
+        kind: "main",
+        status: "pending",
+      }
       const saved = withWorldLock(() => {
         const state = readWorld()
         state.alarms = [...(state.alarms || []), alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
@@ -2428,38 +2910,62 @@ export default function (pi: ExtensionAPI) {
       })
       if (!saved) return ok("闹钟没能写进 world.json。")
       const modelText = model === "cloud" ? "在线模型" : model === "local" ? "本地模型" : "当前模型"
-      return ok(`定好了：${isoLocal(new Date(target))} —— ${alarm.note}（到点用${modelText}跑）`)
+      return ok(`活动定好了：${isoLocal(new Date(target))} —— ${alarm.note}\nid：${alarm.id}（到点用${modelText}跑；子闹钟用 parent 指向这个 id）`)
     },
   })
 
   addTool(pi, {
     name: "check_alarm",
     label: "Check alarms",
-    description: "看看现在排着的闹钟。",
+    description: "看现在的活动、子闹钟、跳过的唤醒和旧版一次性闹钟。",
     parameters: { type: "object", properties: {} },
     async execute() {
-      const alarms = readWorld().alarms || []
-      if (!alarms.length) return ok("现在没有定闹钟。")
-      return ok(alarms.map((a) => `- ${shortStamp(a.at)}（还有 ${Math.max(0, Math.round((Date.parse(a.at) - Date.now()) / 60_000))} 分钟）${a.note}${a.model ? `（${a.model === "cloud" ? "在线" : "本地"}模型）` : ""}`).join("\n"))
+      const list = readWorld().alarms || []
+      if (!list.length) return ok("现在没有定闹钟。")
+      const now = Date.now()
+      const rel = (iso: string) => {
+        const t = Date.parse(iso)
+        if (!Number.isFinite(t)) return "时间异常"
+        return t <= now ? "已到点" : `还有 ${Math.max(0, Math.round((t - now) / 60_000))} 分钟`
+      }
+      const lines: string[] = []
+      for (const m of list.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+        lines.push(`- 活动《${m.note}》（${m.status === "active" ? "进行中" : "待开始"}；${shortStamp(m.at)}；id ${m.id}）${m.paused ? "【已暂停】" : ""}`)
+        const subs = list.filter((a) => a.kind === "sub" && a.parentId === m.id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+        for (const s of subs) lines.push(`  - 子闹钟 ${shortStamp(s.at)}（${rel(s.at)}）${s.note}${s.paused ? "【暂停】" : ""}`)
+        if (m.skipped?.length) lines.push(`  - 跳过：${m.skipped.map((s) => `${shortStamp(s.scheduled)} ${s.note}`).join("、")}`)
+        if (m.status === "active" && !subs.length) lines.push(`  - （没有子闹钟；要拆步骤就 plan_next({ parent: "${m.id}", ... })）`)
+      }
+      for (const a of list.filter((x) => !x.kind).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+        lines.push(`- ${shortStamp(a.at)}（${rel(a.at)}）${a.note}${a.model ? `（${a.model === "cloud" ? "在线" : "本地"}模型）` : ""}`)
+      }
+      return ok(lines.join("\n"))
     },
   })
 
   addTool(pi, {
     name: "cancel_alarm",
     label: "Cancel alarm",
-    description: "取消闹钟。传 match 只取消 note 含这个词的；不传全取消。",
-    parameters: { type: "object", properties: { match: { type: "string", description: "note 关键词" } } },
+    description: "取消/关闭闹钟。传 id 精确定位；传 match 取消 note 含这个词的；都不传全取消。取消活动会连带关闭它的子闹钟。",
+    parameters: { type: "object", properties: { id: { type: "string", description: "活动或闹钟 id" }, match: { type: "string", description: "note 关键词" } } },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能改闹钟。")
+      const id = String(params.id || "").trim()
       const match = String(params.match || "").trim()
-      const saved = withWorldLock(() => {
+      const res = withWorldLock(() => {
         const state = readWorld()
         const all = state.alarms || []
-        state.alarms = match ? all.filter((a) => !a.note.includes(match)) : []
-        return writeWorld(state)
+        const targets = id ? all.filter((a) => a.id === id) : match ? all.filter((a) => a.note.includes(match)) : all.slice()
+        if (!targets.length) return { ok: true, removed: 0, mains: 0 }
+        const mainIds = new Set(targets.filter((a) => a.kind === "main").map((a) => a.id))
+        const remove = new Set(targets.map((a) => a.id))
+        state.alarms = all.filter((a) => !remove.has(a.id) && !(a.kind === "sub" && a.parentId && mainIds.has(a.parentId)))
+        return { ok: writeWorld(state), removed: remove.size, mains: mainIds.size }
       })
-      if (!saved) return ok("闹钟没改成功（world.json 暂时被占用）。")
-      return ok(match ? `取消了 note 含「${match}」的闹钟。` : "全取消了。")
+      if (!res?.ok) return ok("闹钟没改成功（world.json 暂时被占用）。")
+      if (!res.removed) return ok("没找到要取消的闹钟。")
+      const extra = res.mains ? "（活动连同子闹钟）" : ""
+      return ok(id ? `取消了 ${res.removed} 条${extra}。` : match ? `取消了 note 含「${match}」的 ${res.removed} 条${extra}。` : `全取消了（${res.removed} 条）。`)
     },
   })
 
@@ -2611,18 +3117,17 @@ export default function (pi: ExtensionAPI) {
       const missing = roles.filter((rk) => rk !== roleKey && !active.includes(rk))
       if (missing.length) return ok(`这些会话没在跑或没心跳（可能刚重启/正忙）：${missing.join("、")}`)
 
-      const seq = Date.now()
-      atomicWrite(CONTROL_FILE, JSON.stringify({ seq, at: seq, target: scope, model: raw, reason }, null, 2))
-      // 自己已经直接切了，别再让自己的轮询重复执行
-      lastControlSeq = seq
-      try { atomicWrite(CONTROL_SEEN, JSON.stringify({ seq, at: new Date().toISOString() })) } catch { /* ignore */ }
+      const cmd = appendControl({ target: scope, action: "model", model: raw, reason })
+      // 自己直接切，并把水位推过这条命令，避免自己的轮询重复执行
+      markCmd({ id: cmd.id, at: cmd.at, target: scope })
       const waitMs = scope === "all" ? 12_000 : 8_000
       const results = await Promise.all(roles.map(async (rk) => {
         if (rk === roleKey) {
           const r = target === cur ? `已经是 ${target} 了` : await switchTo(ctx, target, reason)
+          writeAck(cmd.id, { ok: r.startsWith("已切到") || r.startsWith("已经是"), model: target, msg: r })
           return { rk, ok: r.startsWith("已切到") || r.startsWith("已经是"), msg: r }
         }
-        const st = await waitRoleAck(seq, rk, waitMs)
+        const st = await waitRoleAck(cmd.id, rk, waitMs)
         return { rk, ok: !!st?.ok, msg: (st && st.msg) || "未响应（可能卡在任务里）" }
       }))
       writeStatus()
@@ -2752,6 +3257,82 @@ export default function (pi: ExtensionAPI) {
         } catch (e) { return ok(`改状态失败：${String(e)}`) }
         writeSkillIndex()
         return ok(`技能「${s.name}」已${params?.enabled === true ? "启用" : "停用"}。`)
+      },
+    })
+    addTool(pi, {
+      name: "perceive",
+      label: "Perceive media",
+      description: "辅助感知：只在主模型缺能力时用——视频、音频，或主模型不支持图片时的图片。图片主模型能看就直接 read，别调这个。本地文件超限会自动压缩；公网 URL 直接传，不中转。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "本地文件路径（相对 world）或公网媒体 URL" },
+          question: { type: "string", description: "要它看/听什么" },
+          kind: { type: "string", enum: ["image", "video", "audio"], description: "不传按扩展名判断" },
+        },
+        required: ["path", "question"],
+      },
+      async execute(_id: string, params: any) {
+        if (JUDGE) return ok("判官会话不能用感知。")
+        const raw = String(params.path || "").trim()
+        const question = String(params.question || "").trim()
+        if (!raw || !question) return ok("要给 path 和 question。")
+        const isUrl = isHttpUrl(raw)
+        const kind = mediaKindOf(isUrl ? raw.split("?")[0] : raw, params.kind)
+        if (!kind) return ok("认不出媒体类型；给 kind: image / video / audio。")
+        // 能力路由优先：主模型能看图片就不走辅助模型，也不要求配 multimodal
+        const mainInputs: string[] = Array.isArray((lastCtx as any)?.model?.input) ? (lastCtx as any).model.input : []
+        if (kind === "image" && mainInputs.includes("image")) {
+          return ok(isUrl
+            ? "主模型自己能看图，不用走辅助模型。把图片下载到 tmp 或 world 目录后直接 read。"
+            : `主模型自己能看图，不用走辅助模型；直接 read：${raw.startsWith("/") ? raw : join(WORLD, raw)}`)
+        }
+        const mm = config().multimodal
+        if (!mm.enabled || !mm.model) return ok("当前能力需要辅助感知，但还没配模型。去看板「模型 → 辅助感知」选一个，或写 life-world.json 的 multimodal.model（推荐 qwen3.8-omni-flash）。")
+        let mediaUrl = ""
+        let warning = ""
+        if (isUrl) {
+          mediaUrl = raw
+        } else {
+          let real = ""
+          try { real = realpathSync(raw.startsWith("/") ? raw : resolve(WORLD, raw)) } catch { return ok(`找不到文件：${raw}`) }
+          const dirs = [ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR].map((d) => { try { return realpathSync(d) } catch { return d } })
+          if (!dirs.some((d) => real === d || real.startsWith(d + sep))) return ok("只能读 room / 表情包 / 语音 / tmp 里的文件。")
+          let drawer = ""
+          try { drawer = realpathSync(DRAWER_DIR) } catch { /* ignore */ }
+          if (drawer && (real === drawer || real.startsWith(drawer + sep))) return ok("机密抽屉里的东西不走云端感知。")
+          const outDir = join(TMP_DIR, `perceive-${Date.now()}`)
+          try { mkdirSync(outDir, { recursive: true, mode: 0o700 }) } catch { /* ignore */ }
+          const r = await mediaDataUrl(real, kind, outDir)
+          if (r.error) return ok(r.error)
+          mediaUrl = r.url || ""
+          warning = r.warning || ""
+        }
+        const aux = await auxPerceiveModel()
+        if (!aux) return ok("辅助感知模型没配好（multimodal.model 或 provider 的 baseUrl 缺失）。")
+        const content: any[] = []
+        if (kind === "image") content.push({ type: "image_url", image_url: { url: mediaUrl } })
+        else if (kind === "video") content.push({ type: "video_url", video_url: { url: mediaUrl } })
+        else content.push({ type: "input_audio", input_audio: { data: mediaUrl, format: audioFormatOf(mediaUrl, raw) } })
+        content.push({ type: "text", text: question })
+        try {
+          const res = await fetch(aux.url, {
+            method: "POST",
+            headers: aux.headers,
+            body: JSON.stringify({ model: aux.id, messages: [{ role: "user", content }], modalities: ["text"], stream: false }),
+            signal: AbortSignal.timeout(Math.max(30_000, mm.timeoutMs)),
+          })
+          const text = await res.text()
+          if (!res.ok) return ok(`感知模型返回 ${res.status}：${text.slice(0, 300)}`)
+          let data: any = null
+          try { data = JSON.parse(text) } catch { /* ignore */ }
+          const c = data?.choices?.[0]?.message?.content
+          const answer = typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text || "").join("\n") : ""
+          const meta = [`辅助感知：${mm.model} · ${kind}`, warning].filter(Boolean).join("\n")
+          return ok(`${meta}\n\n${(answer || text).slice(0, 20_000)}`)
+        } catch (e) {
+          return ok(`感知请求失败：${String(e).slice(0, 300)}`)
+        }
       },
     })
   }

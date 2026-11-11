@@ -4,11 +4,13 @@
 这里只写语法；什么时候用、有什么边界，看对应主题的文件。
 
 ## 时间与提醒
-- 定闹钟：`plan_next({ note: "做什么，怎么算做成", after_minutes: 30 })`
-  绝对时间：`plan_next({ note: "…", at: "2026-10-30T09:00:00+08:00" })`
-  到点用哪个模型：`plan_next({ note: "…", after_minutes: 30, model: "local" })`（或 `"cloud"`）
-- 看待办：`check_alarm()`
-- 取消：`cancel_alarm({ match: "关键词" })`（不传 match 全取消）
+- 开始一个活动：`plan_next({ note: "逛B站，挑出今天想看的", at: "2026-11-11T12:00:00+08:00" })`，返回活动 id。
+- 给活动排子闹钟（短间隔、多醒来几次）：`plan_next({ note: "看看推荐流有没有意思", parent: "<活动id>", after_minutes: 20 })`
+  一次排多条：`times: ["12:15", "12:35", "13:00"]`；同一活动任意 30 分钟内最多 3 条。
+  到点用哪个模型：加 `model: "local"` 或 `"cloud"`。
+- 看活动 / 子闹钟 / 跳过记录：`check_alarm()`
+- 关闭活动（子闹钟一起关）：`cancel_alarm({ id: "<活动id>" })`；单条子闹钟也传 id；按标题关键词用 `cancel_alarm({ match: "…" })`。
+- 子闹钟到点时你正忙，会自动跳过并记一笔；下次这个活动醒来时会提醒你 review，补不补由你定。
 
 ## 联系
 - 找对方：`reach_out({ text: "要说的话" })`
@@ -18,6 +20,7 @@
 ## 内容
 - 颜文字：`kaomoji({ scene: "害羞", count: 3, remember: false })`
 - 联网搜索：`web_search({ query: "…", limit: 5 })`（免费，不需要 key）
+- 看视频 / 听音频：`perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })`；也支持公网 URL。图片主模型自己能看就直接 `read`，不用 perceive。
 - 翻记忆：
   - `memory_search({ query: "法考 出分", from: "2026-09-01", to: "2026-11-06", role: "user|assistant", scope: "chat|diary|notes|all", limit: 8, context: 1 })`
   - `memory_day({ date: "2026-10-31" })`
