@@ -251,7 +251,7 @@ function mediaParts(msg) {
 function imagePayload(path) {
   return { type: "image", data: readFileSync(path).toString("base64"), mimeType: mimeOf(path) }
 }
-async function resolveMedia(m) {
+async function resolveMedia(m, groupId = "") {
   const url = String(m.url || "")
   if (url.startsWith("base64://")) return { ...m, base64: url.slice(9) }
   if (/^data:[^;]+;base64,/i.test(url)) return { ...m, base64: url.split(",")[1] }
@@ -273,11 +273,14 @@ async function resolveMedia(m) {
     return undefined
   }
   try {
-    const res = await call("get_private_file_url", { user_id: ownerQQ, file_id: m.fileId || m.file || "", file_hash: m.fileHash || "" })
+    // 群文件要用 get_group_file_url，私聊才用 get_private_file_url
+    const res = groupId
+      ? await call("get_group_file_url", { group_id: Number(groupId), file_id: m.fileId || m.file || "", file_hash: m.fileHash || "" })
+      : await call("get_private_file_url", { user_id: ownerQQ, file_id: m.fileId || m.file || "", file_hash: m.fileHash || "" })
     const d = res?.data || {}
     if (/^https?:\/\//i.test(d.url || "")) return { ...m, url: d.url, name: d.file_name || m.name }
     if (d.base64) return { ...m, base64: d.base64 }
-  } catch (e) { log("get_private_file_url failed", String(e)) }
+  } catch (e) { log(groupId ? "get_group_file_url failed" : "get_private_file_url failed", String(e)) }
   return undefined
 }
 /** 找一个可用的图片缩放工具（装了哪个用哪个） */
@@ -365,10 +368,10 @@ async function downloadMedia(m, maxBytes) {
   }
   return { path, name: m.name || basename(path) }
 }
-async function fetchAttachment(m, maxBytes) {
+async function fetchAttachment(m, maxBytes, groupId = "") {
   let got = await downloadMedia(m, maxBytes)
   if (got) return got
-  const refreshed = await resolveMedia({ ...m, url: "", base64: undefined, localPath: undefined })
+  const refreshed = await resolveMedia({ ...m, url: "", base64: undefined, localPath: undefined }, groupId)
   if (!refreshed) return undefined
   return downloadMedia(refreshed, maxBytes)
 }
@@ -390,12 +393,16 @@ class PiSession {
     this.idleWaiters = []
     this.reqId = 0
     this.closed = false
+    /** 子进程代际：旧进程晚退出时不污染新进程的状态 */
+    this.gen = 0
+    this.lastUsed = Date.now()
   }
   env() {
     return { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: this.channel === "qq" ? "qq" : "group", LIFE_WORLD_CHANNEL: this.channel, LIFE_WORLD_GROUP_ID: this.groupId }
   }
   start() {
     if (this.child) return
+    const gen = ++this.gen
     const args = ["--mode", "rpc", "--model", this.model, "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions", "-e", EXT, "--session-dir", SESSION_DIR]
     if (this.sessionFile) args.push("--session", this.sessionFile)
     else args.push("--name", this.name)
@@ -403,23 +410,36 @@ class PiSession {
     const child = spawn(PI_BIN, args, { env: this.env(), stdio: ["pipe", "pipe", "pipe"] })
     this.child = child
     this.closed = false
-    child.on("error", (e) => { log("pi spawn error", String(e)); this.onExit() })
-    child.on("exit", (code, signal) => { log("pi exit", this.name, code, signal); this.onExit() })
-    child.stderr.on("data", (d) => log("pi stderr", String(d).slice(0, 300)))
-    child.stdout.on("data", (d) => this.onData(String(d)))
+    this.lastUsed = Date.now()
+    child.on("error", (e) => { log("pi spawn error", String(e)); this.onExit(gen) })
+    child.on("exit", (code, signal) => { log("pi exit", this.name, code, signal); this.onExit(gen) })
+    child.stderr.on("data", (d) => { if (gen === this.gen) log("pi stderr", String(d).slice(0, 300)) })
+    child.stdout.on("data", (d) => { if (gen === this.gen) this.onData(String(d)) })
     this.request("get_state").then((res) => {
+      if (gen !== this.gen) return
       const file = res?.data?.sessionFile
       // 只有私聊会话写进全局状态；群会话不能覆盖它
       if (file) { this.sessionFile = file; if (this.channel === "qq") { state.piSessionFile = file; saveState() } }
     }).catch(() => {})
   }
-  onExit() {
+  onExit(gen = this.gen) {
+    // 旧子进程晚退出：别把新 child / 新状态清掉
+    if (gen !== this.gen) return
     this.closed = true
     this.child = null
     this.running = false
     this.texts = []
     for (const w of this.waiters.splice(0)) w.reject(new Error("pi exited"))
     if (!this.stopping) setTimeout(() => this.start(), 2000)
+  }
+  /** 群会话闲置回收：停掉子进程，调用方从 map 里删掉 */
+  destroy() {
+    this.stopping = true
+    this.gen++
+    const old = this.child
+    this.child = null
+    this.closed = true
+    try { old?.kill("SIGTERM") } catch { /* ignore */ }
   }
   onData(chunk) {
     this.buffer += chunk
@@ -476,6 +496,7 @@ class PiSession {
   }
   // timeoutMs = 0：不限时（本地模型慢，等它说完）
   async prompt(text, images = [], timeoutMs = 0) {
+    this.lastUsed = Date.now()
     if (this.closed || !this.child) this.start()
     if (this.running) {
       await new Promise((resolve) => this.idleWaiters.push(resolve))
@@ -495,7 +516,14 @@ class PiSession {
   }
   async newSession() {
     this.stopping = true
-    try { this.child?.kill("SIGTERM") } catch { /* ignore */ }
+    // 先换代：旧子进程杀掉后晚到的 exit/data 回调全部作废
+    this.gen++
+    const old = this.child
+    this.child = null
+    this.closed = true
+    try { old?.kill("SIGTERM") } catch { /* ignore */ }
+    for (const w of this.waiters.splice(0)) w.reject(new Error("session reset"))
+    for (const r of this.idleWaiters.splice(0)) r()
     await sleep(800)
     this.stopping = false
     this.sessionFile = ""
@@ -538,10 +566,13 @@ function armAfterglow(round) {
       startTyping()
       const texts = await pi.prompt("【余波】对方还没回你，已经过了一会儿。\n不要假装他说话了，也不要重新打招呼。\n如果上一轮还有没说完的、想补一句解释、或者想问一句怎么不说话——现在补一句；一两句就够。\n如果觉得这会儿不该说、没什么要补的，就只回 [SILENT]。\n直接写正文，不要调用 reach_out。")
       stopTyping()
+      // 生成期间对方回来了：这句余波就作废，别再追着发
+      if (afterglow.seq !== afterglow.userSeq) { log("afterglow cancelled · user returned"); return }
       const text = texts.join("\n").trim()
       if (!text || /^\[SILENT\]$/i.test(text)) { afterglow.round = 0; return }
-      await sendPrivate(text)
-      if (afterglow.seq === afterglow.userSeq) armAfterglow(round + 1)
+      const sent = await sendPrivate(text)
+      // 没发出去就别继续下一拍
+      if (sent && afterglow.seq === afterglow.userSeq) armAfterglow(round + 1)
     } catch (e) { log("afterglow failed", String(e)); stopTyping() }
   }, Number(afterglowCfg.delayMs) || 60000)
   afterglow.timer.unref?.()
@@ -549,7 +580,6 @@ function armAfterglow(round) {
 }
 
 // ———————————————— 私聊 ————————————————
-const privateMediaCache = []
 async function handlePrivateNow(msg) {
   if (Number(msg.user_id) !== ownerQQ) return
   userReturned()
@@ -593,13 +623,15 @@ async function handlePrivateNow(msg) {
     const texts = await pi.prompt(annotated, images)
     stopTyping()
     const reply = texts.join("\n").trim()
-    if (reply && !/^\[SILENT\]$/i.test(reply)) await sendPrivate(reply)
+    const replied = !!reply && !/^\[SILENT\]$/i.test(reply)
+    if (replied) await sendPrivate(reply)
     if (state.reachBuffer && state.reachBuffer.length) {
       const buffered = state.reachBuffer.splice(0)
       for (const line of buffered) await sendPrivate(line)
       saveState()
     }
-    if (afterglowCfg.enabled && afterglowCfg.maxRounds > 0) armAfterglow(1)
+    // 她选择 [SILENT] 就别 arm 余波：那不是「对方没回」，是她不想接
+    if (replied && afterglowCfg.enabled && afterglowCfg.maxRounds > 0) armAfterglow(1)
   } catch (e) {
     stopTyping()
     log("private prompt failed", String(e))
@@ -646,12 +678,14 @@ async function handleGroup(msg) {
   const groupId = Number(msg.group_id)
   if (!groupId) return
   const text = textOf(msg)
-  const media = mediaParts(msg).filter((m) => m.type === "image")
+  // 群里的图片和文件都收：图片进请求，文件落 tmp 后把路径给模型
+  const media = mediaParts(msg)
   if (!text && !media.length) return
   const key = String(groupId)
   const buf = groupBuffers.get(key) || []
   const trigger = groupTrigger(msg, text)
-  buf.push({ sender: nameOf(msg), text: text || "[图片]", media, trigger, at: Date.now() })
+  const mediaLabel = media.some((m) => m.type === "image") ? "[图片]" : "[文件]"
+  buf.push({ sender: nameOf(msg), text: text || mediaLabel, media, trigger, at: Date.now() })
   log("group in", key, nameOf(msg), trigger ? "T" : "-", (text || "[图片]").slice(0, 40))
   groupBuffers.set(key, buf)
   if (buf.timer) clearTimeout(buf.timer)
@@ -670,20 +704,26 @@ async function handleGroup(msg) {
     const judge = await judgeGroup(key, batch)
     if (judge !== "REPLY") { log("judge SKIP"); return }
     const images = []
+    const files = []
     let budget = MAX_TOTAL_BYTES
     for (const m of batch) {
       for (const item of m.media || []) {
-        const got = await fetchAttachment(item, Math.min(MAX_IMAGE_BYTES, budget))
+        const isImage = item.type === "image"
+        const got = await fetchAttachment(item, Math.min(isImage ? MAX_IMAGE_BYTES : MAX_FILE_BYTES, budget), key)
         if (!got) continue
         let size = 0
         try { size = statSync(got.path).size } catch { /* ignore */ }
         if (size > budget) { try { unlinkSync(got.path) } catch { /* ignore */ } continue }
         budget -= size
-        images.push(imagePayload(got.path))
+        if (isImage) images.push(imagePayload(got.path))
+        else files.push(got.path)
       }
     }
     const session = getGroupSession(key)
-    const prompt = `[群聊｜群号 ${key}]\n最近消息：\n${batch.map((m) => `${m.sender}：${m.text}`).join("\n")}\n（这是 QQ 群聊：按 system 里的群聊规则回复；不适合接就只回 [SILENT]。）`
+    const fileNote = files.length
+      ? `\n（群友发来文件：${files.map((p) => `${basename(p)} → ${p}`).join("、")}；路径可直接用 read 工具读。）`
+      : ""
+    const prompt = `[群聊｜群号 ${key}]\n最近消息：\n${batch.map((m) => `${m.sender}：${m.text}`).join("\n")}${fileNote}\n（这是 QQ 群聊：按 system 里的群聊规则回复；不适合接就只回 [SILENT]。）`
     try {
       const texts = await session.prompt(prompt, images)
       const reply = texts.join("\n").trim()
@@ -709,6 +749,21 @@ function judgeGroup(groupId, batch) {
     // 必须 end()：pi -p 要等 stdin EOF 才会开始跑
     child.stdin.end(prompt + "\n")
   })
+}
+
+/** 群会话闲置回收：默认 2 小时没说话就停掉子进程；群里再有人说话会自动重开 */
+function cleanupGroupSessions() {
+  const idleMs = Math.max(10, Number(groupCfg().sessionIdleMinutes) || 120) * 60_000
+  const now = Date.now()
+  for (const [key, s] of groupSessions) {
+    if (s.running) continue // 正在生成就别动
+    if (now - (s.lastUsed || 0) < idleMs) continue
+    s.destroy()
+    groupSessions.delete(key)
+    groupBuffers.delete(key)
+    groupStates.delete(key)
+    log("group session recycled", key)
+  }
 }
 
 // ———————————————— outbox ————————————————
@@ -756,13 +811,33 @@ async function sendOutboxMedia(item) {
   }
 }
 async function pollOutboxNow() {
+  const freshState = !state.outbox
   const offsets = state.outbox || (state.outbox = { offsets: {}, since: new Date().toISOString() })
+  const hadSince = !!offsets.since
+  // 旧状态没有 since：补一个“现在”，免得今天整段重发
+  if (!hadSince) offsets.since = new Date().toISOString()
+  if (freshState || !hadSince) saveState()
+  const sinceMs = Date.parse(offsets.since || "") || 0
   for (const day of recentDays(3)) {
     const file = outboxFile(day)
     if (!existsSync(file)) continue
     const buf = readFileSync(file)
     let offset = offsets.offsets[day]
-    if (offset === undefined) { offsets.offsets[day] = day === dayOf() ? 0 : buf.length; saveState(); if (offset === undefined) continue }
+    let skipBefore = 0
+    if (offset === undefined) {
+      if (day === dayOf()) {
+        // 状态丢了：今天从头补，但只发 since 之后写的，避免把已发过的整段重发
+        offset = 0
+        skipBefore = sinceMs
+      } else {
+        // 更早的日子不补历史，只记到文件尾
+        offsets.offsets[day] = buf.length
+        saveState()
+        continue
+      }
+      offsets.offsets[day] = 0
+      saveState()
+    }
     if (buf.length <= offset) continue
     const lines = buf.subarray(offset).toString("utf8").split("\n")
     lines.pop()
@@ -772,6 +847,7 @@ async function pollOutboxNow() {
       if (!line.trim()) { consumed += bytes; continue }
       let item
       try { item = JSON.parse(line) } catch { consumed += bytes; continue }
+      if (skipBefore && Date.parse(String(item.t || "")) < skipBefore) { consumed += bytes; continue }
       if (item.kind === "media") {
         const sent = await sendOutboxMedia(item)
         if (sent.ok || !sent.retryable) consumed += bytes
@@ -799,5 +875,9 @@ connect()
 setInterval(() => { if (wsReady) { state.lastSeen = new Date().toISOString(); saveState() } }, 15000).unref?.()
 setInterval(() => { pollOutbox().catch((e) => log("outbox failed", String(e))) }, 2000).unref?.()
 setInterval(() => { if (!wsReady && !reconnectTimer) scheduleReconnect("watchdog") }, 15000).unref?.()
+setInterval(cleanupGroupSessions, 10 * 60_000).unref?.()
 log("bridge started", { ownerQQ, wsUrl, model: MODEL, afterglow: afterglowCfg })
-process.on("exit", () => { try { pi.child?.kill("SIGTERM") } catch { /* ignore */ } })
+process.on("exit", () => {
+  try { pi.child?.kill("SIGTERM") } catch { /* ignore */ }
+  for (const s of groupSessions.values()) { try { s.child?.kill("SIGTERM") } catch { /* ignore */ } }
+})

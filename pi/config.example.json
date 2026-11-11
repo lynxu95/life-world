@@ -35,7 +35,8 @@
       "interjectChance": 0.05,
       "cooldownMs": 8000,
       "maxPer10Min": 0,
-      "bannedWords": []
+      "bannedWords": [],
+      "sessionIdleMinutes": 120
     }
   },
   "subagent": {
