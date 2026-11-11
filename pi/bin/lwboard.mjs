@@ -491,6 +491,7 @@ const server = http.createServer(async (req, res) => {
         backup: overviewCache.data.backup,
         available: await availableModels(),
         multimodal: (c.multimodal || {}),
+        bridge: { enabled: !!(c.bridge && c.bridge.enabled), group: { enabled: !!(c.bridge && c.bridge.group && c.bridge.group.enabled) } },
         pid: process.pid,
         now: new Date().toISOString(),
       })

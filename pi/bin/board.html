@@ -631,6 +631,7 @@ async function loadOverview() {
       cloud: (d.models && d.models.cloud) || "",
       subagent: (d.subagent && d.subagent.model) || "",
       multimodal: (d.multimodal && d.multimodal.model) || "",
+      group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
@@ -785,9 +786,13 @@ function modelRefs(obj) {
 function accountingNote(modelsObj, rangeLabel) {
   const info = LAST_MODEL_INFO || {}
   const used = modelRefs(modelsObj)
-  const mm = info.multimodal || "未配置"
-  const sub = info.subagent || "未配置"
-  return `统计口径：只算 pi 会话里的模型调用（${rangeLabel}实际用过：${used}）。不计入：辅助感知 ${mm}（perceive 直连 API）、子代理 ${sub}（--no-session）、群聊判官（--no-session）。`
+  // 只点名当前配置里真实存在、且会绕过统计的调用路径；没配就不提
+  const skipped = []
+  if (info.multimodal) skipped.push(`辅助感知 ${info.multimodal}（perceive 直连 API）`)
+  skipped.push(info.subagent ? `子代理 ${info.subagent}（--no-session）` : "子代理（--no-session，默认模型）")
+  if (info.group) skipped.push("群聊判官（--no-session）")
+  const skipText = skipped.length ? `不计入：${skipped.join("、")}。` : "没有配置会绕过统计的模型调用。"
+  return `统计口径：只算 pi 会话里的模型调用（${rangeLabel}实际用过：${used}）。${skipText}`
 }
 
 /* —— 概览：她此刻 / 今日 / 健康 / 计划 / 事件 / 快捷 —— */
