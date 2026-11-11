@@ -235,6 +235,13 @@ lwctl board stop
 
 家会话每天 `backup.hour` 点后自动快照一次（`life-world.json` 的 `backup` 段，`includePrivate` 默认 false）；快照在子进程里跑，不阻塞主会话。**不做自动清理**：`lwctl backup --gc` 压缩、`lwctl backup --reset` 整个删除，由你决定。
 
+### 技能库
+
+- 世界目录下 `skills/own/`（自制）和 `skills/downloaded/`（下载）分开放；每个技能一个文件夹，`SKILL.md` 在根上；
+- `skills/INDEX.md` 自动生成；AI 用 `skill_list()` 查索引、`skill_read({ name })` 读正文，平时不把列表注入上下文；
+- 群聊不注册这两个工具；下载的技能会提示先确认内容；
+- 脚本 / 参考 / 素材收在技能文件夹里，放外面的要在 `SKILL.md` 写清绝对路径和原因。
+
 ### 闹钟带模型
 
 `plan_next({ note, at|after_minutes, model: "local"|"cloud" })`：到点时定时器先切到指定模型再唤醒。《模型使用规范》建议定任务时就写清楚用哪个。
