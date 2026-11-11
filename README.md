@@ -7,7 +7,7 @@
 
 自包含插件，**零运行时依赖**；靠 opencode v2 的插件钩子、共享服务 HTTP API 和 tmux 工作。只支持 **Linux**（家会话自愈用 tmux，浏览器脚本依赖 Linux 的 Chrome / X）。
 
-> 仓库有四条分支：`main`（本分支，opencode 插件）、`pi-agent`（pi 1.5 轻量）、`pi-agent-v2`（pi 1.5 + 本地向量）、`pi-agent-adv`（pi 1.5 仿生记忆）。功能对比、血缘关系与选择建议见 **[BRANCHES.md](BRANCHES.md)**。
+> ⚠️ **这是早期 opencode 插件版（功能不全），仅作存档。当前维护版是 [`pi-agent-adv`](https://github.com/lynxu95/life-world/tree/pi-agent-adv)。**
 
 ## 目录
 
@@ -28,16 +28,14 @@
 
 ## 分支导航
 
-最早是 opencode 插件；本地模型经 opencode 调用效果不佳，于是移植到 pi 1.5 得到 `pi-agent`（轻量稳定）。pi 的扩展点方便继续开发，后续在 `pi-agent-v2` 继续加功能，并分出 `pi-agent-adv` 做仿生记忆实验。
+当前仓库只保留两条分支：
 
-| 分支 | 定位 | 一句话 |
+| 分支 | 状态 | 说明 |
 |---|---|---|
-| `main`（本分支） | opencode v2 插件 | 原始版，零运行时依赖 |
-| `pi-agent` | pi 1.5 轻量稳定 | opencode 功能移植到 pi + 少量优化 |
-| `pi-agent-v2` | pi 1.5 增强 + 本地向量 | 在 pi-agent 上继续加功能，FTS5 + jina 语义混合 |
-| `pi-agent-adv` | pi 1.5 仿生实验 | 去向量，ACT-R + Hebbian + 印象 + 3D 星图；395 生产在跑 |
+| `pi-agent-adv` | **当前维护 / 默认** | 唯一在维护的 pi 版；新功能都进这里 |
+| `opencode`（本分支，原 `main`） | 存档 | 早期 opencode 插件版，**功能不全** |
 
-详细的记忆架构差异、分支血缘、安装命令和“该选哪条”见 **[BRANCHES.md](BRANCHES.md)**。
+`pi-agent` / `pi-agent-v2` 已删除，提交用归档 tag 保留：`archive/pi-agent-20261111`、`archive/pi-agent-v2-20261111`。旧版代码用对应 tag 检出；完整状态见 **[BRANCHES.md](BRANCHES.md)**。
 
 ## 功能
 
@@ -85,7 +83,7 @@ opencode --version   # 需要 v2
 ### 1. 装 life-world
 
 ```bash
-git clone -b main https://github.com/lynxu95/life-world life-world && cd life-world
+git clone -b opencode https://github.com/lynxu95/life-world life-world && cd life-world
 ./install.sh --service      # 装好 + 重启服务 + 拉起 TUI
 ```
 
