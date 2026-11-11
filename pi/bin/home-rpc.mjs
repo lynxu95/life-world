@@ -40,33 +40,77 @@ function log(...args) {
 }
 
 const args = ["--mode", "rpc", "--model", MODEL, "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions", "-e", EXT, "--session-dir", SESSION_DIR, "--name", "home"]
-const child = spawn(PI, args, {
-  env: { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: "home", LIFE_WORLD_CHANNEL: "cli" },
-  stdio: ["pipe", "pipe", "pipe"],
-})
-log("home rpc start", child.pid)
+let child = null
 let buf = ""
-child.stdout.on("data", (d) => {
-  buf += String(d)
-  let i
-  while ((i = buf.indexOf("\n")) >= 0) {
-    const line = buf.slice(0, i).replace(/\r$/, "")
-    buf = buf.slice(i + 1)
-    if (!line.trim()) continue
-    let msg
-    try { msg = JSON.parse(line) } catch { continue }
-    if (msg.type === "message_end" && msg.message?.role === "assistant") {
-      const text = (msg.message.content || []).filter((p) => p?.type === "text").map((p) => p.text).join("\n").trim()
-      if (text) log("assistant", text.slice(0, 300))
-    } else if (msg.type === "agent_settled") {
-      log("agent settled")
-    } else if (msg.type === "extension_ui_request") {
-      // 无头会话没人能点面板：立即回 cancelled，避免整轮 agent 卡死
-      try { child.stdin.write(JSON.stringify({ type: "extension_ui_response", id: msg.id, cancelled: true }) + "\n") } catch { /* ignore */ }
+let stopping = false
+let backoffMs = 2000
+let startedAt = 0
+
+/** 拉起 home 子进程；异常退出后自动重启（指数退避，稳定跑满 1 分钟就重置） */
+function startChild() {
+  if (stopping) return
+  buf = ""
+  const c = spawn(PI, args, {
+    env: { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: "home", LIFE_WORLD_CHANNEL: "cli" },
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  child = c
+  startedAt = Date.now()
+  log("home rpc start", c.pid)
+  c.stdout.on("data", (d) => {
+    if (c !== child) return
+    buf += String(d)
+    let i
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).replace(/\r$/, "")
+      buf = buf.slice(i + 1)
+      if (!line.trim()) continue
+      let msg
+      try { msg = JSON.parse(line) } catch { continue }
+      if (msg.type === "message_end" && msg.message?.role === "assistant") {
+        const text = (msg.message.content || []).filter((p) => p?.type === "text").map((p) => p.text).join("\n").trim()
+        if (text) log("assistant", text.slice(0, 300))
+      } else if (msg.type === "agent_settled") {
+        log("agent settled")
+      } else if (msg.type === "extension_ui_request") {
+        // 无头会话没人能点面板：立即回 cancelled，避免整轮 agent 卡死
+        try { c.stdin.write(JSON.stringify({ type: "extension_ui_response", id: msg.id, cancelled: true }) + "\n") } catch { /* ignore */ }
+      }
     }
-  }
-})
-child.stderr.on("data", (d) => log("stderr", String(d).slice(0, 300)))
-child.on("exit", (code) => { log("home rpc exit", code); process.exit(code || 0) })
-process.on("exit", () => { try { child.kill("SIGTERM") } catch { /* ignore */ } })
-if (process.env.TEST_MS) setTimeout(() => { log("test done"); process.exit(0) }, Number(process.env.TEST_MS))
+  })
+  c.stderr.on("data", (d) => { if (c === child) log("stderr", String(d).slice(0, 300)) })
+  c.on("error", (e) => {
+    log("home rpc spawn error", String(e))
+    // spawn 失败时不一定有 exit，自己安排重启
+    if (c !== child) return
+    child = null
+    if (stopping) return
+    const wait = backoffMs
+    backoffMs = Math.min(60_000, backoffMs * 2)
+    log(`home rpc restart in ${wait}ms`)
+    setTimeout(startChild, wait)
+  })
+  c.on("exit", (code, signal) => {
+    if (c !== child) return
+    child = null
+    log("home rpc exit", code, signal)
+    if (stopping) { process.exit(code || 0); return }
+    if (Date.now() - startedAt > 60_000) backoffMs = 2000
+    const wait = backoffMs
+    backoffMs = Math.min(60_000, backoffMs * 2)
+    log(`home rpc restart in ${wait}ms`)
+    // 不能 unref：没有子进程时靠这个定时器把进程撑住，否则会直接退出
+    setTimeout(startChild, wait)
+  })
+}
+
+startChild()
+function shutdown(code = 0) {
+  stopping = true
+  try { child?.kill("SIGTERM") } catch { /* ignore */ }
+  process.exit(code)
+}
+process.on("exit", () => { try { child?.kill("SIGTERM") } catch { /* ignore */ } })
+process.on("SIGTERM", () => shutdown(0))
+process.on("SIGINT", () => shutdown(0))
+if (process.env.TEST_MS) setTimeout(() => { log("test done"); shutdown(0) }, Number(process.env.TEST_MS))
