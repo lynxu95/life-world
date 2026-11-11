@@ -117,7 +117,19 @@ function sessions() {
     .filter((f) => f.endsWith(".json"))
     .map((f) => readJson(join(STATUS_DIR, f), null))
     .filter((s) => s && s.roleKey)
-    .map((s) => ({ roleKey: s.roleKey, model: s.model || "", updated: s.updated || "", pid: s.pid, sessionId: s.sessionId || "" }))
+    .map((s) => {
+      // QQ 桥接会把自己当前在跑什么写进 busy-qq.json
+      const busy = s.roleKey === "qq" ? readJson(join(ROOT, "busy-qq.json"), null) : null
+      const fresh = busy && Date.now() - Date.parse(busy.updated || 0) < 15_000
+      return {
+        roleKey: s.roleKey,
+        model: s.model || "",
+        updated: s.updated || "",
+        pid: s.pid,
+        sessionId: s.sessionId || "",
+        busy: fresh && busy.running ? { since: busy.since || 0, tool: busy.tool || null } : null,
+      }
+    })
     .filter((s) => s.model)
     .filter((s) => pidAlive(Number(s.pid)) && Date.now() - Date.parse(s.updated || 0) < 90_000)
     .sort((a, b) => String(a.roleKey).localeCompare(String(b.roleKey)))
@@ -645,6 +657,15 @@ const server = http.createServer(async (req, res) => {
       if (target === "all") return json(res, 200, { ok: true, msg: "已下发全部切换" })
       const st = await waitAck(ROOT, cmd.id, target)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：目标会话没响应" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/abort") {
+      const data = await body(req)
+      const target = String(data.target || "")
+      if (target !== "qq" && target !== "home") return json(res, 400, { ok: false, msg: "只能中断 qq / home" })
+      // qq 由桥接自己消费（它握着 pi 子进程），home 由扩展在会话内 abort
+      const cmd = appendCommand(ROOT, { target, action: "abort", reason: "lwboard 中断当前轮" })
+      const st = await waitAck(ROOT, cmd.id, target, 12_000)
+      return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：会话没响应中断" })
     }
     if (req.method === "POST" && url.pathname === "/api/restart") {
       const data = await body(req)

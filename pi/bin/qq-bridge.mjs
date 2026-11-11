@@ -45,6 +45,25 @@ function log(...args) {
   if (process.stdout.isTTY) console.log(line)
 }
 function readJson(file, fallback) { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+/** 毫秒 → 人话（3 秒 / 2 分 15 秒 / 1 小时 5 分） */
+function fmtSpan(ms) {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} 分 ${s % 60} 秒`
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
+}
+/** 工具参数里最能说明「在干嘛」的那一段 */
+function toolArgSummary(args) {
+  if (!args || typeof args !== "object") return ""
+  const pick = args.command || args.path || args.query || args.task || args.note || args.message || ""
+  const s = String(pick).replace(/\s+/g, " ").trim()
+  if (!s) {
+    const j = JSON.stringify(args)
+    return j && j !== "{}" ? j.slice(0, 140) : ""
+  }
+  return s.length > 140 ? `${s.slice(0, 137)}…` : s
+}
 function writeJson(file, data) {
   const tmp = `${file}.${process.pid}.tmp`
   try {
@@ -452,6 +471,11 @@ class PiSession {
     /** 模型在调工具前先应了一声：桥接把这句立刻发出去，只发一次 */
     this.onAck = null
     this.ackSent = false
+    /** 当前这一轮的起点与正在跑的工具，给 /show 和看板用 */
+    this.turnStartedAt = 0
+    this.currentTool = null
+    /** /stop 之后丢弃这一轮已经吐出来的半截话 */
+    this.abortRequested = false
   }
   env() {
     return { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: this.channel === "qq" ? "qq" : "group", LIFE_WORLD_CHANNEL: this.channel, LIFE_WORLD_GROUP_ID: this.groupId }
@@ -525,6 +549,8 @@ class PiSession {
     if (msg.type === "message_end") {
       const m = msg.message
       if (m?.role === "assistant") {
+        const tool = Array.isArray(m.content) ? m.content.find((p) => p?.type === "toolCall") : null
+        if (tool) this.currentTool = { name: String(tool.name || "工具"), args: tool.arguments || {}, at: Date.now() }
         const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
         if (text) {
           if (m.stopReason === "toolUse") {
@@ -545,10 +571,19 @@ class PiSession {
       }
       return
     }
-    if (msg.type === "agent_start") { this.running = true; return }
+    if (msg.type === "agent_start") {
+      this.running = true
+      this.turnStartedAt = Date.now()
+      this.currentTool = null
+      return
+    }
     if (msg.type === "agent_settled") {
       this.running = false
-      const texts = this.texts.splice(0)
+      this.currentTool = null
+      const collected = this.texts.splice(0)
+      // 被中断的这一轮不要半截回复（msg.aborted 是 pi 自己的信号）
+      const texts = (this.abortRequested || msg.aborted) ? [] : collected
+      this.abortRequested = false
       const waiters = this.waiters.splice(0)
       for (const w of waiters) w.resolve(texts)
       const idle = this.idleWaiters.splice(0)
@@ -570,6 +605,33 @@ class PiSession {
       this.write({ id, type, ...extra })
     })
   }
+  /** 等这一轮结束；超时返回 false */
+  waitIdle(ms = 3000) {
+    if (!this.running) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms)
+      this.idleWaiters.push(() => { clearTimeout(timer); resolve(true) })
+    })
+  }
+
+  /** 给人看的当前状态：/show 指令和看板都用它 */
+  describeBusy() {
+    if (!this.running) {
+      const idle = this.lastUsed ? Date.now() - this.lastUsed : -1
+      return idle >= 0 ? `没在忙。上次动过是 ${fmtSpan(idle)} 前。` : "没在忙。"
+    }
+    const lines = [`正在忙，这一轮已经跑了 ${fmtSpan(Date.now() - (this.turnStartedAt || Date.now()))}`]
+    if (this.currentTool) {
+      const arg = toolArgSummary(this.currentTool.args)
+      lines.push(`工具：${this.currentTool.name}${arg ? `\n${arg}` : ""}`)
+      const spent = Date.now() - (this.currentTool.at || Date.now())
+      if (spent > 3000) lines.push(`这个工具已经跑了 ${fmtSpan(spent)}`)
+    } else {
+      lines.push("在等模型回复")
+    }
+    return lines.join("\n")
+  }
+
   // timeoutMs = 0：不限时（本地模型慢，等它说完）
   async prompt(text, images = [], timeoutMs = 0) {
     this.lastUsed = Date.now()
@@ -704,11 +766,6 @@ async function handlePrivateNow(msg) {
   const text = textOf(msg)
   const media = mediaParts(msg)
   if (!text && !media.length) return
-  if (text.trim() === "/new") {
-    await pi.newSession()
-    await call("send_private_msg", { user_id: ownerQQ, message: "新对话已开。" }).catch(() => {})
-    return
-  }
   const attachments = []
   lastAttachmentIssue = ""
   let budget = MAX_TOTAL_BYTES
@@ -778,9 +835,39 @@ async function handlePrivateNow(msg) {
 
 let privateChain = Promise.resolve()
 function handlePrivate(msg) {
+  // 指令不进串行链：正卡在一轮里的时候，/show /stop 也得能用
+  const cmd = String(textOf(msg) || "").trim().toLowerCase()
+  if (cmd === "/show" || cmd === "/stop" || cmd === "/new") return handleOwnerCommand(msg, cmd)
   const run = privateChain.then(() => handlePrivateNow(msg)).catch((e) => log("handle private failed", String(e)))
   privateChain = run.catch(() => {})
   return run
+}
+
+/** 主人指令：/show 看她在干嘛，/stop 中断当前轮，/new 开新会话 */
+async function handleOwnerCommand(msg, cmd) {
+  if (Number(msg.user_id) !== Number(ownerQQ)) return
+  const reply = (text) => call("send_private_msg", { user_id: ownerQQ, message: text }).catch(() => {})
+  if (cmd === "/new") {
+    await pi.newSession()
+    await reply("新对话已开。")
+    return
+  }
+  if (cmd === "/show") {
+    await reply(pi.describeBusy())
+    return
+  }
+  if (cmd === "/stop") {
+    if (!pi.running) { await reply("没在忙，不用停。"); return }
+    log("owner stop · abort current turn")
+    pi.abortRequested = true
+    pi.write({ type: "abort" })
+    let ok = await pi.waitIdle(3000)
+    if (!ok) {
+      pi.write({ type: "abort_bash" })
+      ok = await pi.waitIdle(4000)
+    }
+    await reply(ok ? "已停下。" : "中断发出去了，还没停住；再发一次 /stop 试试。")
+  }
 }
 
 // ———————————————— 群聊（基础版） ————————————————
@@ -1014,6 +1101,76 @@ async function pollOutbox() {
   try { await pollOutboxNow() } finally { outboxBusy = false }
 }
 
+// ———————————————— 当前状态 / 看板中断 ————————————————
+const BUSY_FILE = join(ROOT, "busy-qq.json")
+function writeBusy() {
+  try {
+    const data = pi.running
+      ? {
+          running: true,
+          since: pi.turnStartedAt,
+          tool: pi.currentTool ? { name: pi.currentTool.name, args: toolArgSummary(pi.currentTool.args), at: pi.currentTool.at } : null,
+          updated: new Date().toISOString(),
+        }
+      : { running: false, updated: new Date().toISOString() }
+    writeFileSync(BUSY_FILE, JSON.stringify(data))
+  } catch { /* ignore */ }
+}
+
+const BRIDGE_SEEN = join(ROOT, ".control-seen-bridge.json")
+let bridgeSeen = (() => { try { return JSON.parse(readFileSync(BRIDGE_SEEN, "utf8")) } catch { return {} } })()
+function saveBridgeSeen() {
+  try {
+    const keys = Object.keys(bridgeSeen)
+    if (keys.length > 300) for (const k of keys.slice(0, keys.length - 200)) delete bridgeSeen[k]
+    writeFileSync(BRIDGE_SEEN, JSON.stringify(bridgeSeen))
+  } catch { /* ignore */ }
+}
+
+async function abortFromBoard(id) {
+  const ackDir = join(ROOT, "control-acks")
+  const ack = (ok, msg) => {
+    try {
+      mkdirSync(ackDir, { recursive: true, mode: 0o700 })
+      writeFileSync(join(ackDir, `${id}-qq.json`), JSON.stringify({ ok, msg }))
+    } catch { /* ignore */ }
+  }
+  if (!pi.running) { ack(true, "本来就没在忙"); return }
+  log("board abort · requested")
+  pi.abortRequested = true
+  pi.write({ type: "abort" })
+  let ok = await pi.waitIdle(3000)
+  if (!ok) {
+    pi.write({ type: "abort_bash" })
+    ok = await pi.waitIdle(4000)
+  }
+  ack(ok, ok ? "已中断当前轮" : "中断发出去了，但这一轮还没停住")
+}
+
+function pollBridgeControl() {
+  try {
+    const d = new Date()
+    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+    const file = join(ROOT, "control", `commands-${day}.jsonl`)
+    if (!existsSync(file)) return
+    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-80)
+    let changed = false
+    for (const line of lines) {
+      let c
+      try { c = JSON.parse(line) } catch { continue }
+      if (!c?.id || bridgeSeen[c.id]) continue
+      if (!c.at || Date.now() - c.at > 5 * 60_000) { bridgeSeen[c.id] = true; changed = true; continue }
+      // 只认终止类命令；其它 action 留给 pi 扩展自己处理
+      if (c.action !== "abort") continue
+      if (c.target !== "qq" && c.target !== "all") { bridgeSeen[c.id] = true; changed = true; continue }
+      bridgeSeen[c.id] = true
+      changed = true
+      void abortFromBoard(c.id)
+    }
+    if (changed) saveBridgeSeen()
+  } catch { /* ignore */ }
+}
+
 // ———————————————— 启动 ————————————————
 pi.start()
 connect()
@@ -1021,6 +1178,8 @@ setInterval(() => { if (wsReady) { state.lastSeen = new Date().toISOString(); sa
 setInterval(() => { pollOutbox().catch((e) => log("outbox failed", String(e))) }, 2000).unref?.()
 setInterval(() => { if (!wsReady && !reconnectTimer) scheduleReconnect("watchdog") }, 15000).unref?.()
 setInterval(cleanupGroupSessions, 10 * 60_000).unref?.()
+setInterval(writeBusy, 2000).unref?.()
+setInterval(pollBridgeControl, 2000).unref?.()
 log("bridge started", { ownerQQ, wsUrl, model: MODEL, afterglow: afterglowCfg })
 process.on("exit", () => {
   try { pi.child?.kill("SIGTERM") } catch { /* ignore */ }

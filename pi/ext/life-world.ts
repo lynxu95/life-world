@@ -2651,6 +2651,13 @@ export default function (pi: ExtensionAPI) {
       return
     }
     if (String(c.action || "") === "alarm") { await handleAlarmCommand(c); return }
+    if (String(c.action || "") === "abort") {
+      // 看板「中断」：掐掉当前这一轮
+      try { (lastCtx as any)?.abort?.() } catch { /* ignore */ }
+      writeAck(c.id, { ok: true, msg: "已发出中断" })
+      writeStatus()
+      return
+    }
     const wanted = String(c.model || "")
     const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
     if (!target || !lastCtx) { writeAck(c.id, { ok: false, msg: "没有可切换的上下文或模型" }); return }
