@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
-import { basename, dirname, join, resolve, sep } from "node:path"
+import { basename, dirname, extname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
@@ -459,6 +459,49 @@ function allRecords(): Record_[] {
   return order.map((id) => byId.get(id) as Record_)
 }
 
+/** 索引是否已完成过回填；完成前/索引坏了就退回读文件 */
+function indexReady(): boolean {
+  try {
+    const db = openMemIndex()
+    if (!db) return false
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'backfilled'").get()
+    return String(row?.value || "") === "1"
+  } catch { return false }
+}
+
+function mapRow(r: any): Record_ {
+  return { id: String(r.id), t: String(r.t), role: r.role === "assistant" ? "assistant" : "user", text: String(r.text) }
+}
+
+/** 走 SQLite 读；索引没准备好返回 null，由调用方退回文件扫描 */
+function dbQuery(sql: string, ...params: any[]): Record_[] | null {
+  try {
+    if (!indexReady()) return null
+    const db = openMemIndex()
+    if (!db) return null
+    return db.prepare(sql).all(...params).map(mapRow)
+  } catch { return null }
+}
+
+function allRecordsFast(): Record_[] {
+  return dbQuery("SELECT id,t,role,text FROM msg ORDER BY t ASC, rowid ASC") || allRecords()
+}
+
+function recordsSince(iso: string): Record_[] {
+  return dbQuery("SELECT id,t,role,text FROM msg WHERE t >= ? ORDER BY t ASC, rowid ASC", iso)
+    || allRecords().filter((r) => r.t >= iso)
+}
+
+function recordsInRange(from: string, to: string): Record_[] {
+  return dbQuery("SELECT id,t,role,text FROM msg WHERE day >= ? AND day <= ? ORDER BY t ASC, rowid ASC", from, to)
+    || allRecords().filter((r) => { const d = dayOf(new Date(r.t)); return d >= from && d <= to })
+}
+
+function recordsOnDay(day: string): Record_[] {
+  return dbQuery("SELECT id,t,role,text FROM msg WHERE day = ? ORDER BY t ASC, rowid ASC", day)
+    || allRecords().filter((r) => dayOf(new Date(r.t)) === day)
+}
+
 // ———————— FTS5 记忆索引 ————————
 let memDb: any = undefined
 let memBackfilled = false
@@ -776,6 +819,8 @@ function backfillMemoryIndex(): void {
     }
     if (added) log(`memory index backfilled ${added}`)
     bootstrapCooccurrence(db, all)
+    // 回填完成后才允许走 SQLite 读路径；失败/没跑完就继续读文件
+    try { db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '1')").run() } catch { /* ignore */ }
   } catch (e) { log(`backfill failed ${String(e)}`) }
   finally { releaseBackfillLock("backfill") }
 }
@@ -820,9 +865,9 @@ function diaryTitle(day: string): string {
 function memoryBlock(): string {
   const c = config()
   const h = c.world.hydrate
-  const all = allRecords()
   const cutoff = Date.now() - h.hours * 3_600_000
-  const recent = all.filter((r) => Date.parse(r.t) >= cutoff)
+  // 走索引只取窗口内的；索引没准备好时自动退回文件扫描
+  const recent = recordsSince(new Date(cutoff).toISOString())
   const picked: Record_[] = []
   let total = 0
   for (let i = recent.length - 1; i >= 0; i--) {
@@ -835,10 +880,16 @@ function memoryBlock(): string {
   if (keep >= 0 && picked.length > keep) picked.splice(0, picked.length - keep)
   const lines = picked.map((r) => `[${shortStamp(r.t)}] ${r.role === "user" ? "对方" : "我"}：${r.text}`)
   const map: string[] = []
+  const mapFrom = dayOf(new Date(Date.now() - Math.max(0, h.mapDays - 1) * 86_400_000))
+  const counts = new Map<string, number>()
+  for (const r of recordsInRange(mapFrom, dayOf())) {
+    const d = dayOf(new Date(r.t))
+    counts.set(d, (counts.get(d) || 0) + 1)
+  }
   for (let i = h.mapDays - 1; i >= 0; i--) {
     const d = new Date(); d.setDate(d.getDate() - i)
     const day = dayOf(d)
-    const n = all.filter((r) => dayOf(new Date(r.t)) === day).length
+    const n = counts.get(day) || 0
     const title = diaryTitle(day)
     if (n === 0 && !title) continue
     map.push(`- ${day} · ${n > 0 ? `${n} 句` : "没有对话"}${title ? ` · 《${title}》` : ""}`)
@@ -890,7 +941,7 @@ function snippet(text: string, q: ReturnType<typeof queryParts>, width = 80): st
 }
 async function searchChat(query: string, from: string | undefined, to: string | undefined, role: string, limit: number, context: number): Promise<string[]> {
   const q = queryParts(query)
-  const all = allRecords()
+  const all = allRecordsFast()
   const hits: Array<{ i: number; score: number; at: number }> = []
   const byId = new Map(all.map((r, i) => [r.id, i]))
   const ids = ftsChatIds(query, from, to, role, Math.max(limit * 6, 60))
@@ -1811,7 +1862,7 @@ function waitRoleAck(seq: number, rk: string, timeoutMs: number): Promise<any | 
   })
 }
 
-interface SkillInfo { name: string; description: string; tags: string[]; source: "own" | "downloaded"; dir: string; file: string }
+interface SkillInfo { name: string; description: string; tags: string[]; source: "own" | "downloaded"; dir: string; file: string; enabled: boolean; run: string }
 function mdCell(v: string): string { return String(v || "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim() }
 function readSkillMeta(file: string): { fm: Record<string, string>; text: string } {
   let text = ""
@@ -1846,6 +1897,8 @@ function scanSkills(): SkillInfo[] {
         description: fm.description || "",
         tags: String(fm.tags || "").split(/[,，]/).map((x) => x.trim()).filter(Boolean),
         source, dir, file,
+        enabled: !existsSync(join(dir, ".disabled")),
+        run: fm.run || "",
       })
     }
   }
@@ -1854,10 +1907,10 @@ function scanSkills(): SkillInfo[] {
 function skillIndexMarkdown(list: SkillInfo[] = scanSkills()): string {
   const lines = ["# 技能索引", "", "> 自制在 `own/`，下载在 `downloaded/`。下载的技能先读正文，再决定要不要用。", ""]
   if (!list.length) { lines.push("（还没有技能）"); return lines.join("\n") + "\n" }
-  lines.push("| 技能 | 说明 | 标签 | 来源 | 路径 |", "|---|---|---|---|---|")
+  lines.push("| 技能 | 说明 | 标签 | 来源 | 状态 | 路径 |", "|---|---|---|---|---|---|")
   for (const s of list) {
     const dirName = s.dir.split(/[\\/]/).pop() || ""
-    lines.push(`| ${mdCell(s.name)} | ${mdCell(s.description).slice(0, 120)} | ${mdCell(s.tags.join("、"))} | ${s.source === "own" ? "自制" : "下载"} | ${s.source}/${mdCell(dirName)}/SKILL.md |`)
+    lines.push(`| ${mdCell(s.name)} | ${mdCell(s.description).slice(0, 120)} | ${mdCell(s.tags.join("、"))} | ${s.source === "own" ? "自制" : "下载"} | ${s.enabled ? "启用" : "停用"} | ${s.source}/${mdCell(dirName)}/SKILL.md |`)
   }
   return lines.join("\n") + "\n"
 }
@@ -1870,6 +1923,57 @@ function findSkill(name: string): SkillInfo | null {
   const key = String(name || "").trim()
   if (!key || /[\\/]/.test(key)) return null
   return scanSkills().find((s) => s.name === key || s.dir.split(/[\\/]/).pop() === key) || null
+}
+
+/** 跑技能脚本：只允许技能目录内的文件；按扩展名选解释器，超时强杀，输出截断 */
+function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: number): Promise<{ code: number | null; out: string; err: string; cmd: string }> {
+  return new Promise((resolvePromise) => {
+    let realSkill = ""
+    try { realSkill = realpathSync(skill.dir) } catch {
+      resolvePromise({ code: -1, out: "", err: `技能目录不存在：${skill.dir}`, cmd: "" }); return
+    }
+    let cmd = ""
+    let cmdArgs: string[] = []
+    let label = ""
+    if (script) {
+      let target = ""
+      try { target = realpathSync(resolve(realSkill, script)) } catch {
+        resolvePromise({ code: -1, out: "", err: `找不到脚本：${script}`, cmd: script }); return
+      }
+      if (!(target === realSkill || target.startsWith(realSkill + sep))) {
+        resolvePromise({ code: -1, out: "", err: "脚本必须在技能目录内。", cmd: script }); return
+      }
+      label = target
+      const ext = extname(target).toLowerCase()
+      if ([".mjs", ".js", ".cjs"].includes(ext)) { cmd = process.execPath; cmdArgs = [target] }
+      else if (ext === ".sh") { cmd = "bash"; cmdArgs = [target] }
+      else if (ext === ".py") { cmd = process.env.LIFE_WORLD_PYTHON || "python3"; cmdArgs = [target] }
+      else { cmd = target; cmdArgs = [] }
+      cmdArgs = [...cmdArgs, ...args]
+    } else if (skill.run) {
+      // SKILL.md 的 run: 当一条 shell 命令跑，调用方传的 args 追加在后面
+      const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+      cmd = "bash"
+      cmdArgs = ["-lc", [skill.run, ...args.map(quote)].filter(Boolean).join(" ")]
+      label = cmdArgs[1]
+    } else {
+      resolvePromise({ code: -1, out: "", err: "没有指定脚本，SKILL.md 也没写 run:。", cmd: "" }); return
+    }
+    const cap = (s: string) => s.length > 20_000 ? `${s.slice(0, 20_000)}\n…（输出超 20000 字，已截断）` : s
+    const child = spawn(cmd, cmdArgs, {
+      cwd: realSkill,
+      env: { ...process.env, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_SKILL: skill.name, LIFE_WORLD_SKILL_DIR: realSkill },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let out = ""
+    let err = ""
+    let killed = false
+    const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL") } catch { /* ignore */ } }, timeoutSec * 1000)
+    child.stdout.on("data", (d) => { out += String(d) })
+    child.stderr.on("data", (d) => { err += String(d) })
+    child.on("error", (e) => { clearTimeout(timer); resolvePromise({ code: -1, out: cap(out), err: String(e), cmd: label }) })
+    child.on("close", (code) => { clearTimeout(timer); resolvePromise({ code: killed ? -2 : code, out: cap(out), err: cap(err), cmd: label }) })
+  })
 }
 
 export default function (pi: ExtensionAPI) {
@@ -2499,7 +2603,71 @@ export default function (pi: ExtensionAPI) {
         }
         const { text } = readSkillMeta(s.file)
         const caution = s.source === "downloaded" ? "这是下载的技能；先看清正文和脚本，再决定要不要执行。\n\n" : ""
-        return ok(`${caution}技能：${s.name}（${s.source === "own" ? "自制" : "下载"}）\n路径：${s.dir}\n\n${text}`)
+        const state = s.enabled ? "" : "（已停用，skill_toggle 打开后才能跑）\n"
+        return ok(`${caution}${state}技能：${s.name}（${s.source === "own" ? "自制" : "下载"}）\n路径：${s.dir}\n\n${text}`)
+      },
+    })
+    addTool(pi, {
+      name: "skill_run",
+      label: "Skill run",
+      description: "跑技能目录里的脚本。只能跑技能目录内的文件；不给 script 就用 SKILL.md 的 run:。云端模式不可用（避免脚本读到私密资料），先切回本地。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "技能名（目录名或 frontmatter 的 name）" },
+          script: { type: "string", description: "相对技能目录的脚本路径，如 scripts/run.sh；省略则用 SKILL.md 的 run:" },
+          args: { type: "array", items: { type: "string" }, description: "传给脚本的参数" },
+          timeout_seconds: { type: "number", description: "超时秒数，默认 60，最大 300" },
+        },
+        required: ["name"],
+      },
+      async execute(_id: string, params: any) {
+        const o = config().models
+        if (o.local && modelIdOf(lastCtx) !== o.local) {
+          return ok("云端模式不跑技能脚本（脚本可能读到私密资料）。要跑请先 switch_model 切回本地。")
+        }
+        const s = findSkill(String(params?.name || ""))
+        if (!s) {
+          const names = scanSkills().map((x) => x.name)
+          return ok(`没找到这个技能：${String(params?.name || "")}。现有：${names.length ? names.join("、") : "（空）"}`)
+        }
+        if (!s.enabled) return ok(`技能「${s.name}」已停用；先 skill_toggle({ name: "${s.name}", enabled: true })。`)
+        const timeout = Math.max(5, Math.min(300, Number(params?.timeout_seconds) || 60))
+        const args = Array.isArray(params?.args) ? params.args.map((x: any) => String(x)) : []
+        const r = await runSkill(s, String(params?.script || "").trim(), args, timeout)
+        const head = `技能：${s.name}（${s.source === "own" ? "自制" : "下载"}）\n命令：${r.cmd || "-"}\n退出码：${r.code}${r.code === -2 ? "（超时被杀）" : ""}`
+        const body = [
+          r.out.trim() ? `—— 输出 ——\n${r.out.trim()}` : "",
+          r.err.trim() ? `—— 错误 ——\n${r.err.trim()}` : "",
+        ].filter(Boolean).join("\n")
+        return ok([head, body].filter(Boolean).join("\n"))
+      },
+    })
+    addTool(pi, {
+      name: "skill_toggle",
+      label: "Skill toggle",
+      description: "启用 / 停用技能。停用只是加 .disabled 标记，不删文件，也不影响 skill_read。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "技能名" },
+          enabled: { type: "boolean", description: "true 启用，false 停用" },
+        },
+        required: ["name", "enabled"],
+      },
+      async execute(_id: string, params: any) {
+        const s = findSkill(String(params?.name || ""))
+        if (!s) {
+          const names = scanSkills().map((x) => x.name)
+          return ok(`没找到这个技能：${String(params?.name || "")}。现有：${names.length ? names.join("、") : "（空）"}`)
+        }
+        const marker = join(s.dir, ".disabled")
+        try {
+          if (params?.enabled === true) { if (existsSync(marker)) unlinkSync(marker) }
+          else writeFileSync(marker, `${new Date().toISOString()} disabled\n`, { mode: 0o600 })
+        } catch (e) { return ok(`改状态失败：${String(e)}`) }
+        writeSkillIndex()
+        return ok(`技能「${s.name}」已${params?.enabled === true ? "启用" : "停用"}。`)
       },
     })
   }
@@ -2556,7 +2724,7 @@ export default function (pi: ExtensionAPI) {
       const date = String(params.date || "")
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return ok("日期要写成 YYYY-MM-DD。")
       const maxChars = Math.max(500, Math.min(30_000, Number(params.max_chars) || 6000))
-      const records = allRecords().filter((r) => dayOf(new Date(r.t)) === date)
+      const records = recordsOnDay(date)
       const diary = readText(join(DIARY_DIR, `${date}.md`))
       if (!records.length && !diary) return ok(`${date} 没有对话，也没有日记。`)
       const parts = [`【${date}】对话 ${records.length} 句`]
@@ -2582,12 +2750,18 @@ export default function (pi: ExtensionAPI) {
       const from = /^\d{4}-\d{2}-\d{2}$/.test(String(params.from || "")) ? String(params.from) : dayOf(new Date(Date.now() - 6 * 86_400_000))
       const to = /^\d{4}-\d{2}-\d{2}$/.test(String(params.to || "")) ? String(params.to) : today
       if (from > to) return ok("起始日期比结束日期还晚。")
-      const records = allRecords()
+      const records = recordsInRange(from, to)
+      const byDay = new Map<string, Record_[]>()
+      for (const r of records) {
+        const d = dayOf(new Date(r.t))
+        const list = byDay.get(d)
+        if (list) list.push(r); else byDay.set(d, [r])
+      }
       const lines: string[] = []
       const cursor = new Date(`${from}T00:00:00`)
       while (dayOf(cursor) <= to) {
         const day = dayOf(cursor)
-        const dayRecords = records.filter((r) => dayOf(new Date(r.t)) === day)
+        const dayRecords = byDay.get(day) || []
         const first = dayRecords.find((r) => r.role === "user")
         const title = diaryTitle(day)
         const bits = [dayRecords.length ? `${dayRecords.length} 句` : "没有对话"]
