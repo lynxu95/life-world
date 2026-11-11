@@ -94,6 +94,14 @@ h1{font-size:20px;line-height:1.15;margin:0;font-weight:650;letter-spacing:.02em
   background:var(--panel);backdrop-filter:blur(12px)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
 .dot.off{background:var(--bad);box-shadow:0 0 10px var(--bad)}
+.update-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px;
+  padding:10px 14px;font-size:13px;border-radius:var(--radius);
+  border:1px solid color-mix(in oklab,var(--accent) 45%,var(--line));background:var(--accent-soft)}
+.update-bar[hidden]{display:none}
+.update-bar code{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;
+  padding:2px 7px;font-size:12px;user-select:all}
+.update-bar .spacer{flex:1}
+button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 
 /* —— 骨架 —— */
 .dash{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
@@ -370,9 +378,15 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
     </nav>
     <div class="top-right">
       <span class="pill" id="heartbeat"><span class="dot" id="hb-dot"></span><span id="hb-text">连接中…</span></span>
+      <button id="update-btn" class="ghost" title="检查有没有新版本">检查更新</button>
       <button id="theme" class="ghost" title="切换主题">主题</button>
     </div>
   </header>
+  <div class="update-bar" id="update-bar" hidden>
+    <span id="update-text"></span>
+    <span class="spacer"></span>
+    <code>~/.local/share/life-world/bin/lwctl update</code>
+  </div>
   <div class="tab-panel" id="tab-overview">
     <div class="dash">
       <main>
@@ -598,6 +612,29 @@ async function getJson(url, opts) {
 }
 const postJson = (url, data) => getJson(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}) })
 
+function renderUpdate(u) {
+  const bar = $("update-bar")
+  const btn = $("update-btn")
+  if (!bar || !btn) return
+  const n = u && u.ok ? Number(u.behind) || 0 : 0
+  if (n > 0) {
+    const cv = u.current && u.current.version ? `v${u.current.version}` : ""
+    const lv = u.latest && u.latest.version ? `v${u.latest.version}` : ""
+    const range = cv && lv && cv !== lv ? `（${cv} → ${lv}）` : ""
+    const first = u.commits && u.commits[0] ? ` · 最新：${esc2(u.commits[0])}` : ""
+    $("update-text").innerHTML =
+      `发现 <b>${n}</b> 个新提交${esc2(range)}${first}<br>` +
+      `<span class="muted">在终端执行右边命令更新；worlds/default、会话和配置都不会动</span>`
+    bar.hidden = false
+    btn.textContent = `有 ${n} 个更新`
+    btn.classList.add("update-on")
+  } else {
+    bar.hidden = true
+    btn.textContent = "检查更新"
+    btn.classList.remove("update-on")
+  }
+}
+
 async function loadOverview() {
   try {
     const d = await getJson("/api/overview")
@@ -633,6 +670,7 @@ async function loadOverview() {
       multimodal: (d.multimodal && d.multimodal.model) || "",
       group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
+    renderUpdate(d.update)
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
     renderNow(d)
@@ -1908,6 +1946,14 @@ function setTab(name, remember = true) {
 }
 document.querySelectorAll(".tab-btn").forEach((btn) => { btn.onclick = () => setTab(btn.dataset.tab) })
 try { setTab(localStorage.getItem("lw-tab") || "overview", false) } catch { setTab("overview", false) }
+
+const updateBtn = $("update-btn")
+if (updateBtn) updateBtn.onclick = async () => {
+  updateBtn.disabled = true
+  updateBtn.textContent = "检查中…"
+  try { await postJson("/api/update-check") } catch { /* ignore */ }
+  setTimeout(() => { updateBtn.disabled = false; loadOverview() }, 4000)
+}
 
 loadOverview(); loadDates(); loadLog(); loadBrain(); loadDay(dayOfLocal())
 loadHealth(); loadPlan(); loadSubs(); loadActivity(); loadEvents(); loadNowImps(); bindQuick()

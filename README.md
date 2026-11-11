@@ -123,9 +123,52 @@ lwctl board                              # Web 看板
 
 世界数据保留在 `~/.local/share/life-world/`。
 
-## 升级 / 迁移
+## 检查更新 / 升级
 
-日常更新用 `lwctl update`：只做 `git fetch` + `merge --ff-only` + `install.sh`，`life-world.json`、`worlds/default`、`pi-sessions` 都不动；默认重启看板 / qq / home，加 `--no-restart` 只更新文件。仓库有未提交改动时会拒绝，先 commit / stash。
+### 先看有没有新版本
+
+```bash
+~/.local/share/life-world/bin/lwctl check-update
+```
+
+```
+当前 v1.0.0 · a189395（pi-agent-adv）
+远端 v1.1.0 · 3f2a1c9
+
+落后 2 个提交：
+  + 3f2a1c9 feat: 看板加更新提示
+  + 01db7fb fix: 桥接重启丢消息
+
+更新：~/.local/share/life-world/bin/lwctl update
+```
+
+这个命令**只检查，不改任何文件**：`git fetch` 之后比对本地和远端，列出落后的提交。
+退出码：`0` 有更新 / `1` 已是最新 / `2` 检查失败（比如没网）。
+`--json` 输出机器可读结果，`--quiet` 只给退出码，方便挂进自己的定时任务。
+
+看板也会自动查：启动 30 秒后查一次，之后每 6 小时一次，有更新会在页面顶部亮一条提示，
+点右上角「检查更新」可以立刻再查。
+
+### 更新
+
+```bash
+~/.local/share/life-world/bin/lwctl update
+```
+
+只做 `git fetch` + `merge --ff-only` + `install.sh`，`life-world.json`、`worlds/default`、`pi-sessions` 都不动；默认重启看板 / qq / home，加 `--no-restart` 只更新文件。仓库有未提交改动时会拒绝，先 commit / stash。
+
+更新失败时命令会打印旧 `HEAD`，按提示回滚即可：
+
+```bash
+git -C <仓库路径> reset --hard <旧HEAD>
+~/.local/share/life-world/bin/lwctl update --no-restart
+```
+
+每个版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 迁移（旧版 → 新版）
+
+日常不需要，只有从一个已归档分支换到新分支时才用。
 
 从 `pi-agent-v2`（已归档）升到 `pi-agent-adv`（数据目录不变）：
 

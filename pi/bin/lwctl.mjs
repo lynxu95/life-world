@@ -229,6 +229,7 @@ async function interactive() {
       console.log("  4. 日志")
       console.log("  5. 用量")
       console.log("  6. 重启常驻窗口")
+      console.log("  7. 检查更新")
       console.log("  0. 退出    回车. 刷新")
       const a = (await rl.question("选择 > ")).trim()
       if (a === "0" || a.toLowerCase() === "q") break
@@ -239,6 +240,7 @@ async function interactive() {
       else if (a === "4") await menuLogs(rl)
       else if (a === "5") await menuUsage(rl)
       else if (a === "6") await menuRestart(rl)
+      else if (a === "7") { cmdCheckUpdate([]); await rl.question("回车返回 > ") }
       else console.log("无效选项。")
     }
   } finally {
@@ -353,6 +355,107 @@ function fileHash(file) {
 function runGit(repo, args) {
   return spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" })
 }
+function readVersion(repo, ref) {
+  if (ref) {
+    const r = runGit(repo, ["show", `${ref}:VERSION`])
+    return r.status === 0 ? String(r.stdout || "").trim() : ""
+  }
+  try { return readFileSync(join(repo, "VERSION"), "utf8").trim() } catch { return "" }
+}
+function currentBranch(repo) {
+  const cur = String(runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout || "").trim()
+  return cur && cur !== "HEAD" ? cur : "pi-agent-adv"
+}
+
+// 只检查、不改任何文件：fetch + 比对本地与远端
+function cmdCheckUpdate(args = []) {
+  const json = args.includes("--json")
+  const quiet = args.includes("--quiet")
+  const bi = args.indexOf("--branch")
+  const branchArg = bi >= 0 ? String(args[bi + 1] || "").trim() : ""
+  const fail = (msg) => {
+    if (json) console.log(JSON.stringify({ ok: false, error: msg }))
+    else if (!quiet) console.error(msg)
+    return 2
+  }
+  const repo = repoPath()
+  if (!repo) return fail("找不到仓库路径（$ROOT/repo-path 和 $ROOT/ext 软链都不在）。请重新跑一次 pi/install.sh。")
+  const branch = branchArg || currentBranch(repo)
+  const target = `origin/${branch}`
+  const local = String(runGit(repo, ["rev-parse", "HEAD"]).stdout || "").trim()
+  const fetch = runGit(repo, ["fetch", "origin"])
+  if (fetch.status !== 0) return fail(`git fetch 失败（网络不通？）：${String(fetch.stderr || "").trim()}`)
+  if (runGit(repo, ["rev-parse", "--verify", target]).status !== 0) return fail(`远端没有分支 ${branch}。`)
+  const remote = String(runGit(repo, ["rev-parse", target]).stdout || "").trim()
+
+  let behind = 0
+  let ahead = 0
+  const counts = String(runGit(repo, ["rev-list", "--left-right", "--count", `HEAD...${target}`]).stdout || "").trim()
+  if (counts) {
+    const [a, b] = counts.split(/\s+/).map(Number)
+    ahead = Number.isFinite(a) ? a : 0
+    behind = Number.isFinite(b) ? b : 0
+  }
+  const log = String(runGit(repo, ["log", "--oneline", `HEAD..${target}`]).stdout || "").trim()
+  const commits = log ? log.split("\n").filter(Boolean) : []
+  const dirty = String(runGit(repo, ["status", "--porcelain", "--untracked-files=no"]).stdout || "").trim()
+  const currentVersion = readVersion(repo)
+  const latestVersion = readVersion(repo, target) || currentVersion
+
+  const report = {
+    ok: true,
+    repo,
+    branch,
+    current: { version: currentVersion, commit: local.slice(0, 7) },
+    latest: { version: latestVersion, commit: remote.slice(0, 7) },
+    behind,
+    ahead,
+    commits,
+    dirty: dirty ? dirty.split("\n").filter(Boolean) : [],
+  }
+
+  // 顺带落一份缓存给看板读；检查失败不影响结果
+  try {
+    writeFileSync(join(ROOT, "update-check.json"), JSON.stringify({ ...report, checked: new Date().toISOString() }, null, 2))
+  } catch { /* ignore */ }
+
+  if (json) {
+    console.log(JSON.stringify(report, null, 2))
+    return behind > 0 ? 0 : 1
+  }
+  if (!quiet) {
+    const c = `${currentVersion ? "v" + currentVersion + " · " : ""}${report.current.commit}`
+    const l = `${latestVersion ? "v" + latestVersion + " · " : ""}${report.latest.commit}`
+    console.log(`当前 ${c}（${branch}）`)
+    if (behind > 0) {
+      console.log(`远端 ${l}`)
+      console.log(`\n落后 ${behind} 个提交${ahead > 0 ? `（本地另有 ${ahead} 个未推送提交）` : ""}：`)
+      commits.slice(0, 20).forEach((line) => console.log(`  + ${line}`))
+      if (commits.length > 20) console.log(`  ……还有 ${commits.length - 20} 条`)
+    } else {
+      console.log("✓ 已经是最新版本。")
+    }
+    if (report.dirty.length) {
+      console.log("\n⚠ 仓库有未提交改动，更新前先 commit / stash：")
+      report.dirty.slice(0, 10).forEach((line) => console.log(`  ${line}`))
+    }
+    if (behind > 0) {
+      console.log(`\n更新：${ROOT}/bin/lwctl update`)
+      console.log("（更新只拉代码、重装脚本与提示词；worlds/default、pi-sessions、life-world.json 都不动）")
+    }
+  }
+  return behind > 0 ? 0 : 1
+}
+
+function cmdVersion() {
+  const repo = repoPath()
+  if (!repo) { console.log("life-world（找不到仓库，无法读版本）"); return }
+  const v = readVersion(repo)
+  const commit = String(runGit(repo, ["rev-parse", "--short", "HEAD"]).stdout || "").trim()
+  const branch = currentBranch(repo)
+  console.log(`life-world ${v ? "v" + v : "(无 VERSION)"} · ${commit} (${branch})`)
+}
+
 function cmdUpdate(args = []) {
   const noRestart = args.includes("--no-restart")
   const project = args.includes("--project")
@@ -602,6 +705,10 @@ if (!cmd && stdin.isTTY) {
   process.exit(cmdRestart(arg[0] || "all") ? 0 : 1)
 } else if (cmd === "update" || cmd === "upgrade") {
   process.exit(cmdUpdate(arg) ? 0 : 1)
+} else if (cmd === "check-update" || cmd === "check") {
+  process.exit(cmdCheckUpdate(arg))
+} else if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+  cmdVersion()
 } else {
   console.log(`lwctl · life-world 会话工具
 
@@ -614,8 +721,12 @@ if (!cmd && stdin.isTTY) {
   lwctl backups                      看最近快照
   lwctl tail [qq|home|debug] [行数]  看日志
   lwctl restart [qq|home|all]        重启常驻窗口
+  lwctl check-update [--json] [--quiet] [--branch <分支>]
+                                      只检查有没有新版本，不改任何文件
+                                      --json 输出机器可读结果；--quiet 只给退出码（0 有更新 / 1 最新 / 2 出错）
   lwctl update [--no-restart] [--project] [--branch <分支>]
                                       拉代码 + 重装脚本/提示词；数据/配置不动，默认重启
+  lwctl version                      打印当前版本与提交
   lwctl usage [天数]                 用量统计（token / 云端本地 / 切换）
   lwctl board [start|stop|restart|status]  Web 看板
   lwctl board set <地址> <端口>      保存监听设置并重启（如 0.0.0.0 8099）

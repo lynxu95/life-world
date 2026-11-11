@@ -36,6 +36,25 @@ const HOST = String(process.env.LW_BOARD_HOST || boardCfg.host || "127.0.0.1")
 const FEATURES = { impressions: true }
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+
+// —— 检查插件更新（只读；结果由 lwctl check-update 写进 update-check.json）——
+const UPDATE_CHECK_FILE = join(ROOT, "update-check.json")
+const UPDATE_EVERY_MS = 6 * 60 * 60 * 1000
+let updateBusy = false
+// 安装后叫 lwctl；直接在仓库里跑时是 lwctl.mjs
+const LWCTL = existsSync(join(HERE, "lwctl")) ? join(HERE, "lwctl") : join(HERE, "lwctl.mjs")
+function runUpdateCheck() {
+  if (updateBusy) return false
+  updateBusy = true
+  const child = spawn(process.execPath, [LWCTL, "check-update", "--json"], {
+    env: { ...process.env, LIFE_WORLD_ROOT: ROOT },
+    stdio: "ignore",
+  })
+  const timer = setTimeout(() => { try { child.kill() } catch { /* ignore */ } updateBusy = false }, 90_000)
+  child.on("close", () => { clearTimeout(timer); updateBusy = false })
+  child.on("error", () => { clearTimeout(timer); updateBusy = false })
+  return true
+}
 function writeAtomic(file, text) {
   const tmp = `${file}.${process.pid}.tmp`
   writeFileSync(tmp, text, { mode: 0o600 })
@@ -486,6 +505,7 @@ const server = http.createServer(async (req, res) => {
         })(),
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
+        update: readJson(UPDATE_CHECK_FILE, null),
         schedule: scheduleList(),
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
@@ -713,6 +733,14 @@ const server = http.createServer(async (req, res) => {
       })
       return json(res, 200, { ok, msg: ok ? "快照完成" : "快照失败" })
     }
+    if (req.method === "POST" && url.pathname === "/api/update-check") {
+      const started = runUpdateCheck()
+      return json(res, 200, {
+        ok: started,
+        msg: started ? "正在检查更新，稍等几秒刷新" : "上一次检查还没结束",
+        update: readJson(UPDATE_CHECK_FILE, null),
+      })
+    }
     json(res, 404, { error: "not found" })
   } catch (e) {
     if (res.headersSent) { try { res.end() } catch { /* ignore */ } return }
@@ -724,4 +752,7 @@ process.on("unhandledRejection", (e) => console.error("[lwboard] unhandled", e))
 server.on("error", (e) => { console.error(`[lwboard] server error: ${String(e)}`) })
 server.listen(PORT, HOST, () => {
   console.log(`lwboard → http://${HOST}:${PORT}`)
+  // 启动 30 秒后查一次，之后每 6 小时查一次；结果给页面顶部的更新提示
+  setTimeout(runUpdateCheck, 30_000).unref()
+  setInterval(runUpdateCheck, UPDATE_EVERY_MS).unref()
 })
