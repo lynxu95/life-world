@@ -37,7 +37,8 @@
       "maxPer10Min": 0,
       "bannedWords": [],
       "sessionIdleMinutes": 120,
-      "maxFileBytes": 104857600
+      "maxFileBytes": 104857600,
+      "maxBatchBytes": 209715200
     }
   },
   "subagent": {

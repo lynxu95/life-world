@@ -226,6 +226,8 @@ const MAX_FILE_BYTES = Infinity
 const MAX_TOTAL_BYTES = Infinity
 /** 群文件是外部输入，默认 100MB 上限；私聊工作文件仍不设上限 */
 const DEFAULT_GROUP_FILE_BYTES = 100 * 1024 * 1024
+/** 群里一次触发最多下载 200MB（同一条消息可带多个文件） */
+const DEFAULT_GROUP_BATCH_BYTES = 200 * 1024 * 1024
 /** 图片在缩放前的原始大小上限（再大就不折腾了） */
 const HARD_CAP_BYTES = 40 * 1024 * 1024
 /** 最近一次附件失败原因，用来给出准确提示 */
@@ -718,7 +720,10 @@ async function handleGroup(msg) {
   groupBuffers.set(key, buf)
   if (buf.timer) clearTimeout(buf.timer)
   buf.timer = setTimeout(async () => {
-    const batch = (groupBuffers.get(key) || []).splice(0)
+    const current = groupBuffers.get(key) || []
+    const batch = current.splice(0)
+    // 清掉定时器标记，否则闲置回收会一直以为“还有防抖中的消息”
+    current.timer = null
     if (!batch.length) return
     const st = groupState(key)
     const now = Date.now()
@@ -733,8 +738,9 @@ async function handleGroup(msg) {
     if (judge !== "REPLY") { log("judge SKIP"); return }
     const images = []
     const files = []
-    let budget = MAX_TOTAL_BYTES
     const groupFileCap = Number(groupCfg().maxFileBytes) || DEFAULT_GROUP_FILE_BYTES
+    const groupBatchCap = Number(groupCfg().maxBatchBytes) || DEFAULT_GROUP_BATCH_BYTES
+    let budget = Math.min(MAX_TOTAL_BYTES, groupBatchCap)
     for (const m of batch) {
       for (const item of m.media || []) {
         const isImage = item.type === "image"
@@ -787,7 +793,8 @@ function cleanupGroupSessions() {
   for (const [key, s] of groupSessions) {
     if (s.running) continue // 正在生成就别动
     const pending = groupBuffers.get(key)
-    if (pending?.timer || pending?.length) continue // 3 秒防抖窗口里还有消息
+    // timer 在回调开头会置空，所以这里同时看 timer 和积压都不会误判
+    if (pending?.timer || pending?.length) continue
     if (now - (s.lastUsed || 0) < idleMs) continue
     s.destroy()
     groupSessions.delete(key)

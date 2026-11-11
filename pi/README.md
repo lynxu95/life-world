@@ -273,7 +273,7 @@ pi -p --model deepseek-flash --no-skills --no-prompt-templates \
 
 > tmux 新窗口不读 `.zshrc`：`pi` 若在 `~/.local/bin`，启动命令里补 `PATH=$HOME/.local/bin:$PATH`，或显式设 `PI_BIN=$HOME/.local/bin/pi`。
 
-附件：图片超过 8MB 会自动缩到 1568px（需要 `imagemagick` 或 `ffmpeg`）；工作文件不设大小上限，流式落盘到 `worlds/default/tmp/` 后把路径交给模型。
+附件：图片超过 8MB 会自动缩到 1568px（需要 `imagemagick` 或 `ffmpeg`）；私聊工作文件不设大小上限，流式落盘到 `worlds/default/tmp/` 后把路径交给模型；群文件默认单文件 100MB、单批 200MB（`bridge.group.maxFileBytes` / `maxBatchBytes`）。
 
 ### SnowLuma / NapCat 只监听 127.0.0.1 时
 

@@ -473,6 +473,17 @@ function indexReady(): boolean {
 
 /** 索引写失败：立刻让本进程退回文件读，并在 60 秒后重试回填 */
 let staleRetry: any = null
+function scheduleIndexRetry(): void {
+  if (staleRetry) return
+  staleRetry = setTimeout(() => {
+    staleRetry = null
+    memBackfilled = false
+    backfillMemoryIndex()
+    // 这次还没修好就继续排，别让本进程永远停在文件读
+    if (indexStale) scheduleIndexRetry()
+  }, 60_000)
+  ;(staleRetry as any).unref?.()
+}
 function markIndexStale(): void {
   indexStale = true
   memBackfilled = false
@@ -480,9 +491,7 @@ function markIndexStale(): void {
     const db = openMemIndex()
     db?.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '0')").run()
   } catch { /* 库还锁着就算了，本进程已经退回文件读 */ }
-  if (staleRetry) return
-  staleRetry = setTimeout(() => { staleRetry = null; backfillMemoryIndex() }, 60_000)
-  ;(staleRetry as any).unref?.()
+  scheduleIndexRetry()
 }
 
 function mapRow(r: any): Record_ {
@@ -851,7 +860,10 @@ function backfillMemoryIndex(): void {
     // 回填完成后才允许走 SQLite 读路径；失败/没跑完就继续读文件
     try { db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '1')").run() } catch { /* ignore */ }
     indexStale = false
-  } catch (e) { log(`backfill failed ${String(e)}`) }
+  } catch (e) {
+    log(`backfill failed ${String(e)}`)
+    if (indexStale) { memBackfilled = false; scheduleIndexRetry() }
+  }
   finally { releaseBackfillLock("backfill") }
 }
 
@@ -1955,6 +1967,19 @@ function findSkill(name: string): SkillInfo | null {
   return scanSkills().find((s) => s.name === key || s.dir.split(/[\\/]/).pop() === key) || null
 }
 
+/** 技能子进程：pi 退出时把还活着的进程组一起带走（detached 后不在原进程组） */
+const liveSkillChildren = new Set<number>()
+let skillExitHook = false
+function ensureSkillExitHook(): void {
+  if (skillExitHook) return
+  skillExitHook = true
+  process.on("exit", () => {
+    for (const pid of liveSkillChildren) {
+      try { process.kill(-pid, "SIGKILL") } catch { /* ignore */ }
+    }
+  })
+}
+
 /** 跑技能脚本：只允许技能目录内的文件；按扩展名选解释器，超时强杀，输出截断 */
 function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: number): Promise<{ code: number | null; out: string; err: string; cmd: string }> {
   return new Promise((resolvePromise) => {
@@ -1998,6 +2023,8 @@ function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: 
       // 独立进程组：超时能把 bash 拉起的孙进程一起杀掉
       detached: true,
     })
+    ensureSkillExitHook()
+    if (child.pid) liveSkillChildren.add(child.pid)
     let out = ""
     let err = ""
     let outTrunc = false
@@ -2019,6 +2046,7 @@ function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: 
       settled = true
       if (timer) clearTimeout(timer)
       if (killTimer) clearTimeout(killTimer)
+      if (child.pid) liveSkillChildren.delete(child.pid)
       resolvePromise({ code, out: finish(out, outTrunc), err: finish(err, errTrunc), cmd: label })
     }
     timer = setTimeout(() => {
