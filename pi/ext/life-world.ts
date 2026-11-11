@@ -330,9 +330,12 @@ interface Alarm {
   /** main = 活动；sub = 子闹钟；不写 = 旧版一次性闹钟 */
   kind?: "main" | "sub"
   parentId?: string
-  status?: "pending" | "active" | "closed"
+  /** main：pending → active → closed；sub：pending → fired（留档，24 小时后清理） */
+  status?: "pending" | "active" | "closed" | "fired"
   paused?: boolean
   activatedAt?: string
+  /** 子闹钟实际触发的时间 */
+  firedAt?: string
   /** 忙时跳过的子闹钟，下次这个活动醒来时提醒 AI review */
   skipped?: Array<{ at: string; scheduled: string; note: string }>
 }
@@ -1353,7 +1356,7 @@ function parseWhen(raw: string): number {
 /** 子闹钟密度：同一活动任意 30 分钟窗口最多 3 条 */
 function checkSubDensity(existing: Alarm[], parentId: string, times: number[]): string {
   const list = existing
-    .filter((a) => a.kind === "sub" && a.parentId === parentId && a.status !== "closed")
+    .filter((a) => a.kind === "sub" && a.parentId === parentId && a.status !== "closed" && a.status !== "fired")
     .map((a) => Date.parse(a.at))
     .filter((t) => Number.isFinite(t))
   const all = [...list, ...times].sort((a, b) => a - b)
@@ -1461,6 +1464,16 @@ async function tick(): Promise<void> {
       pruneControlQueue(3)
       writeWorld({ ...readWorld(), lastControlPrune: today })
     }
+    // 已执行的子闹钟留档 24 小时，过期清掉（活动关闭时会连子闹钟一起删，不用等这里）
+    withWorldLock(() => {
+      const f = readWorld()
+      const list = f.alarms || []
+      const cutoff = Date.now() - 24 * 3600_000
+      const kept = list.filter((x) => !(x.kind === "sub" && x.status === "fired" && Date.parse(x.firedAt || x.at) < cutoff))
+      if (kept.length === list.length) return false
+      f.alarms = kept
+      return writeWorld(f)
+    })
     // 记忆强度与联想边各自每天一次；边衰减不再依赖 decay 开关
     if (!state.lastDecay || dayOf(new Date(state.lastDecay)) !== today) decayStrengths()
     if (!state.lastEdgeDecay || dayOf(new Date(state.lastEdgeDecay)) !== today) decayEdges()
@@ -1522,7 +1535,7 @@ async function tick(): Promise<void> {
     }
     // 子闹钟：忙就跳过并记录，闲才唤醒
     if (!woke) {
-      for (const a of alarmsNow.filter((x) => x.kind === "sub" && x.status !== "closed")) {
+      for (const a of alarmsNow.filter((x) => x.kind === "sub" && x.status !== "closed" && x.status !== "fired")) {
         const parent = (readWorld().alarms || []).find((x) => x.id === a.parentId && x.kind === "main" && x.status !== "closed")
         if (!parent) {
           withWorldLock(() => {
@@ -1552,7 +1565,13 @@ async function tick(): Promise<void> {
           const f = readWorld()
           const p = (f.alarms || []).find((x) => x.id === parent.id)
           if (p) delete p.skipped
-          f.alarms = (f.alarms || []).filter((x) => x.id !== a.id)
+          // 触发过的子闹钟不删，标成 fired 留在活动下面，看板能看到她几点醒过；
+          // 24 小时后由 tick 统一清理
+          const sub = (f.alarms || []).find((x) => x.id === a.id)
+          if (sub) {
+            sub.status = "fired"
+            sub.firedAt = new Date().toISOString()
+          }
           f.lastWake = today
           return writeWorld(f)
         })
@@ -3041,7 +3060,7 @@ export default function (pi: ExtensionAPI) {
       for (const m of list.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
         lines.push(`- 活动《${m.note}》（${m.status === "active" ? "进行中" : "待开始"}；${shortStamp(m.at)}；id ${m.id}）${m.paused ? "【已暂停】" : ""}`)
         const subs = list.filter((a) => a.kind === "sub" && a.parentId === m.id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-        for (const s of subs) lines.push(`  - 子闹钟 ${shortStamp(s.at)}（${rel(s.at)}）${s.note}${s.paused ? "【暂停】" : ""}`)
+        for (const s of subs) lines.push(`  - 子闹钟 ${shortStamp(s.at)}（${s.status === "fired" ? "已执行" : rel(s.at)}）${s.note}${s.paused ? "【暂停】" : ""}`)
         if (m.skipped?.length) lines.push(`  - 跳过：${m.skipped.map((s) => `${shortStamp(s.scheduled)} ${s.note}`).join("、")}`)
         if (m.status === "active" && !subs.length) lines.push(`  - （没有子闹钟；要拆步骤就 plan_next({ parent: "${m.id}", ... })）`)
       }

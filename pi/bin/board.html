@@ -264,6 +264,8 @@ input[type=checkbox]{accent-color:var(--accent)}
 .sub-item{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted);padding:4px 0;border-top:1px dashed var(--line)}
 .sub-item .t{font-family:var(--mono);color:var(--fg);white-space:nowrap}
 .sub-item .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-item.fired{opacity:.55}
+.sub-item.fired .t,.sub-item.fired .n{color:var(--faint);text-decoration:line-through;text-decoration-thickness:1px}
 .sub-item button,.sub-actions button{font-size:11px;padding:2px 7px;border-radius:6px;border:1px solid var(--line-strong);background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap}
 .sub-item button:hover,.sub-actions button:hover{border-color:var(--accent);color:var(--accent)}
 .sub-actions{display:flex;gap:6px;margin-top:6px}
@@ -751,7 +753,9 @@ function updateSummary() {
   $("ss-next").textContent = nextT
     ? `${pad2(new Date(nextT).getHours())}:${pad2(new Date(nextT).getMinutes())} · ${fmtDuration(nextT - Date.now())}`
     : "接下来没有闹钟"
-  $("ss-count").textContent = `${LAST_ALARMS.filter((a) => a.kind === "sub").length} 条`
+  const subsAll = LAST_ALARMS.filter((a) => a.kind === "sub")
+  const subsLive = subsAll.filter((a) => a.status !== "fired").length
+  $("ss-count").textContent = `${subsLive} 条${subsAll.length > subsLive ? ` · ${subsAll.length - subsLive} 已执行` : ""}`
 }
 function renderSchedule(list) {
   const el = $("schedule"), cnt = $("schedule-count")
@@ -941,7 +945,9 @@ function renderSubs(list) {
   const mains = all.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   const legacy = all.filter((a) => !a.kind).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   const subsOf = (id) => all.filter((a) => a.kind === "sub" && a.parentId === id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-  $("subs-note").textContent = `${mains.length} 个活动 · ${all.filter((a) => a.kind === "sub").length} 条子闹钟`
+  const subsAll = all.filter((a) => a.kind === "sub")
+  const subsLive = subsAll.filter((a) => a.status !== "fired").length
+  $("subs-note").textContent = `${mains.length} 个活动 · ${subsLive} 条待触发${subsAll.length > subsLive ? ` · ${subsAll.length - subsLive} 条已执行` : ""}`
   updateSummary()
   if (!mains.length && !legacy.length) {
     el.innerHTML = '<div class="sub-empty">还没有活动。AI 用 plan_next 建活动，再用 parent 排子闹钟。</div>'
@@ -949,14 +955,18 @@ function renderSubs(list) {
   }
   const cards = mains.map((m) => {
     const subs = subsOf(m.id)
+    const live = subs.filter((s) => s.status !== "fired")
+    const fired = subs.filter((s) => s.status === "fired")
     const state = m.paused ? "已暂停" : (m.status === "active" ? "进行中" : "待开始")
-    const items = subs.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
+    const items = live.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
+    const firedItems = fired.map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>已执行</span></div>`).join("")
     const skip = (m.skipped || []).length
       ? `<div class="sub-skip">跳过：${m.skipped.map((s) => `${fmtClock(s.scheduled)} ${esc2(s.note)}`).join("、")}</div>`
       : ""
     return `<div class="sub-card"><div class="sub-head"><b>《${esc2(m.note)}》</b><span class="sub-state">${state}</span></div>
-      <div class="sub-meta">${fmtClock(m.at)} 开始 · ${subs.length} 条子闹钟 · id ${m.id}</div>
-      ${items || '<div class="sub-empty">没有子闹钟</div>'}
+      <div class="sub-meta">${fmtClock(m.at)} 开始 · ${live.length} 条待触发${fired.length ? ` · ${fired.length} 条已执行` : ""} · id ${m.id}</div>
+      ${items || (fired.length ? "" : '<div class="sub-empty">没有子闹钟</div>')}
+      ${firedItems}
       <div class="sub-actions"><button data-op="${m.paused ? "resume" : "pause"}" data-id="${m.id}">${m.paused ? "继续活动" : "暂停活动"}</button><button data-op="close" data-id="${m.id}">关闭活动</button></div>
       ${skip}</div>`
   }).join("")
