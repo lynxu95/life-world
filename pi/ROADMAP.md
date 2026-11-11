@@ -1,6 +1,6 @@
 # pi-agent-adv · 路线图
 
-> 本分支是 `pi-agent-adv`（第 3 条 pi 分支，实验版）。`pi-agent` 是轻量稳定版；`pi-agent-v2` 是保留本地向量检索（jina）的多功能版。
+> 本分支是 `pi-agent-adv`，**当前唯一维护的 pi 版**。`pi-agent`（轻量）与 `pi-agent-v2`（保留向量检索）已归档，对应 tag 保留。
 
 ## 进行中
 

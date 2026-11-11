@@ -1,7 +1,7 @@
 # life-world · pi 版
 
 > 本目录是 life-world 的 **pi 1.5.0 移植版**，独立于仓库根目录的 opencode 插件。
-> 分支：`pi-agent-adv`（第 3 条 pi 分支；`pi-agent` 是轻量版，`pi-agent-v2` 是增强版，`main` 仍是 opencode 版）。
+> 分支：`pi-agent-adv` 是**当前唯一维护的 pi 版**；`pi-agent` / `pi-agent-v2` 已归档（对应 tag 保留），`main` 是 opencode 版存档。
 >
 > 评估与决策见 vault：`AI/开发中项目/life-world 迁 pi · 扩展点评估.md`；
 > 实施记录见 `AI/开发中项目/piagent 迁移 worklog.md`。
@@ -89,7 +89,7 @@ pi          # TUI，已经带 life-world
 ## 记忆检索与遗忘曲线
 
 - **FTS5**：归档时写入 `memory-index.db`（trigram，WAL + busy_timeout），`memory_search` 优先查索引：≥3 字 `MATCH/BM25`，2 字 `LIKE`；历史回填只在 home 进程做，避免多进程抢锁。
-- **不做向量检索**：本分支只走 FTS5 + ACT-R/Hebbian，不装 `transformers.js`、不建 `vec` 表；需要 jina 语义相似检索请用 `pi-agent-v2` 分支。
+- **不做向量检索**：本分支只走 FTS5 + ACT-R/Hebbian，不装 `transformers.js`、不建 `vec` 表；需要 jina 语义相似检索请参考已归档的 `pi-agent-v2` 分支。
 - **遗忘曲线**：每条记忆带强度（初始 1.0）。被检索命中 +`hitBoost`（上限 `maxStrength`）；每天按 `halfLifeDays` 衰减（下限 `minStrength`），只降权不删除。排序权重 = `0.7 + 0.3*min(1, strength/2)`。
 
 ```json

@@ -1,7 +1,7 @@
-# life-world · pi agent adv
+# life-world · pi agent
 
-> **这是 `pi-agent-adv` 分支（第 3 条 pi 分支）的 README。**
-> 分支顺序：`main` = opencode 插件版；`pi-agent` = 轻量稳定版；`pi-agent-v2` = 增强版（记忆索引 / 语义检索 / 遗忘曲线 / 模型热切换 / 机密抽屉 / 主动关怀 / 看板 / 快照与守护）；`pi-agent-adv` = 在 v2 上继续做实验（ACT-R 激活、Hebbian 联想、印象整理、3D 记忆星图）。`pi-agent-adv` 暂未合回 v2。
+> **当前维护分支：`pi-agent-adv`（唯一在维护的 pi 版）。**
+> `pi-agent` / `pi-agent-v2` 已归档，归档 tag 保留提交：`archive/pi-agent-20261111`、`archive/pi-agent-v2-20261111`；`main` 是 opencode 插件版存档。分支状态见[分支状态](#分支状态)。
 
 给 [pi coding agent](https://github.com/earendil-works/pi) 里的陪伴角色一个会记得、会生活的世界。所有能力都跑在**本地文件 + 本地进程**上，聊天默认用本地模型，需要时借在线模型的算力。
 
@@ -14,6 +14,7 @@
 - [记忆系统](#记忆系统)
 - [本地 / 在线模型](#本地--在线模型)
 - [技能库](#技能库)
+- [辅助感知（多模态）](#辅助感知多模态)
 - [隐私：机密抽屉](#隐私机密抽屉)
 - [主动关怀](#主动关怀)
 - [QQ 桥接](#qq-桥接)
@@ -22,7 +23,7 @@
 - [lwctl 运维命令](#lwctl-运维命令)
 - [Web 看板](#web-看板)
 - [数据位置](#数据位置)
-- [和其它三个分支的区别](#和其它三个分支的区别)
+- [分支状态](#分支状态)
 - [已知限制](#已知限制)
 
 ---
@@ -41,8 +42,12 @@
 | 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换 |
 | 机密抽屉 | 切云端前收起前文、云端禁读，切回本地恢复 |
 | 主动关怀 | 随机想起、安静时段、早晨天气 |
-| QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小 |
-| 定时 | 闹钟可指定到点用哪个模型；每日回顾、早上兜底 |
+| QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小；群会话闲置回收 |
+| 定时 | 活动到点唤醒；子闹钟短间隔自我唤醒，忙时跳过，主活动关闭连带关闭 |
+| 辅助感知 | `perceive` 看视频/听音频/看图；主模型能看的图片不走辅助；适配 Qwen-Omni |
+| 控制队列 | `lwctl` / 看板命令追加队列、按 id 回执；并发/同毫秒不再丢命令 |
+| 超限自动换会话 | 上下文超限不切模型：QQ 自动新会话+重发，home/CLI 自动新会话 |
+| 技能库 | `own` / `downloaded` + `INDEX.md`；`skill_list/read/run/toggle` |
 | Web 看板 | 会话/模型/AI 日程/用量/记忆星图/日记/日志/快照，一页看完 |
 | 运维 | `lwctl` 状态、切换、日志、重启、快照、用量；桥接守护、tmp 清理、日志轮转 |
 
@@ -116,7 +121,7 @@ lwctl board                              # Web 看板
 
 ## 升级 / 迁移
 
-从 `pi-agent-v2` 升到 `pi-agent-adv`（数据目录不变）：
+从 `pi-agent-v2`（已归档）升到 `pi-agent-adv`（数据目录不变）：
 
 ```bash
 git fetch origin && git checkout pi-agent-adv && git pull
@@ -182,7 +187,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 **真相永远是文件**：`worlds/default/conversations/*.jsonl`、`diary/*.md`、`plan/*.md`、`room/*.md`、`identity/*.md`。SQLite 只是索引，删了能重建。
 
 - **FTS5**：`memory-index.db`（trigram 分词，WAL + busy_timeout），归档时增量写入；历史由单个进程加锁回填（500 条一事务）。
-- **检索路线**：FTS5 字面命中 → ACT-R 激活 + Hebbian 联想加权；本分支**不做向量检索**，需要“语义相近”的检索请用 `pi-agent-v2`。
+- **检索路线**：FTS5 字面命中 → ACT-R 激活 + Hebbian 联想加权；本分支**不做向量检索**，需要“语义相近”的检索请参考已归档的 `pi-agent-v2`。
 - **遗忘曲线**：`mem` 表存 strength/uses/last_used；检索命中 +`hitBoost`，每天按 `halfLifeDays` 衰减；排序权重 `0.7 + 0.3*min(1, strength/2)`，只降权不删。
 - **记忆工具**：`memory_search`（关键词/时间/角色/范围/前后文）、`memory_day`（某天）、`memory_timeline`（一段时间的摘要）。
 
@@ -263,6 +268,7 @@ run: bash scripts/weather.sh
 - `perceive({ path, question })`：本地文件或公网 URL。本地 Base64 超过 10MB 会先压缩（图片缩图、音视频按目标码率转码；需要 `ffmpeg` 或 `imagemagick`），压不进去就如实告诉 AI 去和用户商量分段；URL 直接交给百炼服务端拉取，不本地中转；
 - **B 站 / 抖音**：直链常被防盗链挡住（Referer/UA/cookie），Omni 服务端拉不动；下载到 `tmp/`（低清晰度、只下相关片段、看完删）再喂本地文件。工具压缩产生的临时文件即时清理；
 - 看板「模型 → 辅助感知」选 `provider/model`，留空即停用。
+- 实测：Qwen3.8-Omni-Flash 图片 / 视频可用（395 生产，2026-11-11）；B 站/抖音直链被防盗链挡住时按下面的下载流程走。
 
 Qwen3.8-Omni-Flash 官方限制：图片 URL 20MB/张、音频 2GB/3 小时、视频 2GB/2 小时；Base64 一律**编码后 <10MB**。推荐在 `~/.pi/agent/models.json` 注册 DashScope provider：
 
@@ -388,25 +394,24 @@ lwctl board stop                # 停止
 └── bin/                     # 安装的脚本
 ```
 
-## 和其它三个分支的区别
+## 分支状态
 
-| | `main`（opencode） | `pi-agent`（轻量） | `pi-agent-v2`（增强） | `pi-agent-adv`（本分支，实验） |
-|---|---|---|---|---|
-| 宿主 | opencode 插件 | pi 1.5 扩展 | pi 1.5 扩展 | pi 1.5 扩展 |
-| 记忆检索 | 双字扫描 | 双字扫描 | FTS5 + 可选语义 + 遗忘曲线 | FTS5 + 遗忘曲线 + ACT-R + Hebbian |
-| 印象整理 | 无 | 无 | 无 | 每日归纳 + 本地/云端注入 |
-| 模型 | 固定 | 热切换 + 自动兜底 | 同上 + 看板/lwctl 手切 | 同上 |
-| 隐私抽屉 | 无 | 有 | 有（按会话、云端禁读） | 同上；纯云端不启用 |
-| 主动关怀 | 无 | 无 | 随机想起/安静时段/天气 | 同上 |
-| 看板 | 无 | 无 | Web 看板 | 看板 + 3D 记忆星图（全屏/星云） |
-| 快照/守护/清理 | 无 | 无 | git 快照、桥接守护、tmp/日志清理 | 同上 |
-| 定位 | 存档 | 轻量稳定 | 多功能 | 实验田 |
+| 分支 | 状态 | 说明 |
+|---|---|---|
+| `pi-agent-adv` | **当前维护** | 唯一在维护的 pi 版；新功能都进这里 |
+| `pi-agent` | 已归档 | 轻量稳定版；归档 tag `archive/pi-agent-20261111` |
+| `pi-agent-v2` | 已归档 | 增强版（保留向量检索）；归档 tag `archive/pi-agent-v2-20261111` |
+| `main` | 存档 | opencode 插件版；归档 tag `archive/main-20261111` |
+
+> 归档分支不再接收功能更新；需要旧版代码时用对应 tag 检出。`pi-agent-adv` 不依赖 v2 的语义向量检索，二者是并行实现，不是前后代关系。
 
 ## 已知限制
 
-- `pi-agent-adv` 是实验分支，暂未合回 `pi-agent-v2`；检索权重、印象调度、星图布局还可能继续调；
 - 记忆星图背景图是 `pi/bin/nebula.jpg`，由 lwboard 的 `/nebula.jpg` 路由提供；换图只换文件，覆盖倍数在 `board.html` 里调；
-- 本分支不装向量检索依赖；需要语义相似检索时切到 `pi-agent-v2`（它保留 jina 向量 + FTS 混合）；
+- 本分支不做向量检索；需要语义相似检索时参考已归档的 `pi-agent-v2`（保留 jina 向量 + FTS 混合），或自行接；
+- 辅助感知的 `perceive` 是扩展直连模型 API，**不计入 pi 会话用量统计**；看板「今日 / 用量 · 7 天」已写明口径；
+- 上下文超限会自动换会话：QQ/群聊由桥接 `newSession` + 重发同一条，home/CLI 在轮次结束后自动新会话；不再误切模型；
+- B 站/抖音直链常被防盗链挡住（Referer/UA/cookie），Omni 服务端拉不动；按《辅助感知》里的下载流程走（低清晰度、只下相关片段、看完删）；
 - 看板无鉴权，默认只监听本机；
 - 群会话不跨桥接重启保留（靠归档记忆续上）；
 - 家会话每次启动是新会话（归档记忆负责连续）；
