@@ -449,6 +449,9 @@ class PiSession {
     this.lastUsed = Date.now()
     this.lastOverflow = false
     this.overflowReset = false
+    /** 任务型回复的第一句：收到后立刻发 QQ，不等工具跑完 */
+    this.onAck = null
+    this.ackSent = false
   }
   env() {
     return { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: this.channel === "qq" ? "qq" : "group", LIFE_WORLD_CHANNEL: this.channel, LIFE_WORLD_GROUP_ID: this.groupId }
@@ -523,7 +526,17 @@ class PiSession {
       const m = msg.message
       if (m?.role === "assistant") {
         const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
-        if (text) this.texts.push(text)
+        if (text) {
+          if (m.stopReason === "toolUse") {
+            // 要调工具、还没完：第一句先发出去，最终答案等 settle
+            if (!this.ackSent && typeof this.onAck === "function") {
+              this.ackSent = true
+              try { this.onAck(text) } catch (e) { log("ack handler failed", String(e)) }
+            }
+          } else {
+            this.texts.push(text)
+          }
+        }
         if (m.stopReason === "error") log("message_end error", String(m.errorMessage || "").slice(0, 120))
         if (m.stopReason === "error" && /context window|exceeds the context|too many tokens|maximum context/i.test(String(m.errorMessage || ""))) {
           this.lastOverflow = true
@@ -560,6 +573,7 @@ class PiSession {
   async prompt(text, images = [], timeoutMs = 0) {
     this.lastUsed = Date.now()
     this.lastOverflow = false
+    this.ackSent = false
     if (this.closed || !this.child) this.start()
     if (this.running) {
       await new Promise((resolve) => this.idleWaiters.push(resolve))
@@ -724,6 +738,13 @@ async function handlePrivateNow(msg) {
   const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
   log("private in", text.slice(0, 60), "attachments", attachments.length)
   startTyping()
+  // 任务型回复的第一句先发；一条用户消息只放行一次，换会话重试也不重复
+  let acked = false
+  pi.onAck = (ack) => {
+    if (acked) return
+    acked = true
+    void sendPrivate(ack)
+  }
   try {
     const texts = await pi.promptWithRecovery(annotated, images)
     stopTyping()
@@ -747,6 +768,8 @@ async function handlePrivateNow(msg) {
     stopTyping()
     log("private prompt failed", String(e))
     await call("send_private_msg", { user_id: ownerQQ, message: "（我这边暂时没接上，稍后再发一次试试）" }).catch(() => {})
+  } finally {
+    pi.onAck = null
   }
 }
 
