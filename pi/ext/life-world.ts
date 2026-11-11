@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, extname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -1609,7 +1609,12 @@ function cleanupTmp(maxAgeHours: number): boolean {
     const cutoff = Date.now() - Math.max(1, maxAgeHours) * 3_600_000
     for (const f of readdirSync(TMP_DIR)) {
       const p = join(TMP_DIR, f)
-      try { if (statSync(p).isFile() && statSync(p).mtimeMs < cutoff) unlinkSync(p) } catch { /* ignore */ }
+      try {
+        const st = statSync(p)
+        if (st.mtimeMs >= cutoff) continue
+        if (st.isDirectory()) rmSync(p, { recursive: true, force: true })
+        else if (st.isFile()) unlinkSync(p)
+      } catch { /* ignore */ }
     }
     return true
   } catch (e) { log(`cleanupTmp failed ${String(e)}`); return false }
@@ -3390,53 +3395,60 @@ export default function (pi: ExtensionAPI) {
         if (!mm.enabled || !mm.model) return ok("当前能力需要辅助感知，但还没配模型。去看板「模型 → 辅助感知」选一个，或写 life-world.json 的 multimodal.model（推荐 qwen3.8-omni-flash）。")
         let mediaUrl = ""
         let warning = ""
-        if (isUrl) {
-          mediaUrl = raw
-        } else {
-          let real = ""
-          try { real = realpathSync(raw.startsWith("/") ? raw : resolve(WORLD, raw)) } catch { return ok(`找不到文件：${raw}`) }
-          const dirs = [ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR].map((d) => { try { return realpathSync(d) } catch { return d } })
-          if (!dirs.some((d) => real === d || real.startsWith(d + sep))) return ok("只能读 room / 表情包 / 语音 / tmp 里的文件。")
-          let drawer = ""
-          try { drawer = realpathSync(DRAWER_DIR) } catch { /* ignore */ }
-          if (drawer && (real === drawer || real.startsWith(drawer + sep))) return ok("机密抽屉里的东西不走云端感知。")
-          const outDir = join(TMP_DIR, `perceive-${Date.now()}`)
-          try { mkdirSync(outDir, { recursive: true, mode: 0o700 }) } catch { /* ignore */ }
-          const r = await mediaDataUrl(real, kind, outDir)
-          if (r.error) return ok(r.error)
-          mediaUrl = r.url || ""
-          warning = r.warning || ""
-        }
-        const aux = await auxPerceiveModel()
-        if (!aux) return ok("辅助感知模型没配好（multimodal.model 或 provider 的 baseUrl 缺失）。")
-        const content: any[] = []
-        if (kind === "image") content.push({ type: "image_url", image_url: { url: mediaUrl } })
-        else if (kind === "video") content.push({ type: "video_url", video_url: { url: mediaUrl } })
-        else content.push({ type: "input_audio", input_audio: { data: mediaUrl, format: audioFormatOf(mediaUrl, raw) } })
-        content.push({ type: "text", text: question })
+        let tmpDir = ""
         try {
-          const res = await fetch(aux.url, {
-            method: "POST",
-            headers: aux.headers,
-            body: JSON.stringify({ model: aux.id, messages: [{ role: "user", content }], modalities: ["text"], stream: false }),
-            signal: AbortSignal.timeout(Math.max(30_000, mm.timeoutMs)),
-          })
-          const text = await res.text()
-          if (!res.ok) return ok(`感知模型返回 ${res.status}：${text.slice(0, 300)}`)
-          let data: any = null
-          try { data = JSON.parse(text) } catch { /* ignore */ }
-          const c = data?.choices?.[0]?.message?.content
-          const answer = typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text || "").join("\n") : ""
-          const o = config().models
-          const localMain = !!(o.local && modelIdOf(lastCtx) === o.local)
-          const meta = [
-            `辅助感知：${mm.model} · ${kind}`,
-            localMain ? "（主模型在本地；这条媒体已送到辅助感知模型）" : "",
-            warning,
-          ].filter(Boolean).join("\n")
-          return ok(`${meta}\n\n${(answer || text).slice(0, 20_000)}`)
-        } catch (e) {
-          return ok(`感知请求失败：${String(e).slice(0, 300)}`)
+          if (isUrl) {
+            mediaUrl = raw
+          } else {
+            let real = ""
+            try { real = realpathSync(raw.startsWith("/") ? raw : resolve(WORLD, raw)) } catch { return ok(`找不到文件：${raw}`) }
+            const dirs = [ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR].map((d) => { try { return realpathSync(d) } catch { return d } })
+            if (!dirs.some((d) => real === d || real.startsWith(d + sep))) return ok("只能读 room / 表情包 / 语音 / tmp 里的文件。")
+            let drawer = ""
+            try { drawer = realpathSync(DRAWER_DIR) } catch { /* ignore */ }
+            if (drawer && (real === drawer || real.startsWith(drawer + sep))) return ok("机密抽屉里的东西不走云端感知。")
+            const outDir = join(TMP_DIR, `perceive-${Date.now()}`)
+            try { mkdirSync(outDir, { recursive: true, mode: 0o700 }) } catch { /* ignore */ }
+            tmpDir = outDir
+            const r = await mediaDataUrl(real, kind, outDir)
+            if (r.error) return ok(r.error)
+            mediaUrl = r.url || ""
+            warning = r.warning || ""
+          }
+          const aux = await auxPerceiveModel()
+          if (!aux) return ok("辅助感知模型没配好（multimodal.model 或 provider 的 baseUrl 缺失）。")
+          const content: any[] = []
+          if (kind === "image") content.push({ type: "image_url", image_url: { url: mediaUrl } })
+          else if (kind === "video") content.push({ type: "video_url", video_url: { url: mediaUrl } })
+          else content.push({ type: "input_audio", input_audio: { data: mediaUrl, format: audioFormatOf(mediaUrl, raw) } })
+          content.push({ type: "text", text: question })
+          try {
+            const res = await fetch(aux.url, {
+              method: "POST",
+              headers: aux.headers,
+              body: JSON.stringify({ model: aux.id, messages: [{ role: "user", content }], modalities: ["text"], stream: false }),
+              signal: AbortSignal.timeout(Math.max(30_000, mm.timeoutMs)),
+            })
+            const text = await res.text()
+            if (!res.ok) return ok(`感知模型返回 ${res.status}：${text.slice(0, 300)}`)
+            let data: any = null
+            try { data = JSON.parse(text) } catch { /* ignore */ }
+            const c = data?.choices?.[0]?.message?.content
+            const answer = typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text || "").join("\n") : ""
+            const o = config().models
+            const localMain = !!(o.local && modelIdOf(lastCtx) === o.local)
+            const meta = [
+              `辅助感知：${mm.model} · ${kind}`,
+              localMain ? "（主模型在本地；这条媒体已送到辅助感知模型）" : "",
+              warning,
+            ].filter(Boolean).join("\n")
+            return ok(`${meta}\n\n${(answer || text).slice(0, 20_000)}`)
+          } catch (e) {
+            return ok(`感知请求失败：${String(e).slice(0, 300)}`)
+          }
+        } finally {
+          // 压缩产生的临时文件用完即删；原始下载文件由 AI 自己清理
+          if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* ignore */ } }
         }
       },
     })

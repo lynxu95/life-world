@@ -257,7 +257,7 @@ lwctl board stop
 
 ### 辅助感知
 
-`perceive({ path, question, kind? })`：本地文件或公网 URL。图片主模型能看就直接 `read`，不走辅助；视频/音频、以及主模型不支持图片时的图片才交给 `multimodal.model`。本地 Base64 超 10MB 会先压缩，压不进去会返回建议分段；URL 直接传给百炼。完整限制和 DashScope provider 模板见根 README《辅助感知（多模态）》。
+`perceive({ path, question, kind? })`：本地文件或公网 URL。图片主模型能看就直接 `read`，不走辅助；视频/音频、以及主模型不支持图片时的图片才交给 `multimodal.model`。本地 Base64 超 10MB 会先压缩，压不进去会返回建议分段；URL 直接传给百炼。B 站/抖音直链被防盗链挡住时，下载到 `tmp/`（低清晰度、只下相关片段、看完删）再喂本地文件；工具压缩产生的临时文件即时清理。完整限制和 DashScope provider 模板见根 README《辅助感知（多模态）》。
 
 ## 界面整洁
 

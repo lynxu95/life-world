@@ -261,6 +261,7 @@ run: bash scripts/weather.sh
 - **视频、音频**：pi 的输入模态只有 `text/image`，必须走辅助模型；
 - **图片**：主模型 `input` 含 `image` 就直接 `read`，**不走辅助**；只有主模型不支持图片时才交给辅助；
 - `perceive({ path, question })`：本地文件或公网 URL。本地 Base64 超过 10MB 会先压缩（图片缩图、音视频按目标码率转码；需要 `ffmpeg` 或 `imagemagick`），压不进去就如实告诉 AI 去和用户商量分段；URL 直接交给百炼服务端拉取，不本地中转；
+- **B 站 / 抖音**：直链常被防盗链挡住（Referer/UA/cookie），Omni 服务端拉不动；下载到 `tmp/`（低清晰度、只下相关片段、看完删）再喂本地文件。工具压缩产生的临时文件即时清理；
 - 看板「模型 → 辅助感知」选 `provider/model`，留空即停用。
 
 Qwen3.8-Omni-Flash 官方限制：图片 URL 20MB/张、音频 2GB/3 小时、视频 2GB/2 小时；Base64 一律**编码后 <10MB**。推荐在 `~/.pi/agent/models.json` 注册 DashScope provider：
