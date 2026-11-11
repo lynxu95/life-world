@@ -386,7 +386,8 @@ function appendControl(cmd: Partial<ControlCmd> & { target: string }): { id: str
 /** 读今天和昨天的命令，按 (at,id) 升序 */
 function readControlQueue(): ControlCmd[] {
   const out: ControlCmd[] = []
-  for (let i = 0; i < 2; i++) {
+  // 前后各扫一天：写入方和 home 的时区可能差一天
+  for (let i = -1; i <= 1; i++) {
     const d = new Date()
     d.setDate(d.getDate() - i)
     const file = controlCommandsFile(dayOf(d))
@@ -1468,7 +1469,7 @@ async function tick(): Promise<void> {
       woke = true
     }
     // 主活动：开始前先把还开着的上一个强制关掉，并提醒 AI
-    for (const a of alarmsNow.filter((x) => x.kind === "main" && (x.status || "pending") === "pending")) {
+    for (const a of alarmsNow.filter((x) => x.kind === "main" && (x.status || "pending") === "pending" && !x.paused)) {
       if (woke) break
       const closing = (readWorld().alarms || []).filter((x) => x.kind === "main" && x.status === "active" && x.id !== a.id)
       const closedNotes: string[] = []
@@ -2341,10 +2342,13 @@ async function probeDuration(path: string): Promise<number> {
   if (!ffprobe) return 0
   return new Promise((resolve) => {
     let out = ""
+    let done = false
     const child = spawn(ffprobe, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path], { stdio: ["ignore", "pipe", "ignore"] })
+    const finish = (n: number) => { if (done) return; done = true; clearTimeout(timer); resolve(Number.isFinite(n) ? n : 0) }
+    const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch { /* ignore */ } finish(0) }, 10_000)
     child.stdout.on("data", (d) => { out += String(d) })
-    child.on("error", () => resolve(0))
-    child.on("close", () => { const n = Number(out.trim()); resolve(Number.isFinite(n) ? n : 0) })
+    child.on("error", () => finish(0))
+    child.on("close", () => finish(Number(out.trim())))
   })
 }
 
@@ -2354,17 +2358,17 @@ async function compressImage(src: string, outDir: string): Promise<string> {
   const out = join(outDir, `perceive-${Date.now()}.jpg`)
   const tries: Array<{ cmd: string; args: string[] }> = []
   if (magick) {
-    for (const q of [82, 70, 60]) for (const size of [1568, 1024, 768]) {
+    for (const q of [82, 70]) for (const size of [1568, 1024]) {
       tries.push({ cmd: magick, args: [src, "-auto-orient", "-resize", `${size}x${size}>`, "-quality", String(q), out] })
     }
   }
   if (ffmpeg) {
-    for (const size of [1568, 1024, 768]) for (const q of ["4", "8"]) {
-      tries.push({ cmd: ffmpeg, args: ["-y", "-i", src, "-frames:v", "1", "-vf", `scale='min(${size},iw)':-2`, "-q:v", q, out] })
+    for (const size of [1568, 1024]) {
+      tries.push({ cmd: ffmpeg, args: ["-y", "-i", src, "-frames:v", "1", "-vf", `scale='min(${size},iw)':-2`, "-q:v", "4", out] })
     }
   }
   for (const t of tries) {
-    const r = await runCmd(t.cmd, t.args, 60_000)
+    const r = await runCmd(t.cmd, t.args, 30_000)
     if (!r.ok) continue
     try { if (statSync(out).size <= MEDIA_INLINE_BYTES) return out } catch { /* ignore */ }
   }
@@ -2405,15 +2409,41 @@ function audioFormatOf(mediaUrl: string, raw: string): string {
 }
 
 function mediaMime(kind: MediaKind, ext: string): string {
-  if (kind === "image") return ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg"
-  if (kind === "audio") return ext === "wav" ? "audio/wav" : ext === "mp3" ? "audio/mpeg" : ext === "m4a" ? "audio/mp4" : ext === "aac" ? "audio/aac" : ext === "ogg" ? "audio/ogg" : ext === "amr" ? "audio/amr" : ext === "flac" ? "audio/flac" : "audio/wav"
+  if (kind === "image") {
+    if (ext === "png") return "image/png"
+    if (ext === "gif") return "image/gif"
+    if (ext === "webp") return "image/webp"
+    if (ext === "bmp") return "image/bmp"
+    return "image/jpeg"
+  }
+  if (kind === "audio") {
+    if (ext === "wav") return "audio/wav"
+    if (ext === "mp3") return "audio/mpeg"
+    if (ext === "m4a") return "audio/mp4"
+    if (ext === "aac") return "audio/aac"
+    if (ext === "ogg") return "audio/ogg"
+    if (ext === "amr") return "audio/amr"
+    if (ext === "flac") return "audio/flac"
+    if (ext === "3gp" || ext === "3gpp") return "audio/3gpp"
+    return "audio/wav"
+  }
+  if (ext === "mov") return "video/quicktime"
+  if (ext === "mkv") return "video/x-matroska"
+  if (ext === "webm") return "video/webm"
+  if (ext === "avi") return "video/x-msvideo"
+  if (ext === "flv") return "video/x-flv"
+  if (ext === "wmv") return "video/x-ms-wmv"
   return "video/mp4"
 }
 
 /** 本地媒体 → data URL；超限先压缩，压不进去返回错误 + 建议 */
 async function mediaDataUrl(path: string, kind: MediaKind, outDir: string): Promise<{ url?: string; warning?: string; error?: string }> {
   let size = 0
-  try { size = statSync(path).size } catch { return { error: `读不到文件：${path}` } }
+  try {
+    const st = statSync(path)
+    if (!st.isFile()) return { error: `不是文件（目录或特殊文件）：${path}` }
+    size = st.size
+  } catch { return { error: `读不到文件：${path}` } }
   const mm = config().multimodal
   const warnAt = kind === "image" ? mm.warnImageBytes : kind === "video" ? mm.warnVideoBytes : 0
   let warning = warnAt && size > warnAt ? `文件较大（${(size / 1024 / 1024).toFixed(1)}MB），模型处理会慢一些。` : ""
@@ -2422,10 +2452,12 @@ async function mediaDataUrl(path: string, kind: MediaKind, outDir: string): Prom
     const duration = kind === "image" ? 0 : await probeDuration(path)
     const small = kind === "image" ? await compressImage(path, outDir) : kind === "audio" ? await compressAudio(path, outDir, duration) : await compressVideo(path, outDir, duration)
     if (!small) {
+      const hasTool = !!(findBin("ffmpeg") || findBin("magick") || findBin("convert"))
+      if (!hasTool) return { error: "本地文件超过 Base64 内联上限，但没装 ffmpeg / imagemagick，压不了。装一个，或给公网直链。" }
       const tooLong = kind === "video" && duration > 0 && Math.floor((MEDIA_INLINE_BYTES * 8) / duration / 1000) < 120
       return { error: tooLong
-        ? "视频太长，压到 Base64 上限（10MB）会糊得没法看。建议给公网直链，或和用户商量分段发送。"
-        : "压缩后仍超过 Base64 上限（约 7.5MB）。建议给公网直链，或和用户商量分段发送。" }
+        ? "视频太长，压到 Base64 内联上限（原始 7MB）会糊得没法看。建议给公网直链，或和用户商量分段发送。"
+        : "压缩后仍超过 Base64 内联上限（原始 7MB / 编码后 10MB）。建议给公网直链，或和用户商量分段发送。" }
     }
     let smallSize = 0
     try { smallSize = statSync(small).size } catch { /* ignore */ }
@@ -2475,13 +2507,23 @@ export default function (pi: ExtensionAPI) {
   let controlMark = (() => {
     try {
       const x = JSON.parse(readFileSync(CONTROL_SEEN, "utf8"))
-      return { at: Number(x.at) || 0, id: String(x.id) || "" }
+      // 旧格式是 {seq, at: ISO}；新格式是 {at: number, id}
+      const at = Number(x.seq) || (typeof x.at === "string" ? Date.parse(x.at) : Number(x.at)) || 0
+      return { at: Number.isFinite(at) ? at : 0, id: String(x.id) || "" }
     } catch { return { at: 0, id: "" } }
   })()
   const isNewCmd = (c: ControlCmd) => c.at > controlMark.at || (c.at === controlMark.at && c.id > controlMark.id)
+  /** 水位只进不退：慢一轮的 poll 不能把已处理的新命令重新放出来 */
   const markCmd = (c: ControlCmd) => {
+    if (!isNewCmd(c)) return
     controlMark = { at: c.at, id: c.id }
     try { atomicWrite(CONTROL_SEEN, JSON.stringify(controlMark)) } catch { /* ignore */ }
+  }
+  /** 本进程直接处理过的命令 id：轮询时跳过，但不能推进水位吞掉更早的命令 */
+  const selfHandled = new Set<string>()
+  const rememberSelfHandled = (id: string) => {
+    selfHandled.add(id)
+    if (selfHandled.size > 50) for (const old of selfHandled) { selfHandled.delete(old); break }
   }
   const statusPayload = () => {
     // ctx 在 newSession / 进程收尾后可能失效，逐项安全读取
@@ -2569,7 +2611,10 @@ export default function (pi: ExtensionAPI) {
     writeAck(c.id, { ok: result.startsWith("已切到") || result.startsWith("已经是"), model: target, msg: result })
     writeStatus()
   }
+  let pollingControl = false
   const pollControl = async () => {
+    if (pollingControl) return
+    pollingControl = true
     try {
       for (const c of readControlQueue()) {
         if (!isNewCmd(c)) continue
@@ -2577,6 +2622,7 @@ export default function (pi: ExtensionAPI) {
           if (!c.at || Date.now() - c.at > 60_000) continue
           if (c.target !== roleKey && c.target !== "all") continue
           if (CHANNEL === "group") continue
+          if (selfHandled.has(c.id)) { selfHandled.delete(c.id); continue }
           await handleControl(c)
         } finally { markCmd(c) }
       }
@@ -2586,13 +2632,14 @@ export default function (pi: ExtensionAPI) {
       if (lat && Date.now() - lat <= 60_000) {
         const c: ControlCmd = { ...legacy, id: `legacy-${lat}`, action: legacy.action || "model" }
         if (isNewCmd(c)) {
-          if (c.target === roleKey || c.target === "all") {
+          if (CHANNEL !== "group" && (c.target === roleKey || c.target === "all")) {
             try { await handleControl(c) } catch { /* ignore */ }
           }
           markCmd(c)
         }
       }
     } catch (e) { log(`pollControl failed ${String(e)}`) }
+    finally { pollingControl = false }
   }
   writeStatus()
   const statusTimer = setInterval(() => { writeStatus(); void pollControl() }, 5000)
@@ -2857,21 +2904,24 @@ export default function (pi: ExtensionAPI) {
         const state = readWorld()
         const found = findParentAlarm(state.alarms || [], parentRef)
         if (!found.parent) return ok(found.error || "找不到这个活动。")
+        if (found.parent.status !== "active") return ok(`活动《${found.parent.note}》还没开始（${shortStamp(found.parent.at)}），到点开始后再排子闹钟。`)
+        const rawTimes: string[] = []
+        if (Array.isArray(params.times)) for (const t of params.times) rawTimes.push(String(t))
+        if (params.at) rawTimes.push(String(params.at))
+        const invalid: string[] = []
         const times: number[] = []
-        if (Array.isArray(params.times)) {
-          for (const t of params.times) { const v = parseWhen(String(t)); if (Number.isFinite(v)) times.push(v) }
-        }
+        for (const t of rawTimes) { const v = parseWhen(t); if (Number.isFinite(v)) times.push(v); else invalid.push(t) }
         if (typeof params.after_minutes === "number") times.push(now + params.after_minutes * 60_000)
-        if (params.at) { const v = parseWhen(String(params.at)); if (Number.isFinite(v)) times.push(v) }
+        if (invalid.length) return ok(`这些时间解析不了：${invalid.join("、")}（要带时区 ISO 或 HH:MM）`)
         if (!times.length) return ok("子闹钟没给时间：用 at、times 或 after_minutes。")
-        const bad = times.filter((t) => t < now + 10_000)
-        if (bad.length) return ok("子闹钟时间至少要在 10 秒之后。")
-        const density = checkSubDensity(state.alarms || [], found.parent.id, times)
+        const unique = [...new Set(times)].sort((a, b) => a - b)
+        const tooSoon = unique.filter((t) => t < now + 10_000)
+        if (tooSoon.length) return ok("子闹钟时间至少要在 10 秒之后。")
+        const density = checkSubDensity(state.alarms || [], found.parent.id, unique)
         if (density) return ok(density)
         const pending = (state.alarms || []).filter((a) => a.kind === "sub" && a.parentId === found.parent!.id).length
-        if (pending + times.length > 24) return ok("这个活动的子闹钟太多了（上限 24 条），先取消一些。")
+        if (pending + unique.length > 24) return ok("这个活动的子闹钟太多了（上限 24 条），先取消一些。")
         const parent = found.parent
-        const unique = [...new Set(times)].sort((a, b) => a - b)
         const subs: Alarm[] = unique.map((t, i) => ({
           id: `s-${now}-${i}-${Math.random().toString(36).slice(2, 6)}`,
           at: new Date(t).toISOString(),
@@ -3118,8 +3168,8 @@ export default function (pi: ExtensionAPI) {
       if (missing.length) return ok(`这些会话没在跑或没心跳（可能刚重启/正忙）：${missing.join("、")}`)
 
       const cmd = appendControl({ target: scope, action: "model", model: raw, reason })
-      // 自己直接切，并把水位推过这条命令，避免自己的轮询重复执行
-      markCmd({ id: cmd.id, at: cmd.at, target: scope })
+      // 自己直接切；只记住这条 id 让轮询跳过，不能推进水位（否则会吞掉更早未执行的命令）
+      rememberSelfHandled(cmd.id)
       const waitMs = scope === "all" ? 12_000 : 8_000
       const results = await Promise.all(roles.map(async (rk) => {
         if (rk === roleKey) {
@@ -3328,7 +3378,13 @@ export default function (pi: ExtensionAPI) {
           try { data = JSON.parse(text) } catch { /* ignore */ }
           const c = data?.choices?.[0]?.message?.content
           const answer = typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text || "").join("\n") : ""
-          const meta = [`辅助感知：${mm.model} · ${kind}`, warning].filter(Boolean).join("\n")
+          const o = config().models
+          const localMain = !!(o.local && modelIdOf(lastCtx) === o.local)
+          const meta = [
+            `辅助感知：${mm.model} · ${kind}`,
+            localMain ? "（主模型在本地；这条媒体已送到辅助感知模型）" : "",
+            warning,
+          ].filter(Boolean).join("\n")
           return ok(`${meta}\n\n${(answer || text).slice(0, 20_000)}`)
         } catch (e) {
           return ok(`感知请求失败：${String(e).slice(0, 300)}`)

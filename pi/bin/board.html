@@ -617,6 +617,7 @@ async function loadOverview() {
       fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
       fillSelect($("m-vision"), (d.multimodal && d.multimodal.model) || "", d.available || [], "（不启用）")
     }
+    if (Array.isArray(d.available)) mLoaded = true
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
       $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`
@@ -850,7 +851,7 @@ async function loadPlan() {
     const pct = Math.round((d.done / d.total) * 100)
     const undone = d.items.filter((x) => !x.done)
     const done = d.items.filter((x) => x.done)
-    const item = (x) => `<div class="plan-item${x.done ? " done" : ""}"><span class="box">${x.done ? "✓" : ""}</span><span class="txt" title="${esc2(x.text)}">${esc2(x.text)}</span></div>`
+    const item = (x) => `<div class="plan-item${x.done ? " done" : ""}"><span class="box">${x.done ? "✓" : ""}</span><span class="txt" title="${escAttr(x.text)}">${esc2(x.text)}</span></div>`
     el.innerHTML = `<div class="plan-ring"><span class="num">${d.done}/${d.total}</span><div class="bar"><i style="width:${pct}%"></i></div></div>` +
       `<div class="plan-list">` +
       (undone.length ? undone.slice(0, 12).map(item).join("") : '<div class="muted">全部做完了</div>') +
@@ -884,7 +885,7 @@ function renderSubs(list) {
   const cards = mains.map((m) => {
     const subs = subsOf(m.id)
     const state = m.status === "active" ? (m.paused ? "已暂停" : "进行中") : "待开始"
-    const items = subs.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${esc2(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
+    const items = subs.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
     const skip = (m.skipped || []).length
       ? `<div class="sub-skip">跳过：${m.skipped.map((s) => `${fmtClock(s.scheduled)} ${esc2(s.note)}`).join("、")}</div>`
       : ""
@@ -973,6 +974,7 @@ $("care-save").onclick = async () => {
 }
 
 let mTouched = false
+let mLoaded = false
 function fillSelect(el, current, list, noneLabel) {
   const seen = new Set()
   el.innerHTML = ""
@@ -994,7 +996,9 @@ $("m-cloud").addEventListener("change", () => { mTouched = true })
 $("m-subagent").addEventListener("change", () => { mTouched = true })
 $("m-vision").addEventListener("change", () => { mTouched = true })
 $("m-save").onclick = async () => {
-  const b = $("m-save"); b.disabled = true; b.textContent = "保存中…"
+  const b = $("m-save")
+  if (!mLoaded) { $("m-hint").textContent = "模型列表还没加载好，稍后再保存"; return }
+  b.disabled = true; b.textContent = "保存中…"
   try {
     const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim(), subagent: $("m-subagent").value.trim(), multimodal: $("m-vision").value.trim() }) })
     $("m-hint").textContent = r.ok ? "已保存" : "保存失败"
@@ -1223,6 +1227,7 @@ function nodeVisible(n) {
   return BRAIN.filters.mem
 }
 function esc2(v) { const d = document.createElement("div"); d.textContent = String(v ?? ""); return d.innerHTML }
+function escAttr(v) { return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;") }
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) } return h >>> 0 }
 
 function layoutBrain() {

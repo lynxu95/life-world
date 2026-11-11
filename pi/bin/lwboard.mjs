@@ -107,8 +107,12 @@ function sessions() {
 function scheduleList(limit = 50) {
   const state = readJson(join(WORLD, "world.json"), {})
   const alarms = Array.isArray(state.alarms) ? state.alarms : []
+  const now = Date.now()
   return alarms
     .filter((a) => a && Number.isFinite(Date.parse(a.at)))
+    // active 主活动会长期保留，at 是过去时间，不放进时间线，避免挤掉未来闹钟
+    .filter((a) => !(a.kind === "main" && a.status === "active"))
+    .filter((a) => !a.kind || Date.parse(a.at) >= now - 5 * 60_000)
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
     .slice(0, limit)
     .map((a) => ({
