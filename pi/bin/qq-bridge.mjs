@@ -449,7 +449,7 @@ class PiSession {
     this.lastUsed = Date.now()
     this.lastOverflow = false
     this.overflowReset = false
-    /** 任务型回复的第一句：收到后立刻发 QQ，不等工具跑完 */
+    /** 模型在调工具前先应了一声：桥接把这句立刻发出去，只发一次 */
     this.onAck = null
     this.ackSent = false
   }
@@ -526,11 +526,9 @@ class PiSession {
       const m = msg.message
       if (m?.role === "assistant") {
         const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
-        const hasTool = (Array.isArray(m.content) && m.content.some((p) => p?.type === "toolCall"))
-          || (Array.isArray(m.tool_calls) && m.tool_calls.length > 0)
         if (text) {
           if (m.stopReason === "toolUse") {
-            // 要调工具、还没完：第一句先发出去，最终答案等 settle
+            // 她要先应一声：这句立刻发出去，不等整轮跑完
             if (!this.ackSent && typeof this.onAck === "function") {
               this.ackSent = true
               try { this.onAck(text) } catch (e) { log("ack handler failed", String(e)) }
@@ -538,13 +536,8 @@ class PiSession {
           } else {
             this.texts.push(text)
           }
-        } else if (m.stopReason === "toolUse" && hasTool) {
-          // 模型闷头调工具、没先说话：桥接补一句状态提示
-          if (!this.ackSent && typeof this.onAck === "function") {
-            this.ackSent = true
-            try { this.onAck("") } catch (e) { log("ack handler failed", String(e)) }
-          }
         }
+        // 没说话就直接调工具：桥接不替她开口，安静等最终结果
         if (m.stopReason === "error") log("message_end error", String(m.errorMessage || "").slice(0, 120))
         if (m.stopReason === "error" && /context window|exceeds the context|too many tokens|maximum context/i.test(String(m.errorMessage || ""))) {
           this.lastOverflow = true
@@ -746,12 +739,14 @@ async function handlePrivateNow(msg) {
   const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
   log("private in", text.slice(0, 60), "attachments", attachments.length)
   startTyping()
-  // 任务型回复的第一句先发；一条用户消息只放行一次，换会话重试也不重复
+  // 她调工具前先应一声，就把那句立刻发出去；她闷头调工具就不代发，安静等结果
   let acked = false
   pi.onAck = (ack) => {
     if (acked) return
+    const t = String(ack || "").trim()
+    if (!t) return
     acked = true
-    void sendPrivate(String(ack || "").trim() || "（埋头忙活中…）")
+    void sendPrivate(t)
   }
   try {
     const texts = await pi.promptWithRecovery(annotated, images)
