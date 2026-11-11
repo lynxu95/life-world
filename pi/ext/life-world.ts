@@ -1311,6 +1311,14 @@ let contextOverflowPending = false
 function isContextOverflow(text: string): boolean {
   return /context window|exceeds the context|too many tokens|maximum context/i.test(String(text || ""))
 }
+/** QQ/群聊：给桥接留一个超限标记，桥接据此换会话（不依赖 RPC 是否带 errorMessage） */
+function markContextOverflow(roleKey: string, err: string): void {
+  try {
+    atomicWrite(join(ROOT, `context-overflow-${safeRoleKey(roleKey)}.json`), JSON.stringify({
+      at: Date.now(), roleKey, error: String(err || "").slice(0, 300),
+    }))
+  } catch { /* ignore */ }
+}
 
 /** agent 是否正在跑一轮；子闹钟到点时正忙就跳过，不排队 */
 let agentBusy = false
@@ -2872,7 +2880,8 @@ export default function (pi: ExtensionAPI) {
       if (isContextOverflow(errText)) {
         // 上下文超限不是模型坏了：不切模型，避免把私聊送去云端
         log("context overflow · skip failover")
-        if (CHANNEL !== "qq" && CHANNEL !== "group") contextOverflowPending = true
+        if (CHANNEL === "qq" || CHANNEL === "group") markContextOverflow(roleKey, errText)
+        else contextOverflowPending = true
       } else {
         // 回复不了就直接切，不计数
         await failoverToOther(ctx, "模型无响应")

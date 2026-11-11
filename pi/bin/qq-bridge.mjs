@@ -496,6 +496,7 @@ class PiSession {
       if (m?.role === "assistant") {
         const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
         if (text) this.texts.push(text)
+        if (m.stopReason === "error") log("message_end error", String(m.errorMessage || "").slice(0, 120))
         if (m.stopReason === "error" && /context window|exceeds the context|too many tokens|maximum context/i.test(String(m.errorMessage || ""))) {
           this.lastOverflow = true
         }
@@ -550,12 +551,38 @@ class PiSession {
     this.write(body)
     return wait
   }
+  overflowMarkerPath() {
+    const key = this.channel === "qq" ? "qq" : `group-${this.groupId}`
+    return join(ROOT, `context-overflow-${key.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`)
+  }
+  takeOverflowMarker() {
+    const f = this.overflowMarkerPath()
+    try {
+      if (!existsSync(f)) return false
+      const j = JSON.parse(readFileSync(f, "utf8"))
+      unlinkSync(f)
+      return !!j.at && Date.now() - j.at < 10 * 60_000
+    } catch { return false }
+  }
   /** 上下文超限：自动换新会话，并把同一条重发一次；其它错误不处理 */
   async promptWithRecovery(text, images = [], timeoutMs = 0) {
     this.overflowReset = false
+    // 上一轮留下的超限标记：先换会话，别在旧会话上再撞一次
+    if (this.takeOverflowMarker()) {
+      log("context overflow marker · reset before prompt", this.name)
+      await this.newSession()
+      this.overflowReset = true
+    }
     let texts = await this.prompt(text, images, timeoutMs)
-    if (!this.lastOverflow) return texts
+    let hit = this.lastOverflow
+    if (!hit) {
+      // 标记可能比 agent_settled 稍晚落盘
+      await sleep(250)
+      hit = this.takeOverflowMarker()
+    }
+    if (!hit) return texts
     this.lastOverflow = false
+    this.takeOverflowMarker()
     log("context overflow · reset session and retry", this.name)
     await this.newSession()
     this.overflowReset = true
