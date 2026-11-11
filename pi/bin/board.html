@@ -392,6 +392,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <section>
           <div class="sec-head"><h2>今日</h2><span class="spacer"></span><span class="sec-note" id="today-note">…</span></div>
           <div class="tiles" id="today-tiles"></div>
+          <div class="hint" id="today-usage-note"></div>
           <div class="heat" id="heat"></div>
           <div class="heat-axis"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>
           <div class="hint" id="heat-hint">按小时统计今天的消息</div>
@@ -401,6 +402,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="tiles" id="tiles"></div>
         <div class="bars" id="bars"></div>
         <div class="hint" id="usage-hint"></div>
+        <div class="hint" id="usage-accounting-note"></div>
       </section>
         <section>
           <div class="sec-head"><h2>最近事件</h2><span class="spacer"></span><span class="sec-note" id="events-note">…</span></div>
@@ -624,6 +626,12 @@ async function loadOverview() {
     } else {
       $("mode-hint").textContent = ""
     }
+    LAST_MODEL_INFO = {
+      local: (d.models && d.models.local) || "",
+      cloud: (d.models && d.models.cloud) || "",
+      subagent: (d.subagent && d.subagent.model) || "",
+      multimodal: (d.multimodal && d.multimodal.model) || "",
+    }
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
     renderNow(d)
@@ -767,6 +775,19 @@ function renderUsage(u) {  if (!u) return
     return `<div class="bar${r.input + r.output ? "" : " zero"}" title="${r.day} · ${fmt(r.input + r.output)} tokens"><div class="b" style="height:${h}%"></div><div class="d">${r.day.slice(5)}</div></div>`
   }).join("")
   $("usage-hint").textContent = `云端 ${t.cloud} 次 · 本地 ${t.local} 次 · 切换 ${u.switches} 次`
+  $("usage-accounting-note").textContent = accountingNote(t.models, `${u.days} 天内`)
+}
+
+function modelRefs(obj) {
+  const list = Object.entries(obj || {}).filter(([ref]) => ref && ref !== "/").sort((a, b) => b[1] - a[1])
+  return list.length ? list.map(([ref, n]) => `${ref}（${n} 次）`).join("、") : "无"
+}
+function accountingNote(modelsObj, rangeLabel) {
+  const info = LAST_MODEL_INFO || {}
+  const used = modelRefs(modelsObj)
+  const mm = info.multimodal || "未配置"
+  const sub = info.subagent || "未配置"
+  return `统计口径：只算 pi 会话里的模型调用（${rangeLabel}实际用过：${used}）。不计入：辅助感知 ${mm}（perceive 直连 API）、子代理 ${sub}（--no-session）、群聊判官（--no-session）。`
 }
 
 /* —— 概览：她此刻 / 今日 / 健康 / 计划 / 事件 / 快捷 —— */
@@ -805,6 +826,7 @@ function renderToday(d) {
     <div class="tile"><div class="k">输入 tokens</div><div class="v">${fmt(row.input || 0)}</div><div class="n">缓存读 ${fmt(row.cacheRead || 0)}</div></div>
     <div class="tile"><div class="k">输出 tokens</div><div class="v">${fmt(row.output || 0)}</div><div class="n">云端 ${row.cloud || 0} / 本地 ${row.local || 0}</div></div>
     <div class="tile"><div class="k">费用</div><div class="v">${row.cost ? "$" + Number(row.cost).toFixed(4) : "-"}</div><div class="n">今天</div></div>`
+  $("today-usage-note").textContent = accountingNote(row.models, "今天")
 }
 async function loadActivity() {
   try {
@@ -975,6 +997,7 @@ $("care-save").onclick = async () => {
 
 let mTouched = false
 let mLoaded = false
+let LAST_MODEL_INFO = {}
 function fillSelect(el, current, list, noneLabel) {
   const seen = new Set()
   el.innerHTML = ""

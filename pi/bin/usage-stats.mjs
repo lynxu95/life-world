@@ -42,7 +42,7 @@ export function usageStats(days = 7) {
         const ts = Date.parse(entry.timestamp || "") || Number(m.timestamp) || 0
         if (!ts || ts < since) continue
         const day = localDay(ts)
-        const row = byDay.get(day) || { day, req: 0, input: 0, output: 0, cacheRead: 0, cost: 0, cloud: 0, local: 0 }
+        const row = byDay.get(day) || { day, req: 0, input: 0, output: 0, cacheRead: 0, cost: 0, cloud: 0, local: 0, models: {} }
         const u = m.usage || {}
         row.req++
         row.input += Number(u.input || 0)
@@ -52,6 +52,7 @@ export function usageStats(days = 7) {
         const costNum = typeof costRaw === "number" ? costRaw : Number(costRaw?.total ?? 0)
         row.cost += Number.isFinite(costNum) ? costNum : 0
         const ref = `${m.provider || ""}/${m.model || ""}`
+        row.models[ref] = (row.models[ref] || 0) + 1
         if (cfg.cloud && ref === cfg.cloud) row.cloud++
         else if (cfg.local && ref === cfg.local) row.local++
         else if (["deepseek", "anthropic", "openai", "google"].includes(String(m.provider || ""))) row.cloud++
@@ -64,7 +65,8 @@ export function usageStats(days = 7) {
   const total = list.reduce((acc, r) => {
     acc.req += r.req; acc.input += r.input; acc.output += r.output; acc.cacheRead += r.cacheRead; acc.cost += r.cost
     acc.cloud += r.cloud; acc.local += r.local
+    for (const [ref, n] of Object.entries(r.models || {})) acc.models[ref] = (acc.models[ref] || 0) + n
     return acc
-  }, { req: 0, input: 0, output: 0, cacheRead: 0, cost: 0, cloud: 0, local: 0 })
+  }, { req: 0, input: 0, output: 0, cacheRead: 0, cost: 0, cloud: 0, local: 0, models: {} })
   return { days, list, total, switches }
 }
