@@ -36,7 +36,8 @@
       "cooldownMs": 8000,
       "maxPer10Min": 0,
       "bannedWords": [],
-      "sessionIdleMinutes": 120
+      "sessionIdleMinutes": 120,
+      "maxFileBytes": 104857600
     }
   },
   "subagent": {

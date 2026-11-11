@@ -13,7 +13,7 @@
  *   node qq-bridge.mjs --test-user "在吗"     # 模拟 owner 发一条私聊，测试用
  */
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
-import { Readable } from "node:stream"
+import { Readable, Transform } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -224,6 +224,8 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 /** 工作文件不设上限（下载走流式落盘，不进内存） */
 const MAX_FILE_BYTES = Infinity
 const MAX_TOTAL_BYTES = Infinity
+/** 群文件是外部输入，默认 100MB 上限；私聊工作文件仍不设上限 */
+const DEFAULT_GROUP_FILE_BYTES = 100 * 1024 * 1024
 /** 图片在缩放前的原始大小上限（再大就不折腾了） */
 const HARD_CAP_BYTES = 40 * 1024 * 1024
 /** 最近一次附件失败原因，用来给出准确提示 */
@@ -243,7 +245,7 @@ function mediaParts(msg) {
     if (p?.type === "image" || p?.type === "mface") {
       out.push({ type: "image", url: /^https?:\/\//i.test(d.url || "") ? d.url : "", file: d.file || "", fileId: d.file_id || d.fileId || "", fileHash: d.file_hash || "", fileSize: Number(d.file_size) || 0, name: d.file_name || d.file || d.summary || "image.jpg" })
     } else if (p?.type === "file") {
-      out.push({ type: "file", url: /^https?:\/\//i.test(d.url || "") ? d.url : "", file: d.file || "", fileId: d.file_id || d.fileId || "", fileHash: d.file_hash || "", fileSize: Number(d.file_size) || 0, name: d.file_name || d.name || d.file || "file" })
+      out.push({ type: "file", url: /^https?:\/\//i.test(d.url || "") ? d.url : "", file: d.file || "", fileId: d.file_id || d.fileId || "", fileHash: d.file_hash || "", busid: Number(d.busid) || 0, fileSize: Number(d.file_size) || 0, name: d.file_name || d.name || d.file || "file" })
     }
   }
   return out.slice(0, 10)
@@ -275,7 +277,7 @@ async function resolveMedia(m, groupId = "") {
   try {
     // 群文件要用 get_group_file_url，私聊才用 get_private_file_url
     const res = groupId
-      ? await call("get_group_file_url", { group_id: Number(groupId), file_id: m.fileId || m.file || "", file_hash: m.fileHash || "" })
+      ? await call("get_group_file_url", { group_id: Number(groupId), file_id: m.fileId || m.file || "", busid: m.busid || 0, file_hash: m.fileHash || "" })
       : await call("get_private_file_url", { user_id: ownerQQ, file_id: m.fileId || m.file || "", file_hash: m.fileHash || "" })
     const d = res?.data || {}
     if (/^https?:\/\//i.test(d.url || "")) return { ...m, url: d.url, name: d.file_name || m.name }
@@ -316,10 +318,29 @@ async function downloadMedia(m, maxBytes) {
     try {
       const res = await fetch(m.url, { signal: AbortSignal.timeout(10 * 60_000) })
       if (!res.ok || !res.body) { lastAttachmentIssue = "download"; return undefined }
+      const declared = Number(res.headers.get("content-length") || 0)
+      if (Number.isFinite(maxBytes) && declared > maxBytes) { lastAttachmentIssue = "too_large"; log("file too large (content-length)", declared); return undefined }
       mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 })
       const ext = (String(m.name || "").match(/\.[A-Za-z0-9]{1,8}$/) || [".bin"])[0]
       const path = join(TMP_DIR, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
-      await pipeline(Readable.fromWeb(res.body), createWriteStream(path, { mode: 0o600 }))
+      let received = 0
+      let capped = false
+      // 流式落盘也守住上限：没有 content-length 的分块传输按实际字节数拦
+      const limiter = new Transform({
+        transform(chunk, _enc, cb) {
+          received += chunk.length
+          if (Number.isFinite(maxBytes) && received > maxBytes) { capped = true; cb(new Error("too large")); return }
+          cb(null, chunk)
+        },
+      })
+      try {
+        await pipeline(Readable.fromWeb(res.body), limiter, createWriteStream(path, { mode: 0o600 }))
+      } catch (e) {
+        try { unlinkSync(path) } catch { /* ignore */ }
+        lastAttachmentIssue = capped ? "too_large" : "download"
+        log("file download failed", String(e).slice(0, 200))
+        return undefined
+      }
       return { path, name: m.name || basename(path) }
     } catch (e) {
       lastAttachmentIssue = "download"
@@ -403,6 +424,9 @@ class PiSession {
   start() {
     if (this.child) return
     const gen = ++this.gen
+    // 换进程后旧的半行缓冲必须丢掉，否则会和新进程的第一行拼成坏 JSON
+    this.buffer = ""
+    this.running = false
     const args = ["--mode", "rpc", "--model", this.model, "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions", "-e", EXT, "--session-dir", SESSION_DIR]
     if (this.sessionFile) args.push("--session", this.sessionFile)
     else args.push("--name", this.name)
@@ -430,6 +454,8 @@ class PiSession {
     this.running = false
     this.texts = []
     for (const w of this.waiters.splice(0)) w.reject(new Error("pi exited"))
+    // 卡在“等上一轮说完”的调用也要放行，否则私聊链会永远停在这里
+    for (const r of this.idleWaiters.splice(0)) r()
     if (!this.stopping) setTimeout(() => this.start(), 2000)
   }
   /** 群会话闲置回收：停掉子进程，调用方从 map 里删掉 */
@@ -501,6 +527,8 @@ class PiSession {
     if (this.running) {
       await new Promise((resolve) => this.idleWaiters.push(resolve))
     }
+    // 等待期间进程可能崩了：重新拉起再写
+    if (this.closed || !this.child) this.start()
     this.texts = []
     const wait = new Promise((resolve, reject) => {
       const timer = timeoutMs > 0 ? setTimeout(() => { reject(new Error("prompt timeout")) }, timeoutMs) : null
@@ -706,10 +734,11 @@ async function handleGroup(msg) {
     const images = []
     const files = []
     let budget = MAX_TOTAL_BYTES
+    const groupFileCap = Number(groupCfg().maxFileBytes) || DEFAULT_GROUP_FILE_BYTES
     for (const m of batch) {
       for (const item of m.media || []) {
         const isImage = item.type === "image"
-        const got = await fetchAttachment(item, Math.min(isImage ? MAX_IMAGE_BYTES : MAX_FILE_BYTES, budget), key)
+        const got = await fetchAttachment(item, Math.min(isImage ? MAX_IMAGE_BYTES : groupFileCap, budget), key)
         if (!got) continue
         let size = 0
         try { size = statSync(got.path).size } catch { /* ignore */ }
@@ -757,6 +786,8 @@ function cleanupGroupSessions() {
   const now = Date.now()
   for (const [key, s] of groupSessions) {
     if (s.running) continue // 正在生成就别动
+    const pending = groupBuffers.get(key)
+    if (pending?.timer || pending?.length) continue // 3 秒防抖窗口里还有消息
     if (now - (s.lastUsed || 0) < idleMs) continue
     s.destroy()
     groupSessions.delete(key)
@@ -813,10 +844,10 @@ async function sendOutboxMedia(item) {
 async function pollOutboxNow() {
   const freshState = !state.outbox
   const offsets = state.outbox || (state.outbox = { offsets: {}, since: new Date().toISOString() })
-  const hadSince = !!offsets.since
-  // 旧状态没有 since：补一个“现在”，免得今天整段重发
-  if (!hadSince) offsets.since = new Date().toISOString()
-  if (freshState || !hadSince) saveState()
+  // 只有全新状态才把 since 定在“现在”（防首次启动把当天旧条目整段重发）；
+  // 从没有 since 的旧状态升级时留空 = 不跳过，宁可补发也别漏。
+  if (!offsets.since && !freshState) offsets.since = ""
+  if (freshState) saveState()
   const sinceMs = Date.parse(offsets.since || "") || 0
   for (const day of recentDays(3)) {
     const file = outboxFile(day)

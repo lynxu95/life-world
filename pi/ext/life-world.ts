@@ -459,14 +459,30 @@ function allRecords(): Record_[] {
   return order.map((id) => byId.get(id) as Record_)
 }
 
+let indexStale = false
 /** 索引是否已完成过回填；完成前/索引坏了就退回读文件 */
 function indexReady(): boolean {
+  if (indexStale) return false
   try {
     const db = openMemIndex()
     if (!db) return false
     const row = db.prepare("SELECT value FROM meta WHERE key = 'backfilled'").get()
     return String(row?.value || "") === "1"
   } catch { return false }
+}
+
+/** 索引写失败：立刻让本进程退回文件读，并在 60 秒后重试回填 */
+let staleRetry: any = null
+function markIndexStale(): void {
+  indexStale = true
+  memBackfilled = false
+  try {
+    const db = openMemIndex()
+    db?.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '0')").run()
+  } catch { /* 库还锁着就算了，本进程已经退回文件读 */ }
+  if (staleRetry) return
+  staleRetry = setTimeout(() => { staleRetry = null; backfillMemoryIndex() }, 60_000)
+  ;(staleRetry as any).unref?.()
 }
 
 function mapRow(r: any): Record_ {
@@ -483,23 +499,32 @@ function dbQuery(sql: string, ...params: any[]): Record_[] | null {
   } catch { return null }
 }
 
+/** 索引不可用时的文件回退；同一次记忆注入里多次回退只扫一遍盘 */
+let fileScanCache: { at: number; list: Record_[] } | null = null
+function allRecordsCached(): Record_[] {
+  if (fileScanCache && Date.now() - fileScanCache.at < 5000) return fileScanCache.list
+  const list = allRecords()
+  fileScanCache = { at: Date.now(), list }
+  return list
+}
+
 function allRecordsFast(): Record_[] {
-  return dbQuery("SELECT id,t,role,text FROM msg ORDER BY t ASC, rowid ASC") || allRecords()
+  return dbQuery("SELECT id,t,role,text FROM msg ORDER BY t ASC, rowid ASC") || allRecordsCached()
 }
 
 function recordsSince(iso: string): Record_[] {
   return dbQuery("SELECT id,t,role,text FROM msg WHERE t >= ? ORDER BY t ASC, rowid ASC", iso)
-    || allRecords().filter((r) => r.t >= iso)
+    || allRecordsCached().filter((r) => r.t >= iso)
 }
 
 function recordsInRange(from: string, to: string): Record_[] {
   return dbQuery("SELECT id,t,role,text FROM msg WHERE day >= ? AND day <= ? ORDER BY t ASC, rowid ASC", from, to)
-    || allRecords().filter((r) => { const d = dayOf(new Date(r.t)); return d >= from && d <= to })
+    || allRecordsCached().filter((r) => { const d = dayOf(new Date(r.t)); return d >= from && d <= to })
 }
 
 function recordsOnDay(day: string): Record_[] {
   return dbQuery("SELECT id,t,role,text FROM msg WHERE day = ? ORDER BY t ASC, rowid ASC", day)
-    || allRecords().filter((r) => dayOf(new Date(r.t)) === day)
+    || allRecordsCached().filter((r) => dayOf(new Date(r.t)) === day)
 }
 
 // ———————— FTS5 记忆索引 ————————
@@ -755,7 +780,11 @@ function indexRecord(r: Record_): void {
       try { db.exec("ROLLBACK") } catch { /* ignore */ }
       throw e
     }
-  } catch (e) { log(`indexRecord failed ${String(e)}`) }
+  } catch (e) {
+    log(`indexRecord failed ${String(e)}`)
+    // 归档已落盘但索引没写进去：退回文件读，稍后重试回填，别让记忆静默缺一条
+    markIndexStale()
+  }
 }
 
 /** 回填锁：避免多个会话同时灌库；10 分钟视为过期 */
@@ -821,6 +850,7 @@ function backfillMemoryIndex(): void {
     bootstrapCooccurrence(db, all)
     // 回填完成后才允许走 SQLite 读路径；失败/没跑完就继续读文件
     try { db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled', '1')").run() } catch { /* ignore */ }
+    indexStale = false
   } catch (e) { log(`backfill failed ${String(e)}`) }
   finally { releaseBackfillLock("backfill") }
 }
@@ -1959,20 +1989,46 @@ function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: 
     } else {
       resolvePromise({ code: -1, out: "", err: "没有指定脚本，SKILL.md 也没写 run:。", cmd: "" }); return
     }
-    const cap = (s: string) => s.length > 20_000 ? `${s.slice(0, 20_000)}\n…（输出超 20000 字，已截断）` : s
+    const LIMIT = 20_000
+    const finish = (s: string, truncated: boolean) => truncated ? `${s}\n…（输出超 ${LIMIT} 字，已截断）` : s
     const child = spawn(cmd, cmdArgs, {
       cwd: realSkill,
       env: { ...process.env, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_SKILL: skill.name, LIFE_WORLD_SKILL_DIR: realSkill },
       stdio: ["ignore", "pipe", "pipe"],
+      // 独立进程组：超时能把 bash 拉起的孙进程一起杀掉
+      detached: true,
     })
     let out = ""
     let err = ""
+    let outTrunc = false
+    let errTrunc = false
+    // 运行期就截断，别等进程结束才处理，防止脚本狂写把主进程撑爆
+    const collect = (cur: string, s: string, mark: () => void): string => {
+      if (cur.length >= LIMIT) { mark(); return cur }
+      if (cur.length + s.length > LIMIT) mark()
+      return cur + s.slice(0, LIMIT - cur.length)
+    }
+    child.stdout.on("data", (d) => { out = collect(out, String(d), () => { outTrunc = true }) })
+    child.stderr.on("data", (d) => { err = collect(err, String(d), () => { errTrunc = true }) })
     let killed = false
-    const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL") } catch { /* ignore */ } }, timeoutSec * 1000)
-    child.stdout.on("data", (d) => { out += String(d) })
-    child.stderr.on("data", (d) => { err += String(d) })
-    child.on("error", (e) => { clearTimeout(timer); resolvePromise({ code: -1, out: cap(out), err: String(e), cmd: label }) })
-    child.on("close", (code) => { clearTimeout(timer); resolvePromise({ code: killed ? -2 : code, out: cap(out), err: cap(err), cmd: label }) })
+    let settled = false
+    let timer: any = null
+    let killTimer: any = null
+    const done = (code: number | null) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      resolvePromise({ code, out: finish(out, outTrunc), err: finish(err, errTrunc), cmd: label })
+    }
+    timer = setTimeout(() => {
+      killed = true
+      try { if (child.pid) process.kill(-child.pid, "SIGKILL") } catch { try { child.kill("SIGKILL") } catch { /* ignore */ } }
+      // 孙进程可能还攥着管道，close 迟迟不来；兜底自己收尾
+      killTimer = setTimeout(() => done(-2), 2000)
+    }, timeoutSec * 1000)
+    child.on("error", (e) => { err = collect(err, String(e), () => { errTrunc = true }); done(-1) })
+    child.on("close", (code) => done(killed ? -2 : code))
   })
 }
 
@@ -2610,7 +2666,7 @@ export default function (pi: ExtensionAPI) {
     addTool(pi, {
       name: "skill_run",
       label: "Skill run",
-      description: "跑技能目录里的脚本。只能跑技能目录内的文件；不给 script 就用 SKILL.md 的 run:。云端模式不可用（避免脚本读到私密资料），先切回本地。",
+      description: "跑技能目录里的脚本。只能跑技能目录内的文件；不给 script 就用 SKILL.md 的 run:。配了本地模型但当前不在本地时不跑（避免脚本读到私密资料），先切回本地。",
       parameters: {
         type: "object",
         properties: {

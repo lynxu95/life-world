@@ -126,7 +126,7 @@ pi          # TUI，已经带 life-world
 ## 守护与清理
 
 - **桥接守护**：家会话每个 tick 检查 `status/qq-*.json` 心跳；超过 `guard.staleSeconds` 没更新就调 `lwctl restart qq` 拉起，冷却 `guard.cooldownMinutes`。
-- **家会话自愈**：`home-rpc.mjs` 的 pi 子进程异常退出后自动重启（2s 起指数退避，最长 60s；稳定跑满 1 分钟重置），`SIGTERM/SIGINT` 时才真正退出。
+- **家会话自愈**：`home-rpc.mjs` 的 pi 子进程退出后自动重启（2s 起指数退避，最长 60s；稳定跑满 1 分钟重置），`SIGTERM/SIGINT` 时才真正退出。
 - **tmp 清理**：每天一次，删除 `worlds/default/tmp/` 里超过 `cleanup.tmpMaxAgeHours` 的附件。
 - **日志轮转**：`debug.log`（5MB）、`qq-bridge.log`、`home-rpc.log` 超限自动切 `.1`。
 
@@ -240,7 +240,7 @@ lwctl board stop
 
 - 世界目录下 `skills/own/`（自制）和 `skills/downloaded/`（下载）分开放；每个技能一个文件夹，`SKILL.md` 在根上；
 - `skills/INDEX.md` 自动生成；AI 用 `skill_list()` 查索引、`skill_read({ name })` 读正文、`skill_run({ name, script? })` 跑脚本，平时不把列表注入上下文；
-- `skill_run` 只允许跑技能目录内的文件；不给 `script` 就用 `SKILL.md` 的 `run:`；默认 60 秒超时、输出截断 2 万字符；云端模式不跑；
+- `skill_run` 只允许跑技能目录内的文件；不给 `script` 就用 `SKILL.md` 的 `run:`；默认 60 秒超时、输出截断 2 万字符；配了本地模型又不在本地时不跑；
 - `skill_toggle({ name, enabled })` 停用只是加 `.disabled` 标记，不删文件；
 - 群聊不注册这四个工具；下载的技能会提示先确认内容；
 - 脚本 / 参考 / 素材收在技能文件夹里，放外面的要在 `SKILL.md` 写清绝对路径和原因；`pi/examples/skills/own/时间/` 是示例。
