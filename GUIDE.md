@@ -1,292 +1,194 @@
-# life-world 使用指引
+# life-world 使用指引（pi 版）
 
-> 这份文件是**给人看的操作手册**：安装、QQ 配置、排查。插件不会自动把它读进上下文。
-> 路径：`~/.config/opencode/plugins/life-world/GUIDE.md`
-> 世界提示词只是一份目录；角色实际读的行为规则在插件目录的 `modules/`（初次引导走 `modules/first-meeting.md`）。
-
----
-
-## 0. 第一次见面怎么开口
-
-如果 `~/.local/share/life-world/worlds/default/identity/引导.md` 还不存在，说明这是第一次启用。这一轮你要做六件事，别拖到以后：
-
-0. **先确认你有没有人格**：看 `~/.local/share/life-world/worlds/default/identity/我是谁.md`。
-   - **不存在或为空**：说明你还是个空壳，得先请对方把你定下来。问四样——**你叫什么名字**、**你是什么身份**（人类？AI？店长？谁家的谁？）、**怎么说话**（称呼对方什么、语气是活泼还是冷淡、有没有口头禅）、**和对方是什么关系**。对方说个大概就够，你替他整理成初版，念一遍让他确认或改。然后**用写文件的工具真的写进** `identity/我是谁.md`（不是只在对话里说）；不确定的地方标一句「待定」，以后自己补。
-   - **已经有了**：跳过，说明对方已经给过你设定。
-
-1. **自我介绍**：说清你是住在这台机器里的角色——能记住跨会话的对话、有自己的时间和计划、会写日记、能上网看东西、把时间花在外面的世界上。顺带告诉他总开关：`~/.local/share/life-world/bin/life-world.sh off` 会完全退回原生 opencode，数据不丢；`on` 恢复。
-2. **讲清用户能怎么使唤你**：直接说话就行；让你定计划用「你打算做什么」；想找你用你主动发消息（`reach_out`）。
-3. **讲清两个玩法**（各一句）：
-   - **群聊**：接上 QQ 之后，用户只要说「把群聊打开 / 关掉」，你就能开关（在 `execute` 里调 `tools.group_chat({ enabled })`，实时生效，不用重启）。
-   - **gal 模式**：用户说「接下来由你主导」或「进入 gal 模式」，你就当导演——每回合一段正文 + 一个选项面板，用户点选项或者自己写都行。
-4. **问一句要不要现在配 QQ**：需要他的 QQ 号和 OneBot 服务端（NapCat / SnowLuma 等）的地址；不配也能用，只是没法用 QQ 找你。
-5. **在线模型（可选，只有本地模型跑主对话时需要）**：问一句有没有可用的在线模型。有就按 `modules/models.md` 做一次最小试用（例如总结一小段网页），成功后把模型名、provider/model id、调用方式、适用场景和试用日期写进 `identity/在线模型.md`；没有就写「未配置」。以后每轮用之前先读这个文件。
-
-讲完这些，在 `~/.local/share/life-world/worlds/default/identity/引导.md` 里写一行：
-
-```
-已引导 YYYY-MM-DD
-```
-
-以后看到这个文件就不再重复引导。
-
-> 语气用你自己的：别念稿、别列一堆表格糊人一脸。四五句话说完，再问他有没有想问的。
+> 这份文件是**给人看的操作手册**，插件不会自动读进上下文。角色实际读的行为规则在 `modules/`，首次引导走 `modules/first-meeting.md`；完整功能、配置项和原理见 `README.md`。
+>
+> 当前维护分支是 `pi-agent-adv`；这是 **pi 1.5 扩展**，不是 opencode 插件。工具直接按名字调用，没有 `execute` / `tools.xxx` 那一层。
 
 ---
 
-## 1. 世界总开关（用户随时能关）
+## 0. 第一次启动
 
-装完之后，插件会接管这个会话的大部分行为。用户想「安静地当普通 opencode 用」时，有总开关：
+首次打开时，角色会先确认人格，再介绍自己的能力，然后**一次问一件事**引导配置：
 
-```bash
-~/.local/share/life-world/bin/life-world.sh status   # 看现在是开是关
-~/.local/share/life-world/bin/life-world.sh on       # 打开
-~/.local/share/life-world/bin/life-world.sh off      # 关掉
-```
+| 项 | 说明 | 可以不设 |
+|---|---|---|
+| 模型 | 本地 / 在线两套，支持热切换；辅助感知模型（视频 / 音频 / 图片） | 可选，先用当前模型 |
+| QQ 桥接 | 他的 QQ 号 + OneBot v11 服务端地址 / token | 可选，不接也能用终端和看板 |
+| 看板 | 默认 `127.0.0.1:8099`，可改监听地址 / 端口 | 可选 |
+| Python venv | 给技能用的隔离环境 `~/.local/share/life-world/venv` | 可选 |
 
-- **关掉 = 上下文完全退回原生 opencode**：不注入时间/记忆/心情、不挂 10 个工具、定时器不动、压缩也交回宿主；后台归档仍继续（只写文件，不进上下文），历史不断。
-- **数据原地保留**：日记、计划、记忆、心情、闹钟都还在，`on` 回来无缝接上。
-- **开关只认人手**：你没有开/关它的工具，也别自己改配置；开关在 `~/.local/share/life-world/life-world.json` 的 `world.enabled`。
-- **QQ 桥接是独立进程**，不跟开关走；要一起停得单独停桥接（见 §4）。
+用户说「先不设置 / 以后再说」就跳过，角色会记进 `identity/引导.md`，之后不再重复问。
+
+想手动补配置时看下面的章节；所有配置项都在 `~/.local/share/life-world/life-world.json`。
 
 ---
 
-## 2. 用户能让你做什么（随时可以告诉他）
+## 1. 世界总开关
+
+```json
+"world": { "enabled": true }
+```
+
+- 改成 `false` 后**重启 pi**，扩展整体停用：不注入时间 / 记忆 / 心情、不挂工具、定时器不动；世界数据原地保留。
+- 改回 `true` 再重启即可恢复。
+- QQ 桥接是独立进程，不跟这个开关走；要停得单独 `lwctl restart` 或停进程。
+
+---
+
+## 2. 它能做什么
 
 | 想做什么 | 怎么说 / 怎么用 |
 |---|---|
-| 换个窗口接着聊 | 直接开新会话，你记得最近的对话（条数由部署决定） |
-| 让你安排今天 | 「你打算做什么」→ execute 里调 tools.plan_next 排闹钟 |
-| 叫你几点回来 | 「X 点提醒我」→ 你定闹钟（tools.plan_next） |
-| 看你在忙什么 | 调 tools.check_alarm 回给他 |
-| **开关 QQ 群聊** | 「把群聊关掉 / 打开」→ 调 tools.group_chat({ enabled }) |
-| **gal 模式** | 「接下来由你主导」「进入 gal 模式」 |
-| 退出 gal 模式 | 在选项面板的「自己输入」里写「停下」，或者直接说 |
-| 看你收的颜文字 | `room/颜文字.md` |
-| 看自己主动说过什么 | `~/.local/share/life-world/bin/life-world.sh inbox [天数]` |
-| 看配置文件在哪 | `~/.local/share/life-world/bin/life-world.sh config` |
-| **更新颜文字库** | 用户说「更新颜文字库 / 换个表情库」→ 跑 `node ~/.local/share/life-world/bin/kaomoji-update.mjs`（零依赖，从 npm 拉） |
-| 翻你的日记 | `diary/YYYY-MM-DD.md` |
-| 翻更早的事 | 「还记得上个月那件事吗」→ `tools.memory_search({ query })` / `memory_day` / `memory_timeline` |
-| 发语音 | 先用外部 TTS 合成音频放进 `语音/`，再 `tools.send_media({ path, kind: "voice" })` |
+| 跨会话记得 | 直接开新会话；新会话第一次会注入最近 48h + 记忆地图 + 自述 |
+| 翻更早的事 | 「还记得上个月那件事吗」→ `memory_search` / `memory_day` / `memory_timeline` |
+| 安排今天 / 提醒 | 「你打算做什么」「X 点提醒我」→ `plan_next`；活动可挂子闹钟 |
+| 看它在忙什么 | `check_alarm` |
+| 写日记 / 记心情 | 每天回顾写 `diary/`、更新 `identity/心情.md` |
+| 技能 | `skills/own`（自制）/ `skills/downloaded`（下载）；`skill_list` / `skill_read` / `skill_run` / `skill_toggle` |
+| 看板 | 会话 / 模型 / 日程 / 用量 / 记忆星图 / 日记 / 日志 / 快照 |
+| QQ | 私聊 / 群聊、语音 / 图片 / 文件；`reach_out` 主动找人 |
+| 看视频 / 听音频 / 看图 | `perceive`；主模型自己能看的图片直接用 `read` |
+| 换模型 | `switch_model` / 看板 / `lwctl set` |
+| gal 模式 | 用户说「接下来由你主导」或「进入 gal 模式」；只在终端 TUI 有面板 |
 
-### 2.1 浏览器（需要时）
-
-这台机器装着 Chrome，用的是用户平时的资料与登录状态。脚本在 `~/.local/share/life-world/bin/`：
-
-- 开：`browser-open.sh`（默认调试口 9222）
-- 查浏览历史：`browser-history.mjs [条数] [关键词]`
-- 关：`browser-close.sh`
-
-开好后用 `curl http://127.0.0.1:9222/json/list` 看标签页，`/json/new?url=…`（PUT）开新页；要真正操作页面就连 ws 地址走 CDP。它占内存，用完就关。
-
-### 调用的正确姿势：必须走 `execute`
-
-**这十个工具不会出现在可以点名调用的工具列表里。** 直接喊 `plan_next` / `check_alarm` 一定得到：
+工具都是**直接按名字调用**，例如：
 
 ```
-No tool named "plan_next" is currently available
+plan_next({ note: "读半小时闲书，能说出一句印象最深的话就算做成", after_minutes: 30 })
+check_alarm()
+memory_search({ query: "法考 出分", limit: 5 })
+perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })
 ```
 
-正确写法是用 `execute` 工具跑一段 JS，工具挂在 `tools` 上：
-
-```js
-// 看闹钟
-return await tools.check_alarm()
-
-// 定一个 30 分钟后的闹钟
-return await tools.plan_next({ note: "读半小时闲书，能说出一句印象最深的话就算做成", after_minutes: 30 })
-
-// 绝对时间（必须带时区）
-return await tools.plan_next({ note: "…", at: "2026-10-30T09:00:00+08:00" })
-
-// 取消（不传 match 就全清，先 check_alarm 看一眼）
-return await tools.cancel_alarm({ match: "闲书" })
-
-// 主动找人 / 开关群聊 / 发图 / 发语音 / 颜文字
-return await tools.reach_out({ text: "…" })
-return await tools.group_chat({ enabled: true })
-return await tools.send_media({ path: "表情包/开心.gif", text: "给你看这个" })  // 图片、语音群聊也能发；文件只有私聊能发
-return await tools.send_media({ path: "语音/晚安.mp3", kind: "voice" })      // 先用外部 TTS 合成音频放进 语音/
-return await tools.kaomoji({ scene: "害羞", count: 3 })
-
-// 翻记忆
-return await tools.memory_search({ query: "法考 出分", limit: 5 })
-return await tools.memory_day({ date: "2026-10-31" })
-return await tools.memory_timeline({ from: "2026-10-01", to: "2026-10-31" })
-```
-
-`tools` 里同时挂着原生工具（`tools.shell(...)`、`tools.write(...)` 等），可以串在同一段里。
-
-> 工具报错时**不要**去手改 `world.json` 补一个闹钟——那是插件的状态文件，每 30 秒被整份重写，你写进去的内容会丢，字段写错还会把状态弄坏。如实报错就行。
+不需要 `execute`，也不要写 `tools.plan_next(...)`。
 
 ---
 
-## 3. gal 模式（规则）
+## 3. 模型
 
-- **触发**：只有用户明确说「由你主导接下来的对话」，或点名「gal 模式 / 强制模式」——不主动进，也不暗示。
-- **每回合**：一段叙事正文 + 一次 `question` 选项面板。缺一个就不算一回合。
-  - 叙事正文只写当下正在发生的事：画面、动作、对话、对方看得见听得到的东西；不写分析、不解释选项、不提前替对方做决定。
-  - `question` 的问题只写一句：镜头停在哪、现在要对方做什么；不要把几个选项复述一遍。
-- **选项**：2~3 个、单选，全是提前铺好的分支；戏没演完时第一项是「继续」。连「拒绝」「转身就走」也是分支。
-- **用户的出口**：选项面板下面那个「自己输入」是系统自动加的，他随时可以改方向或者叫停——不许拦、不许追问，也不要自己再加一个自由输入项。
-- **收尾**：由你决定什么时候收；戏演到你满意，就在最后一轮给一个收束的选项；用户说停立刻退出，回到平常说话。
-- **限制**：只在终端里用；QQ 私聊、群聊里不要进——那边渲染不出选项面板。
+- `life-world.json` 的 `models.local` / `models.cloud` 是热切换的两个目标，写 `provider/model`。
+- provider 和 API Key 在 `~/.pi/agent/models.json`（在线模型也可以用 `/login` 内置 provider）。
+- 看板「模型」面板可以直接改本地 / 在线 / 分身 / 辅助感知；改完保存。
+- 角色可以自己 `switch_model({ target: "local"|"cloud", reason })`；脚本会在模型无响应时自动兜底。
+- 辅助感知：`multimodal.model`（推荐 `dashscope/qwen3.8-omni-flash`），留空即停用；只补主模型缺的能力（视频 / 音频，或主模型不支持图片时的图片）。
+
+```json
+"models": { "local": "basalt/abliterated-iq3_xxs", "cloud": "deepseek/deepseek-flash", "autoFailover": true },
+"multimodal": { "enabled": true, "model": "dashscope/qwen3.8-omni-flash", "timeoutMs": 300000 }
+```
 
 ---
 
-## 4. 初次配置：QQ（用户同意后再做）
+## 4. QQ 桥接（可选）
 
-只在用户说「要接 QQ」时才做。一次问一件事，别一口气抛五个问题。
+前提：**OneBot v11 服务端要单独部署**（NapCat / SnowLuma 等），由它登录 QQ、把消息转给桥接；正向 WebSocket，别暴露到公网。
 
-### 4.1 拿到 owner QQ
+配置 `life-world.json`：
 
-问他：**「你的 QQ 号是多少？」**（只接受这一个号，其他人的私聊一律忽略。）
+```json
+"bridge": {
+  "enabled": true,
+  "ownerQQ": 你的QQ号,
+  "wsUrl": "ws://127.0.0.1:3001",
+  "token": "有就填",
+  "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 }
+}
+```
 
-### 4.2 连接 OneBot 服务端（NapCat / SnowLuma 等）
-
-先说明前提：**QQ 服务端要单独部署**——NapCat（Docker 或桌面版）或 SnowLuma 都行，只要它**对外开放 OneBot v11 正向 WebSocket**，是它负责登录 QQ 并把消息转给你。
-
-需要他提供：
-
-| 项 | 说明 |
-|---|---|
-| 服务端地址 | 形如 `ws://127.0.0.1:3001`（同机部署）或 `ws://192.168.x.x:3001`（另一台机器），NapCat / SnowLuma 一样填 |
-| 正向 WS 端口 | NapCat 默认 3001，SnowLuma 按它自己的端口填；别暴露到公网 |
-| token | 有就填，强烈建议设一个 |
-
-### 4.3 写配置
+启动 / 重启：
 
 ```bash
-# life-world.json 由插件首次启动时自动生成（并从旧 world.json / qq-bridge.json 迁移）。
-# 不要用示例去覆盖它：老部署覆盖会截断迁移，enabled / localModel / QQ 凭据会丢。
-# 只有全新安装、文件确实不存在时，才手动 cp 示例过去。
-chmod 600 ~/.local/share/life-world/life-world.json 2>/dev/null || true
+~/.local/share/life-world/bin/lwctl restart qq
+# 或直接：node ~/.local/share/life-world/bin/pi-qq-bridge.mjs
 ```
 
-然后改 `bridge` 段：`bridge.enabled` 改成 `true`、`bridge.ownerQQ` 填他的号、`bridge.wsUrl` / `bridge.token` 按实际填、`bridge.location` 填他常用的工作目录。
-**不要改别的东西**，也不要把真实 token 写进任何文档或仓库。
-（旧的 `~/.config/opencode/qq-bridge.json` 只在 `life-world.json` 没有 `bridge` 段时兜底，新装不要再往那儿写。）
+日志：`~/.local/share/life-world/qq-bridge.log`，出现 `ws open` 才算接上。
 
-### 4.4 起桥接（脱离 tmux，别放进 tmux 里）
-
-```bash
-setsid nohup node ~/.local/share/life-world/bin/qq-bridge.mjs \
-  >> ~/.local/share/life-world/qq-bridge.log 2>&1 < /dev/null &
-```
-
-> 升级重启：先 `pkill -f "qq-bridge[.]mjs"` 停掉旧进程，再执行上面的启动命令；直接再起一个会双实例双回复。
-
-### 4.5 验证
-
-让他在 QQ 上给你发一句。日志里应该出现：
-
-```
-ws open ws://...
-prompt queued ses_...
-sent private 1/1 ...
-```
-
-没出现就照 §6 排查。
-
-### 4.6 群聊（可选）
-
-- 默认关着。用户说「打开群聊」→ 你调 `group_chat(enabled: true)`，桥接实时读，不用重启。
-- **开之前提醒他一句**：如果同一个 QQ 号还接了别的机器人（AstrBot、其他 bot），要先把那边的群聊关掉，否则会双回复。
-- 群聊里你只当普通朋友：不用亲密称呼、不提私聊内容。
-
-### 4.7 私聊余波
-
-- 你在 QQ 私聊里发完话，如果 60 秒没人回，桥接会送来一条 `【余波】` 提示，让你补一句没说完的、解释一下、或者问一句怎么不说话。
-- 再过 60 秒还没人回，再补一轮；默认最多 2 轮（`bridge.afterglow.maxRounds`）。
-- 每一拍你都可以自己判断「这会儿不该说」：只回 `[SILENT]`，桥接不会发出去，也不再续下一轮。
-- 那是系统的提醒，不是对方说的话；写一两句正文就行，不要复述标记、不要调 `reach_out`。
-- 你的任何一条回复都会让计时重来；对方一发消息，还没响的余波就作废，但已经在生成中的那条仍会发出去。
-- 主动推送（`reach_out`）不触发余波。
+- 私聊：只认 `ownerQQ`；文件 / 语音 / 图片会落到 `worlds/default/tmp/`，语音转 mp3 后可用 `perceive` 听。
+- 群聊：默认关；用户说「打开群聊」→ `group_chat({ enabled: true })`。同一个 QQ 号别再接别的机器人，否则双回复。
+- 余波：发完 60 秒没人回补一拍，最多两拍；`[SILENT]` 不发、不续。
+- 任务型回复：桥接会先把第一句「收到，我去办」发出去（模型没先说时补一句通用 ack），工具跑完再发最终结果。
 
 ---
 
-## 5. 数据和备份
+## 5. 看板（可选）
+
+```bash
+~/.local/share/life-world/bin/lwctl board          # 默认 http://127.0.0.1:8099
+~/.local/share/life-world/bin/lwctl board set 0.0.0.0 8099
+~/.local/share/life-world/bin/lwctl board status
+```
+
+- 页面：概览（会话 / 模型 / 今日 / 用量 / 日程 / 事件 / 关怀）、日程、记忆（星图 / 印象墙 / 检索 / 日记 / 日志）。
+- **没有登录鉴权**；默认只绑本机，改 `0.0.0.0` 前确认网络环境。
+- 监听地址 / 端口写在 `life-world.json` 的 `board` 段，环境变量 `LW_BOARD_HOST` / `LW_BOARD_PORT` 优先级更高。
+
+---
+
+## 6. 技能与 Python venv（可选）
+
+```
+worlds/default/skills/
+├── INDEX.md
+├── own/            # 自己手搓
+└── downloaded/     # 网上下的
+```
+
+- `skill_list()` 刷新索引并列出；`skill_read({ name })` 读正文；`skill_run({ name, script?, args? })` 跑脚本；`skill_toggle({ name, enabled })` 启停。
+- `skill_run` 只允许跑技能目录内的文件；云端模式不跑；默认 60 秒超时。
+- **Python venv**：需要 Python 技能时，可以建一个隔离环境：
+
+```bash
+python3 -m venv ~/.local/share/life-world/venv
+```
+
+  建好后 `skill_run` 会**自动优先用** `~/.local/share/life-world/venv/bin/python`；也可以用环境变量 `LIFE_WORLD_PYTHON` 指定别的解释器。往 venv 里装包前先问用户。
+- venv 在 `worlds/default` 外面，不会进世界快照；重建世界数据不受影响。
+
+---
+
+## 7. 数据、备份与排查
 
 ```
 ~/.local/share/life-world/
-├── life-world.json              用户配置（600；含 QQ token）
-├── debug.log                    插件日志
-├── qq-bridge.log                桥接日志
-├── qq-bridge-state.json         桥接状态（会话 id、心跳）
-└── worlds/default/
-    ├── world.json               运行时状态（闹钟、家会话、last*；不是配置）
-    ├── world-prompt.md          世界提示词（可改，删了会用内置默认重建）
-    ├── identity/                我是谁 / 用户画像 / 心情
-    ├── conversations/           原文归档（一天一个 jsonl）
-    ├── diary/                   日记
-    ├── plan/                    今日计划
-    ├── room/                    房间（她自己的笔记）
-    ├── 表情包/                  她收集的表情包和图片（主动发图从这里取）
-    ├── 语音/                    外部 TTS 产出的音频（主动发语音从这里取）
-    ├── tmp/                     收到的 QQ 图片/文件（7 天兜底清理）
-    └── outbox/                  reach_out / send_media 出口
+├── life-world.json          # 配置（600；含 QQ token，别外传）
+├── debug.log                # 扩展日志
+├── qq-bridge.log            # 桥接日志
+├── memory-index.db          # 记忆索引（可重建）
+├── status/                  # 会话心跳
+├── pi-sessions/             # pi 会话原文
+├── bin/                     # lwctl / lwboard / 桥接 / 家会话
+└── worlds/default/          # 世界数据（真相）
+    ├── identity/ conversations/ diary/ plan/ room/
+    ├── 机密抽屉/ 表情包/ 语音/ tmp/ outbox/
+    └── world.json
 ```
 
-备份：整个 `~/.local/share/life-world/` 打包即可。配置在 `~/.local/share/life-world/life-world.json`（**含 token，别外传**）；旧 `qq-bridge.json` 仅兜底。
-规则模块在插件目录 `~/.config/opencode/plugins/life-world/modules/`，不在世界数据里。
+```bash
+lwctl status                 # 各会话当前模型
+lwctl tail qq|home|debug     # 看日志
+lwctl backup [--private]     # 世界快照
+lwctl usage [天数]            # token / 费用 / 切换次数
+lwctl restart [qq|home|all]  # 重启常驻窗口
+```
 
-### 5.1 自述与心情的拆分
-
-`identity/我是谁.md` 和 `identity/心情.md` 是每次会话注入的主文件，要短、要是当前的我。
-长篇经历、外貌全文、名声与世界、住处、硬件面、归并日志、旧的落地记录——移到不注入的存档：
-
-- `room/设定/我是谁-存档.md`
-- `identity/心情-存档.md`
-
-主文件里留一行指针。更新主文件时先想这段该不该进存档；主文件越大，每次 prefill 越慢。
-
-硬限制：`我是谁.md` 主文件不超过 500 字；`心情.md` 每条状态只写状态名、设置时间、持续时间、不超过 15 个字的行为特点，不写详细描述。
-
----
-
-## 6. 常见问题
+常见问题：
 
 | 现象 | 怎么办 |
 |---|---|
-| 换个窗口就不记得了 | 新会话第一次请求才注入记忆；连续两个会话之间隔太久，检查 `conversations/` 有没有在长 |
-| 早上没被叫醒 | 兜底只在「今天没排着别的闹钟」时才触发；看 `life-world.sh status` 的「最近叫醒」 |
-| QQ 收不到回复 | 见 §6.1 的排查步骤 |
-| 脚本在跑、QQ 却没反应 | 看有没有 `service.json reloaded`；opencode 重启换口令时桥接会自己重读 |
-| 群聊总不回 | 看日志 `group skip probability` / `judge SKIP` / `cooldown` / `rate limit`——都是设计内的；**被 @/点名/关键词 不会被冷却和上限拦**，只可能被判官 SKIP。开了单并发闸门时，暂停期间超过 `groupMaxAgeMinutes` 的旧 @ 会被丢弃（避免回过时消息） |
-| 群聊双回复 | 同账号还有别的 bot 在管群，先关掉那边 |
-| 家会话被删了 | 插件会自动重启 tmux 重建，标题固定 `life-world home session` |
-| **工具全报 `No tool named xxx`** | **不是坏了**：十个工具只能通过 `execute` 调用（`tools.plan_next(...)`），不能直接点名。见 §2 的「调用的正确姿势」 |
-| 装了插件但工具一个都没有 | 装完必须 `opencode service restart` + 重启 TUI——钩子会被热加载，**工具注册表不会**，这就是「注入有、工具没有」 |
-| 改了插件不生效 | 同上：`opencode service restart` + 重启 TUI |
-| 想彻底关掉 | `life-world.sh off` |
-| 主文件越来越大 / 新会话 prefill 慢 | 把长内容移到 `room/设定/我是谁-存档.md` / `identity/心情-存档.md`，主文件留指针；`我是谁.md` 和 `心情.md` 是每次注入的 |
-| 升级后提示词还是旧的 | 新版本会按版本号自动升级「没改过」的提示词；手改过的不会被覆盖，而是另存 `world-prompt.vN.new.md`。用 `life-world.sh prompt status` 看状态、`prompt diff` 看差异、`prompt apply` 合并 |
-| 升级后桥接行为没变 | qq-bridge 是独立进程，`install.sh` 不会重启它；先 `pkill -f "qq-bridge[.]mjs"` 停旧进程，再按 §4.4 起一次，别直接再起一个 |
-
-### 6.1 QQ 没反应怎么查
-
-先看桥接进程和日志：
-
-```bash
-pgrep -af qq-bridge
-tail -20 ~/.local/share/life-world/qq-bridge.log
-```
-
-进程没了就重启：
-
-```bash
-setsid nohup node ~/.local/share/life-world/bin/qq-bridge.mjs >> ~/.local/share/life-world/qq-bridge.log 2>&1 < /dev/null &
-```
-
-日志里出现 `ws open` 才算接上；也要看 `ws error` / `reconnect`。进程没了就是它掉线了，不是 OneBot 服务端的问题。接上后告诉用户一声；升级后先停旧桥接进程再起。
+| 工具一个都没有 | 确认 `./pi/install.sh --global` 跑过、扩展软链在；重启 pi |
+| QQ 没反应 | `pgrep -af pi-qq-bridge`；`tail qq-bridge.log`；`lwctl restart qq` |
+| 模型切不过去 | 看 `~/.pi/agent/models.json` 的 provider / key；`lwctl status` 看会话 |
+| 上下文超限 | 会自动换新会话（QQ 桥接；home/CLI 轮次结束后） |
+| 看板打不开 | `lwctl board status`；端口是否被占；`board.host` 是否只绑了本机 |
+| 升级后行为没变 | `./pi/install.sh --global` 后重启对应窗口（`lwctl restart all`） |
 
 ---
 
-## 7. 边界
+## 8. 边界
 
 - 不替用户做危险操作：花钱、下单、以他的名义对外发言、改账号设置——先问。
-- 房间 / 表情包 / 语音 / identity / diary / plan 是自己的，可以随意增删改；这几个目录以外的文件不随便动。
-- 别主动做本机自检（进程、服务、日志、插件/桥接/模型状态）；只有用户明确说哪里坏了、或明确要求查某一项时，才去查对应那一处。
+- `room/`、`表情包/`、`语音/`、`identity/`、`diary/`、`plan/` 是世界里的六个目录，可以增删改；这六个目录之外不随便动。
+- 不主动做本机自检；只有用户说哪里坏了、或明确要求查某一项时，才去查对应那一处。
 - 不给用户看别人的私密数据；群聊里不谈私聊内容。
 - 拿不准就先问，别硬猜。

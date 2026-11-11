@@ -2264,7 +2264,11 @@ function runSkill(skill: SkillInfo, script: string, args: string[], timeoutSec: 
       const ext = extname(target).toLowerCase()
       if ([".mjs", ".js", ".cjs"].includes(ext)) { cmd = process.execPath; cmdArgs = [target] }
       else if (ext === ".sh") { cmd = "bash"; cmdArgs = [target] }
-      else if (ext === ".py") { cmd = process.env.LIFE_WORLD_PYTHON || "python3"; cmdArgs = [target] }
+      else if (ext === ".py") {
+        const venvPy = join(ROOT, "venv", "bin", "python")
+        cmd = process.env.LIFE_WORLD_PYTHON || (existsSync(venvPy) ? venvPy : "python3")
+        cmdArgs = [target]
+      }
       else { cmd = target; cmdArgs = [] }
       cmdArgs = [...cmdArgs, ...args]
     } else if (skill.run) {

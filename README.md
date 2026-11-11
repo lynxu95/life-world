@@ -111,6 +111,10 @@ tmux new-window  -t life-world -n home   'TZ=Asia/Shanghai LIFE_WORLD_MODEL=basa
 lwctl board                              # Web 看板
 ```
 
+### 首次启动
+
+角色第一次打开时会先确认人格，再介绍自己的能力，然后逐个问模型 / QQ 桥接 / 看板 / Python venv；每一项都可以「先不设置」，选择会记进 `identity/引导.md`。详细步骤见 `GUIDE.md`。
+
 ### 卸载
 
 ```bash
@@ -242,6 +246,7 @@ worlds/default/skills/
 - `skill_run({ name, script?, args?, timeout_seconds? })`：只允许跑技能目录内的脚本，默认最多 60 秒、输出截断 2 万字符；不给 `script` 就用 `SKILL.md` 的 `run:`；配了本地模型又不在本地时不跑（避免脚本读到私密资料）；
 - `skill_toggle({ name, enabled })`：停用只是加 `.disabled` 标记，不删文件；停用的技能不能跑，但还能读；
 - 群聊不注册这四个工具。`pi/examples/skills/own/时间/` 是一份可直接复制过去试的示例。
+- Python 技能优先用 `~/.local/share/life-world/venv/bin/python`（存在时），也可用 `LIFE_WORLD_PYTHON` 指定；建 venv：`python3 -m venv ~/.local/share/life-world/venv`（在 world 外，不进快照）。
 
 `SKILL.md` 最少写 frontmatter：
 
