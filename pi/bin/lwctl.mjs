@@ -361,7 +361,8 @@ function cmdUpdate(args = []) {
   const repo = repoPath()
   if (!repo) { console.error("找不到仓库路径：$ROOT/repo-path 和 $ROOT/ext 软链都不在。"); return false }
   if (!existsSync(join(repo, "pi/install.sh"))) { console.error(`当前仓库不是 pi 版（${repo}），先切到 pi-agent-adv 再更新。`); return false }
-  const dirty = runGit(repo, ["status", "--porcelain"])
+  // 只看已跟踪文件的改动；未跟踪文件不会因 ff 合并丢失，冲突时 git 会自己拒绝
+  const dirty = runGit(repo, ["status", "--porcelain", "--untracked-files=no"])
   if (dirty.status !== 0) { console.error(`git status 失败：${String(dirty.stderr || "").trim()}`); return false }
   if (String(dirty.stdout || "").trim()) {
     console.error("仓库有未提交改动，先 commit / stash 再更新：\n" + String(dirty.stdout).trim())

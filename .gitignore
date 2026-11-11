@@ -1,5 +1,6 @@
 .DS_Store
 node_modules/
+.claude/
 *.log
 index.ts.bak-*
 start-tui.sh.bak-*
