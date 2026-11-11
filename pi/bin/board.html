@@ -884,7 +884,7 @@ function renderSubs(list) {
   }
   const cards = mains.map((m) => {
     const subs = subsOf(m.id)
-    const state = m.status === "active" ? (m.paused ? "已暂停" : "进行中") : "待开始"
+    const state = m.paused ? "已暂停" : (m.status === "active" ? "进行中" : "待开始")
     const items = subs.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
     const skip = (m.skipped || []).length
       ? `<div class="sub-skip">跳过：${m.skipped.map((s) => `${fmtClock(s.scheduled)} ${esc2(s.note)}`).join("、")}</div>`

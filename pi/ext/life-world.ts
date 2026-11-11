@@ -2452,8 +2452,12 @@ async function mediaDataUrl(path: string, kind: MediaKind, outDir: string): Prom
     const duration = kind === "image" ? 0 : await probeDuration(path)
     const small = kind === "image" ? await compressImage(path, outDir) : kind === "audio" ? await compressAudio(path, outDir, duration) : await compressVideo(path, outDir, duration)
     if (!small) {
-      const hasTool = !!(findBin("ffmpeg") || findBin("magick") || findBin("convert"))
-      if (!hasTool) return { error: "本地文件超过 Base64 内联上限，但没装 ffmpeg / imagemagick，压不了。装一个，或给公网直链。" }
+      const hasTool = kind === "image"
+        ? !!(findBin("magick") || findBin("convert") || findBin("ffmpeg"))
+        : !!findBin("ffmpeg")
+      if (!hasTool) return { error: kind === "image"
+        ? "本地图片超过 Base64 内联上限，但没装 ImageMagick / ffmpeg，压不了。装一个，或给公网直链。"
+        : "本地音视频超过 Base64 内联上限，但没装 ffmpeg，压不了。装 ffmpeg，或给公网直链。" }
       const tooLong = kind === "video" && duration > 0 && Math.floor((MEDIA_INLINE_BYTES * 8) / duration / 1000) < 120
       return { error: tooLong
         ? "视频太长，压到 Base64 内联上限（原始 7MB）会糊得没法看。建议给公网直链，或和用户商量分段发送。"
@@ -2611,6 +2615,15 @@ export default function (pi: ExtensionAPI) {
     writeAck(c.id, { ok: result.startsWith("已切到") || result.startsWith("已经是"), model: target, msg: result })
     writeStatus()
   }
+  /** 单条命令最多处理 60 秒；卡住也要放锁，别让后续命令永远没人消费 */
+  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T | null> => new Promise((resolve) => {
+    let done = false
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(null) } }, ms)
+    p.then(
+      (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v) } },
+      (e) => { if (!done) { done = true; clearTimeout(timer); log(`control failed ${String(e)}`); resolve(null) } },
+    )
+  })
   let pollingControl = false
   const pollControl = async () => {
     if (pollingControl) return
@@ -2620,10 +2633,11 @@ export default function (pi: ExtensionAPI) {
         if (!isNewCmd(c)) continue
         try {
           if (!c.at || Date.now() - c.at > 60_000) continue
-          if (c.target !== roleKey && c.target !== "all") continue
+          if (c.target !== roleKey && c.target !== "all") { selfHandled.delete(c.id); continue }
           if (CHANNEL === "group") continue
           if (selfHandled.has(c.id)) { selfHandled.delete(c.id); continue }
-          await handleControl(c)
+          const handled = await withTimeout(handleControl(c), 60_000)
+          if (handled === null) log(`control timeout · ${c.id}`)
         } finally { markCmd(c) }
       }
       // 兼容升级过程中旧进程还在写的 control.json
