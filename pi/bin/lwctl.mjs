@@ -6,10 +6,12 @@
  *   lwctl status         直接打印状态
  *   lwctl set <target> <local|cloud|provider/model> [原因]
  *   lwctl targets
+ *   lwctl update [--no-restart] [--project] [--branch <分支>]
  */
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { homedir } from "node:os"
+import { createHash } from "node:crypto"
 import http from "node:http"
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
@@ -332,6 +334,81 @@ function cmdRestart(target) {
   return results.every((r) => r.ok)
 }
 
+// —— 更新插件 ——
+function repoPath() {
+  try {
+    const p = readFileSync(join(ROOT, "repo-path"), "utf8").trim()
+    if (p && existsSync(join(p, ".git"))) return p
+  } catch { /* ignore */ }
+  try {
+    const real = realpathSync(join(ROOT, "ext", "life-world.ts"))
+    const repo = dirname(dirname(dirname(real)))
+    if (existsSync(join(repo, ".git"))) return repo
+  } catch { /* ignore */ }
+  return ""
+}
+function fileHash(file) {
+  try { return createHash("sha256").update(readFileSync(file)).digest("hex").slice(0, 12) } catch { return "" }
+}
+function runGit(repo, args) {
+  return spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" })
+}
+function cmdUpdate(args = []) {
+  const noRestart = args.includes("--no-restart")
+  const project = args.includes("--project")
+  const bi = args.indexOf("--branch")
+  const branchArg = bi >= 0 ? String(args[bi + 1] || "").trim() : ""
+  const repo = repoPath()
+  if (!repo) { console.error("找不到仓库路径：$ROOT/repo-path 和 $ROOT/ext 软链都不在。"); return false }
+  if (!existsSync(join(repo, "pi/install.sh"))) { console.error(`当前仓库不是 pi 版（${repo}），先切到 pi-agent-adv 再更新。`); return false }
+  const dirty = runGit(repo, ["status", "--porcelain"])
+  if (dirty.status !== 0) { console.error(`git status 失败：${String(dirty.stderr || "").trim()}`); return false }
+  if (String(dirty.stdout || "").trim()) {
+    console.error("仓库有未提交改动，先 commit / stash 再更新：\n" + String(dirty.stdout).trim())
+    return false
+  }
+  const cur = String(runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout || "").trim()
+  const branch = branchArg || (cur && cur !== "HEAD" ? cur : "pi-agent-adv")
+  const old = String(runGit(repo, ["rev-parse", "HEAD"]).stdout || "").trim()
+  const fetch = runGit(repo, ["fetch", "origin"])
+  if (fetch.status !== 0) { console.error(`git fetch 失败：${String(fetch.stderr || "").trim()}`); return false }
+  const target = `origin/${branch}`
+  if (runGit(repo, ["rev-parse", "--verify", target]).status !== 0) { console.error(`远端没有 ${target}。`); return false }
+  console.log(`更新 ${branch}：${old.slice(0, 7)} → ${target} …`)
+  const merge = runGit(repo, ["merge", "--ff-only", target])
+  if (merge.status !== 0) {
+    console.error(`快进合并失败（本地和远端分叉了）：\n${String(merge.stderr || merge.stdout || "").trim()}`)
+    console.error(`旧 HEAD：${old}`)
+    return false
+  }
+  const neu = String(runGit(repo, ["rev-parse", "HEAD"]).stdout || "").trim()
+  if (neu === old) console.log("代码已经是最新。")
+  const cfg = join(ROOT, "life-world.json")
+  const before = fileHash(cfg)
+  const mode = project ? "--project" : "--global"
+  const env = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH || ""}` }
+  console.log(`重装脚本 / 提示词 / 软链（${mode}，不改世界数据与配置）…`)
+  const inst = spawnSync("bash", [join(repo, "pi/install.sh"), mode], { stdio: "inherit", env, cwd: repo })
+  if (inst.status !== 0) {
+    console.error(`install.sh 失败（exit ${inst.status}）。旧 HEAD：${old}`)
+    console.error(`可回滚：git -C ${repo} reset --hard ${old} && ${join(repo, "pi/install.sh")} ${mode}`)
+    return false
+  }
+  const after = fileHash(cfg)
+  if (before && after && before === after) console.log("✓ 配置未变（life-world.json 哈希一致）")
+  else if (before && after) console.warn("⚠ life-world.json 哈希变了，检查 install 是否动了配置")
+  else console.log("（没有 life-world.json，未做哈希对比）")
+  console.log(`✓ 已更新到 ${neu.slice(0, 7)}；数据在 ${join(ROOT, "worlds/default")}，配置在 ${cfg}，均未改动。`)
+  if (noRestart) { console.log("按 --no-restart 跳过重启；下次 pi / qq / home 启动时生效。"); return true }
+  const self = process.argv[1]
+  for (const sub of [["board", "restart"], ["restart", "qq"], ["restart", "home"]]) {
+    const r = spawnSync(process.execPath, [self, ...sub], { stdio: "inherit", env: process.env })
+    if (r.status !== 0) console.warn(`⚠ lwctl ${sub.join(" ")} 失败（exit ${r.status}）`)
+  }
+  console.log("✓ 常驻会话已重启；当前终端里的 pi TUI 要自己退出重开才会加载新代码。")
+  return true
+}
+
 // —— Web 看板 ——
 const BOARD_PID = join(ROOT, "lwboard.pid")
 function pidAlive(pid) {
@@ -522,6 +599,8 @@ if (!cmd && stdin.isTTY) {
   await cmdBoard(arg[0] || "start", arg.slice(1))
 } else if (cmd === "restart") {
   process.exit(cmdRestart(arg[0] || "all") ? 0 : 1)
+} else if (cmd === "update" || cmd === "upgrade") {
+  process.exit(cmdUpdate(arg) ? 0 : 1)
 } else {
   console.log(`lwctl · life-world 会话工具
 
@@ -534,6 +613,8 @@ if (!cmd && stdin.isTTY) {
   lwctl backups                      看最近快照
   lwctl tail [qq|home|debug] [行数]  看日志
   lwctl restart [qq|home|all]        重启常驻窗口
+  lwctl update [--no-restart] [--project] [--branch <分支>]
+                                      拉代码 + 重装脚本/提示词；数据/配置不动，默认重启
   lwctl usage [天数]                 用量统计（token / 云端本地 / 切换）
   lwctl board [start|stop|restart|status]  Web 看板
   lwctl board set <地址> <端口>      保存监听设置并重启（如 0.0.0.0 8099）

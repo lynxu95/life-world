@@ -207,6 +207,8 @@ lwctl backup --reset               # 彻底删掉快照目录（手动清理用�
 lwctl backups                      # 看最近快照
 lwctl tail [qq|home|debug] [行数]   # 看日志
 lwctl restart [qq|home|all]        # 重启常驻窗口
+lwctl update [--no-restart] [--project] [--branch <分支>]
+                                   # 拉代码 + 重装脚本/提示词；数据/配置不动，默认重启
 lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次数
 ```
 

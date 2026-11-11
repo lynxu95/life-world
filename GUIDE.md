@@ -170,6 +170,7 @@ lwctl tail qq|home|debug     # 看日志
 lwctl backup [--private]     # 世界快照
 lwctl usage [天数]            # token / 费用 / 切换次数
 lwctl restart [qq|home|all]  # 重启常驻窗口
+lwctl update [--no-restart]  # 拉代码 + 重装脚本/提示词；数据/配置不动
 ```
 
 常见问题：

@@ -125,6 +125,8 @@ lwctl board                              # Web 看板
 
 ## 升级 / 迁移
 
+日常更新用 `lwctl update`：只做 `git fetch` + `merge --ff-only` + `install.sh`，`life-world.json`、`worlds/default`、`pi-sessions` 都不动；默认重启看板 / qq / home，加 `--no-restart` 只更新文件。仓库有未提交改动时会拒绝，先 commit / stash。
+
 从 `pi-agent-v2`（已归档）升到 `pi-agent-adv`（数据目录不变）：
 
 ```bash
@@ -348,6 +350,8 @@ lwctl backup --gc           # 压缩快照仓库
 lwctl backup --reset        # 删除快照目录（手动清理）
 lwctl tail [qq|home|debug]  # 看日志
 lwctl restart [qq|home|all] # 重启常驻窗口
+lwctl update [--no-restart] [--project] [--branch <分支>]
+                            # 拉代码 + 重装脚本/提示词；数据/配置不动，默认重启
 lwctl usage [天数]           # token/费用/云端本地/切换次数
 lwctl board [start|stop|restart|status]  # Web 看板
 lwctl board set <地址> <端口>             # 保存监听设置并重启（如 0.0.0.0 8099）

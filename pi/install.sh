@@ -19,6 +19,9 @@ ensure_world() {
   echo "== 世界目录 =="
   mkdir -p "$ROOT" "$ROOT/worlds/default" "$ROOT/pi-sessions"
   chmod 700 "$ROOT" "$ROOT/worlds/default" 2>/dev/null || true
+  # 记录仓库路径，给 lwctl update 用
+  printf '%s\n' "$(cd "$SRC/.." && pwd)" > "$ROOT/repo-path"
+  chmod 600 "$ROOT/repo-path" 2>/dev/null || true
   cp "$SRC/../data/kaomoji.json" "$ROOT/pi-kaomoji.json"
   echo "  ✓ 颜文字库 → $ROOT/pi-kaomoji.json"
   # 配套脚本：只装 pi 版实际引用的（避免覆盖同机 opencode 版的 qq-bridge）
