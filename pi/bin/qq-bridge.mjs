@@ -419,6 +419,8 @@ class PiSession {
     /** 子进程代际：旧进程晚退出时不污染新进程的状态 */
     this.gen = 0
     this.lastUsed = Date.now()
+    this.lastOverflow = false
+    this.overflowReset = false
   }
   env() {
     return { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: this.channel === "qq" ? "qq" : "group", LIFE_WORLD_CHANNEL: this.channel, LIFE_WORLD_GROUP_ID: this.groupId }
@@ -494,6 +496,9 @@ class PiSession {
       if (m?.role === "assistant") {
         const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
         if (text) this.texts.push(text)
+        if (m.stopReason === "error" && /context window|exceeds the context|too many tokens|maximum context/i.test(String(m.errorMessage || ""))) {
+          this.lastOverflow = true
+        }
       }
       return
     }
@@ -525,6 +530,7 @@ class PiSession {
   // timeoutMs = 0：不限时（本地模型慢，等它说完）
   async prompt(text, images = [], timeoutMs = 0) {
     this.lastUsed = Date.now()
+    this.lastOverflow = false
     if (this.closed || !this.child) this.start()
     if (this.running) {
       await new Promise((resolve) => this.idleWaiters.push(resolve))
@@ -543,6 +549,18 @@ class PiSession {
     if (images.length) body.images = images
     this.write(body)
     return wait
+  }
+  /** 上下文超限：自动换新会话，并把同一条重发一次；其它错误不处理 */
+  async promptWithRecovery(text, images = [], timeoutMs = 0) {
+    this.overflowReset = false
+    let texts = await this.prompt(text, images, timeoutMs)
+    if (!this.lastOverflow) return texts
+    this.lastOverflow = false
+    log("context overflow · reset session and retry", this.name)
+    await this.newSession()
+    this.overflowReset = true
+    texts = await this.prompt(text, images, timeoutMs)
+    return texts
   }
   async newSession() {
     this.stopping = true
@@ -594,7 +612,7 @@ function armAfterglow(round) {
     if (afterglow.seq !== afterglow.userSeq || pi.running) return
     try {
       startTyping()
-      const texts = await pi.prompt("【余波】对方还没回你，已经过了一会儿。\n不要假装他说话了，也不要重新打招呼。\n如果上一轮还有没说完的、想补一句解释、或者想问一句怎么不说话——现在补一句；一两句就够。\n如果觉得这会儿不该说、没什么要补的，就只回 [SILENT]。\n直接写正文，不要调用 reach_out。")
+      const texts = await pi.promptWithRecovery("【余波】对方还没回你，已经过了一会儿。\n不要假装他说话了，也不要重新打招呼。\n如果上一轮还有没说完的、想补一句解释、或者想问一句怎么不说话——现在补一句；一两句就够。\n如果觉得这会儿不该说、没什么要补的，就只回 [SILENT]。\n直接写正文，不要调用 reach_out。")
       stopTyping()
       // 生成期间对方回来了：这句余波就作废，别再追着发
       if (afterglow.seq !== afterglow.userSeq) { log("afterglow cancelled · user returned"); return }
@@ -650,8 +668,14 @@ async function handlePrivateNow(msg) {
   log("private in", text.slice(0, 60), "attachments", attachments.length)
   startTyping()
   try {
-    const texts = await pi.prompt(annotated, images)
+    const texts = await pi.promptWithRecovery(annotated, images)
     stopTyping()
+    if (pi.overflowReset) {
+      pi.overflowReset = false
+      await sendPrivate(pi.lastOverflow
+        ? "上下文超了，开了新会话还是没接上，再发一次试试？"
+        : "上下文超了，我开了个新会话，这条重新接上来了。")
+    }
     const reply = texts.join("\n").trim()
     const replied = !!reply && !/^\[SILENT\]$/i.test(reply)
     if (replied) await sendPrivate(reply)
@@ -760,7 +784,7 @@ async function handleGroup(msg) {
       : ""
     const prompt = `[群聊｜群号 ${key}]\n最近消息：\n${batch.map((m) => `${m.sender}：${m.text}`).join("\n")}${fileNote}\n（这是 QQ 群聊：按 system 里的群聊规则回复；不适合接就只回 [SILENT]。）`
     try {
-      const texts = await session.prompt(prompt, images)
+      const texts = await session.promptWithRecovery(prompt, images)
       const reply = texts.join("\n").trim()
       if (reply && !/^\[SILENT\]$/i.test(reply)) {
         const ok = await sendGroup(key, reply)

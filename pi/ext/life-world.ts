@@ -1306,6 +1306,12 @@ async function fetchWeather(city: string): Promise<string> {
 }
 
 // ———————— 活动 / 子闹钟 ————————
+/** 上下文超限：QQ/群聊交给桥接层换会话；home/CLI 在本轮结束后自己开新会话 */
+let contextOverflowPending = false
+function isContextOverflow(text: string): boolean {
+  return /context window|exceeds the context|too many tokens|maximum context/i.test(String(text || ""))
+}
+
 /** agent 是否正在跑一轮；子闹钟到点时正忙就跳过，不排队 */
 let agentBusy = false
 let agentBusyAt = 0
@@ -2861,13 +2867,31 @@ export default function (pi: ExtensionAPI) {
     // 工具轮只是中间态；正常收尾/出错才算这一轮结束
     if (stop !== "toolUse") setAgentBusy(false)
     if (stop === "error") {
-      // 回复不了就直接切，不计数
-      log(`model error · ${modelIdOf(ctx)} · ${String(message?.errorMessage || "").slice(0, 200)}`)
-      await failoverToOther(ctx, "模型无响应")
+      const errText = String(message?.errorMessage || "")
+      log(`model error · ${modelIdOf(ctx)} · ${errText.slice(0, 200)}`)
+      if (isContextOverflow(errText)) {
+        // 上下文超限不是模型坏了：不切模型，避免把私聊送去云端
+        log("context overflow · skip failover")
+        if (CHANNEL !== "qq" && CHANNEL !== "group") contextOverflowPending = true
+      } else {
+        // 回复不了就直接切，不计数
+        await failoverToOther(ctx, "模型无响应")
+      }
     } else if (stop === "stop" || stop === "length") {
       // 正常收尾才清零；toolUse 只是中间轮，别把失败计数抹掉
       toolFailures = 0
     }
+  })
+
+  // 上下文超限：本轮结束后自动开新会话（QQ/群聊由桥接层换会话并重发，不在这里做）
+  pi.on("agent_settled", async (_event: any, ctx: any) => {
+    if (!contextOverflowPending) return
+    contextOverflowPending = false
+    if (CHANNEL === "qq" || CHANNEL === "group") return
+    try {
+      const r = await ctx?.newSession?.()
+      log(`auto new session · context overflow${r?.cancelled ? " (cancelled)" : ""}`)
+    } catch (e) { log(`auto new session failed · ${String(e)}`) }
   })
 
   // 工具连续失败两次（参数错 / 调用不了）→ 切到另一个模型看看情况
