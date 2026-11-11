@@ -539,7 +539,7 @@ class PiSession {
             this.texts.push(text)
           }
         } else if (m.stopReason === "toolUse" && hasTool) {
-          // 模型闷头调工具、没先说话：桥接补一句通用 ack
+          // 模型闷头调工具、没先说话：桥接补一句状态提示
           if (!this.ackSent && typeof this.onAck === "function") {
             this.ackSent = true
             try { this.onAck("") } catch (e) { log("ack handler failed", String(e)) }
@@ -751,7 +751,7 @@ async function handlePrivateNow(msg) {
   pi.onAck = (ack) => {
     if (acked) return
     acked = true
-    void sendPrivate(String(ack || "").trim() || "收到，我去办，稍后回你。")
+    void sendPrivate(String(ack || "").trim() || "（埋头忙活中…）")
   }
   try {
     const texts = await pi.promptWithRecovery(annotated, images)
