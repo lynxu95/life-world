@@ -221,6 +221,8 @@ function sendGroup(groupId, text) {
 
 // ———————————————— 附件 ————————————————
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+/** 语音一般很短，给 20MB 足够 */
+const MAX_VOICE_BYTES = 20 * 1024 * 1024
 /** 工作文件不设上限（下载走流式落盘，不进内存） */
 const MAX_FILE_BYTES = Infinity
 const MAX_TOTAL_BYTES = Infinity
@@ -248,6 +250,8 @@ function mediaParts(msg) {
       out.push({ type: "image", url: /^https?:\/\//i.test(d.url || "") ? d.url : "", file: d.file || "", fileId: d.file_id || d.fileId || "", fileHash: d.file_hash || "", fileSize: Number(d.file_size) || 0, name: d.file_name || d.file || d.summary || "image.jpg" })
     } else if (p?.type === "file") {
       out.push({ type: "file", url: /^https?:\/\//i.test(d.url || "") ? d.url : "", file: d.file || "", fileId: d.file_id || d.fileId || "", fileHash: d.file_hash || "", busid: Number(d.busid) || 0, fileSize: Number(d.file_size) || 0, name: d.file_name || d.name || d.file || "file" })
+    } else if (p?.type === "record" || p?.type === "voice") {
+      out.push({ type: "voice", url: /^https?:\/\//i.test(d.url || "") ? d.url : "", file: d.file || "", fileId: d.file_id || d.fileId || "", fileHash: d.file_hash || "", fileSize: Number(d.file_size) || 0, name: d.file_name || d.file || d.name || "voice.amr" })
     }
   }
   return out.slice(0, 10)
@@ -260,6 +264,22 @@ async function resolveMedia(m, groupId = "") {
   if (url.startsWith("base64://")) return { ...m, base64: url.slice(9) }
   if (/^data:[^;]+;base64,/i.test(url)) return { ...m, base64: url.split(",")[1] }
   if (/^https?:\/\//i.test(url)) return m
+  if (m.type === "voice") {
+    // QQ 语音常是 SILK/AMR；让 OneBot 直接转 mp3，ffmpeg 两个平台都解不了 SILK
+    try {
+      const res = await call("get_record", { file: m.file || m.fileId || "", file_id: m.fileId || "", out_format: "mp3" })
+      const d = res?.data || {}
+      log("voice get_record", JSON.stringify(d).slice(0, 300))
+      const u = String(d.url || "")
+      if (/^https?:\/\//i.test(u)) return { ...m, url: u, name: "voice.mp3" }
+      const f = String(d.file || "")
+      if (/^https?:\/\//i.test(f)) return { ...m, url: f, name: "voice.mp3" }
+      if (f.startsWith("base64://")) return { ...m, base64: f.slice(9), name: "voice.mp3" }
+      if (/^data:/i.test(f)) return { ...m, base64: f.split(",")[1], name: "voice.mp3" }
+      if (f && existsSync(f)) return { ...m, localPath: f, name: "voice.mp3" }
+    } catch (e) { log("get_record failed", String(e)) }
+    return undefined
+  }
   if (m.type === "image") {
     try {
       const res = await call("get_image", m.fileId && !m.file ? { file_id: m.fileId } : { file: m.file || m.fileId || "" })
@@ -392,6 +412,14 @@ async function downloadMedia(m, maxBytes) {
   return { path, name: m.name || basename(path) }
 }
 async function fetchAttachment(m, maxBytes, groupId = "") {
+  // 语音优先让 OneBot 转 mp3，避免拿到 SILK
+  if (m.type === "voice") {
+    const fresh = await resolveMedia({ ...m, url: "", base64: undefined, localPath: undefined }, groupId)
+    if (fresh) {
+      const got = await downloadMedia(fresh, maxBytes)
+      if (got) return got
+    }
+  }
   let got = await downloadMedia(m, maxBytes)
   if (got) return got
   const refreshed = await resolveMedia({ ...m, url: "", base64: undefined, localPath: undefined }, groupId)
@@ -670,7 +698,8 @@ async function handlePrivateNow(msg) {
   lastAttachmentIssue = ""
   let budget = MAX_TOTAL_BYTES
   for (const item of media) {
-    const max = Math.min(item.type === "image" ? MAX_IMAGE_BYTES : MAX_FILE_BYTES, budget)
+    const cap = item.type === "image" ? MAX_IMAGE_BYTES : item.type === "voice" ? MAX_VOICE_BYTES : MAX_FILE_BYTES
+    const max = Math.min(cap, budget)
     if (max <= 0) break
     const got = await fetchAttachment(item, max)
     if (!got) continue
@@ -681,15 +710,16 @@ async function handlePrivateNow(msg) {
     attachments.push({ ...got, type: item.type })
   }
   if (!text && !attachments.length) {
+    const hasVoice = media.some((m) => m.type === "voice")
     const tip = lastAttachmentIssue === "too_large"
-      ? "（图片太大了：单张上限 8MB，缩一下或截小一点再发；装了 imagemagick 或 ffmpeg 的话我会自动缩。）"
-      : "（附件没下载下来，再发一次试试？）"
+      ? (hasVoice ? "（语音太大了：上限 20MB，发短一点的。）" : "（图片太大了：单张上限 8MB，缩一下或截小一点再发；装了 imagemagick 或 ffmpeg 的话我会自动缩。）")
+      : hasVoice ? "（语音没下载下来，再发一次试试？）" : "（附件没下载下来，再发一次试试？）"
     await call("send_private_msg", { user_id: ownerQQ, message: tip }).catch(() => {})
     return
   }
   const images = attachments.filter((a) => a.type === "image").map((a) => imagePayload(a.path))
   const notes = attachments.length
-    ? `\n（对方发来 ${attachments.length} 个附件：${attachments.map((a) => a.type === "image" ? `[图片 ${basename(a.path)}]` : `[文件 ${basename(a.path)}：${a.path}]`).join("、")}；图片已附在请求里，文件路径可直接用 read 工具读。）`
+    ? `\n（对方发来 ${attachments.length} 个附件：${attachments.map((a) => a.type === "image" ? `[图片 ${basename(a.path)}]` : a.type === "voice" ? `[语音 ${basename(a.path)}：${a.path}]` : `[文件 ${basename(a.path)}：${a.path}]`).join("、")}；图片已附在请求里，语音可以用 perceive({ path: "…", kind: "audio" }) 听，文件路径可直接用 read 工具读。）`
     : (media.length ? `\n（对方发了 ${media.length} 个附件，但都没下载下来。）` : "")
   const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
   log("private in", text.slice(0, 60), "attachments", attachments.length)
@@ -759,8 +789,8 @@ async function handleGroup(msg) {
   const groupId = Number(msg.group_id)
   if (!groupId) return
   const text = textOf(msg)
-  // 群里的图片和文件都收：图片进请求，文件落 tmp 后把路径给模型
-  const media = mediaParts(msg)
+  // 群里的图片和文件都收：图片进请求，文件落 tmp 后把路径给模型；群里没有 perceive，语音先不进
+  const media = mediaParts(msg).filter((m) => m.type !== "voice")
   if (!text && !media.length) return
   const key = String(groupId)
   const buf = groupBuffers.get(key) || []

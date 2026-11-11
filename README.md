@@ -307,7 +307,7 @@ QQ ←→ OneBot v11 正向 WS ←→ pi/bin/qq-bridge.mjs ←→ pi --mode rpc
 - **私聊**：固定会话 `qq-chat`，文件持久化，重启接着聊；
 - **群聊**：每个群一个 `qq-group-<群号>`；配了 `models.cloud` 时群聊与判官都用在线模型；群配置 2 秒热加载；闲置 `group.sessionIdleMinutes`（默认 120 分钟）后回收子进程，有人说话会自动重开；
 - **触发**：@ / 关键词 / 随机插话概率；冷却与频率上限可配；
-- **附件**：图片 >8MB 自动缩到 1568px（需 imagemagick/ffmpeg），私聊文件不设上限、流式落盘到 `tmp/`；群聊也收文件（默认单文件 100MB、单批 200MB，`group.maxFileBytes` / `group.maxBatchBytes` 可调；只给 base64 的实现仍受 40MB 内存上限），路径交给模型读；
+- **附件**：图片 >8MB 自动缩到 1568px（需 imagemagick/ffmpeg），私聊文件不设上限、流式落盘到 `tmp/`；群聊也收文件（默认单文件 100MB、单批 200MB，`group.maxFileBytes` / `group.maxBatchBytes` 可调；只给 base64 的实现仍受 40MB 内存上限），路径交给模型读；**私聊语音**会让 OneBot 转成 mp3 落到 `tmp/`，AI 用 `perceive(kind=audio)` 听，群聊语音暂不处理；
 - **余波**：发完 60 秒没回补一拍，最多两拍，`[SILENT]` 不发；生成期间对方回来了这句就作废，没发出去也不续下一拍；
 - **outbox**：`reach_out` 写文件，桥接补发最近 3 天；状态文件丢了只补 `since` 之后的新条目，不会把当天已发过的整段重发；
 - **/new**：清当前私聊会话。
