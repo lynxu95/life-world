@@ -2879,9 +2879,11 @@ export default function (pi: ExtensionAPI) {
       log(`model error · ${modelIdOf(ctx)} · ${errText.slice(0, 200)}`)
       if (isContextOverflow(errText)) {
         // 上下文超限不是模型坏了：不切模型，避免把私聊送去云端
-        log("context overflow · skip failover")
+        log("context overflow · skip failover, abort run")
         if (CHANNEL === "qq" || CHANNEL === "group") markContextOverflow(roleKey, errText)
         else contextOverflowPending = true
+        // pi 自己会进入溢出恢复/压缩重试，可能卡好几分钟；直接中止这一轮
+        try { ctx.abort?.() } catch { /* ignore */ }
       } else {
         // 回复不了就直接切，不计数
         await failoverToOther(ctx, "模型无响应")
