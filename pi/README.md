@@ -1,7 +1,7 @@
 # life-world · pi 版
 
 > 本目录是 life-world 的 **pi 1.5.0 移植版**，独立于仓库根目录的 opencode 插件。
-> 分支：`pi-agent-adv` 是**当前唯一维护的 pi 版**；`pi-agent` / `pi-agent-v2` 已归档（对应 tag 保留），`main` 是 opencode 版存档。
+> 分支：`pi-agent-adv` 是**当前唯一维护的 pi 版**；`pi-agent` / `pi-agent-v2` 已归档（对应 tag 保留），`opencode`（原 `main`）是早期 opencode 版存档，功能不全。
 >
 > 评估与决策见 vault：`AI/开发中项目/life-world 迁 pi · 扩展点评估.md`；
 > 实施记录见 `AI/开发中项目/piagent 迁移 worklog.md`。
