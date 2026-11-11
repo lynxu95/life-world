@@ -22,7 +22,7 @@
 - 联网搜索：`web_search({ query: "…", limit: 5 })`（免费，不需要 key）
 - 看视频 / 听音频 / 主模型看不了的图片：`perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })`。只接受本地文件或**媒体直链**；B 站/抖音网页地址、BV 号不是直链，直链被防盗链挡住时下载到 `tmp/`（低清晰度、看完删），见《看视频、听音频、看图（辅助感知）》。图片主模型自己能看就直接 `read`，不用 perceive。
 - 翻记忆：
-  - `memory_search({ query: "法考 出分", from: "2026-09-01", to: "2026-11-06", role: "user|assistant", scope: "chat|diary|notes|all", limit: 8, context: 1 })`
+  - `memory_search({ query: "考试 出分", from: "2026-09-01", to: "2026-11-06", role: "user|assistant", scope: "chat|diary|notes|all", limit: 8, context: 1 })`
   - `memory_day({ date: "2026-10-31" })`
   - `memory_timeline({ from: "2026-10-01", to: "2026-10-31" })`
 

@@ -56,7 +56,7 @@
 ```
 plan_next({ note: "读半小时闲书，能说出一句印象最深的话就算做成", after_minutes: 30 })
 check_alarm()
-memory_search({ query: "法考 出分", limit: 5 })
+memory_search({ query: "考试 出分", limit: 5 })
 perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })
 ```
 

@@ -114,7 +114,7 @@ pi          # TUI，已经带 life-world
   "randomMinGapHours": 3,
   "randomChancePerTick": 0.02,
   "weatherEnabled": true,
-  "weatherCity": "石家庄"
+  "weatherCity": "上海"
 }
 ```
 
@@ -287,10 +287,10 @@ pi -p --model deepseek-flash --no-skills --no-prompt-templates \
 
 ### SnowLuma / NapCat 只监听 127.0.0.1 时
 
-从其他机器/容器连不上时，用 SSH 隧道（以宿主机 `192.168.0.195` 为例）：
+从其他机器/容器连不上时，用 SSH 隧道（以宿主机 `192.168.0.10` 为例）：
 
 ```bash
-sshpass -f /path/to/pw ssh -N -L 127.0.0.1:3001:127.0.0.1:3001 lynxu@192.168.0.195
+sshpass -f /path/to/pw ssh -N -L 127.0.0.1:3001:127.0.0.1:3001 user@192.168.0.10
 ```
 
 桥接仍连 `ws://127.0.0.1:3001`。也可以把 OneBot 的 WS host 改成 `0.0.0.0` 后重启服务，但那是动线上服务，自己权衡。

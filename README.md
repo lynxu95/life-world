@@ -94,7 +94,7 @@ cd life-world
     "basalt": {
       "baseUrl": "http://127.0.0.1:8081/v1",
       "api": "openai-completions",
-      "apiKey": "liugongfu",
+      "apiKey": "your-api-key",
       "models": [{ "id": "abliterated-iq3_xxs", "contextWindow": 262144, "maxTokens": 32768, "input": ["text","image"] }]
     }
   }
@@ -167,7 +167,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
   "care": {
     "enabled": true, "quietStart": "23:30", "quietEnd": "08:00",
     "randomEnabled": true, "randomMinGapHours": 3, "randomChancePerTick": 0.02,
-    "weatherEnabled": true, "weatherCity": "石家庄"
+    "weatherEnabled": true, "weatherCity": "上海"
   },
   "backup": { "enabled": true, "hour": 4, "includePrivate": false },
   "guard": { "enabled": true, "staleSeconds": 300, "cooldownMinutes": 10, "allowRestart": true },
@@ -273,7 +273,7 @@ run: bash scripts/weather.sh
 - `perceive({ path, question })`：本地文件或公网 URL。本地 Base64 超过 10MB 会先压缩（图片缩图、音视频按目标码率转码；需要 `ffmpeg` 或 `imagemagick`），压不进去就如实告诉 AI 去和用户商量分段；URL 直接交给百炼服务端拉取，不本地中转；
 - **B 站 / 抖音**：直链常被防盗链挡住（Referer/UA/cookie），Omni 服务端拉不动；下载到 `tmp/`（低清晰度、只下相关片段、看完删）再喂本地文件。工具压缩产生的临时文件即时清理；
 - 看板「模型 → 辅助感知」选 `provider/model`，留空即停用。
-- 实测：Qwen3.8-Omni-Flash 图片 / 视频可用（395 生产，2026-11-11）；B 站/抖音直链被防盗链挡住时按下面的下载流程走。
+- 实测：Qwen3.8-Omni-Flash 图片 / 视频可用（生产机，2026-11-11）；B 站/抖音直链被防盗链挡住时按下面的下载流程走。
 
 Qwen3.8-Omni-Flash 官方限制：图片 URL 20MB/张、音频 2GB/3 小时、视频 2GB/2 小时；Base64 一律**编码后 <10MB**。推荐在 `~/.pi/agent/models.json` 注册 DashScope provider：
 
