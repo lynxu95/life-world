@@ -526,6 +526,8 @@ class PiSession {
       const m = msg.message
       if (m?.role === "assistant") {
         const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
+        const hasTool = (Array.isArray(m.content) && m.content.some((p) => p?.type === "toolCall"))
+          || (Array.isArray(m.tool_calls) && m.tool_calls.length > 0)
         if (text) {
           if (m.stopReason === "toolUse") {
             // 要调工具、还没完：第一句先发出去，最终答案等 settle
@@ -535,6 +537,12 @@ class PiSession {
             }
           } else {
             this.texts.push(text)
+          }
+        } else if (m.stopReason === "toolUse" && hasTool) {
+          // 模型闷头调工具、没先说话：桥接补一句通用 ack
+          if (!this.ackSent && typeof this.onAck === "function") {
+            this.ackSent = true
+            try { this.onAck("") } catch (e) { log("ack handler failed", String(e)) }
           }
         }
         if (m.stopReason === "error") log("message_end error", String(m.errorMessage || "").slice(0, 120))
@@ -743,7 +751,7 @@ async function handlePrivateNow(msg) {
   pi.onAck = (ack) => {
     if (acked) return
     acked = true
-    void sendPrivate(ack)
+    void sendPrivate(String(ack || "").trim() || "收到，我去办，稍后回你。")
   }
   try {
     const texts = await pi.promptWithRecovery(annotated, images)
