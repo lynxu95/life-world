@@ -1670,7 +1670,10 @@ async function tick(): Promise<void> {
           const seq0 = Number.isFinite(seqN0) && seqN0 > 0 ? seqN0 : 1
           const everyN0 = Number(a.intervalMinutes)
           const every0 = Number.isFinite(everyN0) && everyN0 >= 1 && everyN0 <= 60 ? everyN0 : 2
-          const startedMs = Date.parse(String(a.startedAt || a.setAt || a.at)) || Date.now()
+          const startedRaw = Date.parse(String(a.startedAt || ""))
+          const fallbackRaw = Date.parse(String(a.setAt || a.at || ""))
+          // 锚点必须是有限值：脏 startedAt 会让上限静默失效、一路跑满 60 跳
+          const startedMs = Number.isFinite(startedRaw) ? startedRaw : (Number.isFinite(fallbackRaw) ? fallbackRaw : Date.now())
           const maxMin = heartbeatLimitMinutes()
           const timeUp = (Date.now() - startedMs) / 60_000 + every0 > maxMin
           const willContinue = seq0 < 60 && !timeUp
@@ -1697,7 +1700,7 @@ async function tick(): Promise<void> {
                 note: a.note, setAt: new Date().toISOString(), model: a.model,
                 kind: "sub", status: "pending",
                 chainId: a.chainId, reason: a.reason, intervalMinutes: every0, seq: seq0 + 1,
-                startedAt: a.startedAt || a.setAt,
+                startedAt: new Date(startedMs).toISOString(),
               })
             }
             f.alarms = list
@@ -3129,7 +3132,7 @@ export default function (pi: ExtensionAPI) {
       if (JUDGE) return ok("判官会话不能定闹钟。")
       if (CHANNEL === "group") return ok("群聊里不能定闹钟。")
       // 旧提示词/旧记忆可能还在传 parent/times：明确拒绝，别静默建成一个新活动
-      if (params?.parent || params?.times) {
+      if (params?.parent != null || params?.times != null) {
         return ok("挂在活动下的子闹钟已经移除；要每隔几分钟反复醒来，用 heartbeat({ reason, every_minutes })。")
       }
       const now = Date.now()
@@ -3395,12 +3398,14 @@ export default function (pi: ExtensionAPI) {
     },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能起心跳。")
-      if (!heartbeatEnabled()) return ok("心跳功能已经关掉了（看板「心跳时长」里可以重新打开）。")
+      if (!heartbeatEnabled()) return ok("心跳功能已经关掉了（看板「心跳与关怀」里可以重新打开）。")
+      if (!config().world.enabled || !config().world.running) return ok("世界现在是停用/暂停状态，先打开再起心跳。")
       const reason = String(params?.reason || "").trim()
       if (!reason) return ok("说一下为什么要起这个心跳。")
       const every = Math.round(Number(params?.every_minutes) || 0)
       if (!every || every < 1 || every > 60) return ok("间隔要写 1-60 分钟。")
-      const first = Math.max(1, Math.min(240, Math.round(Number(params?.first_after_minutes) || every)))
+      // 首跳也不能超过单串时长上限，否则「最长 10 分钟」的串第一跳就在 240 分钟后
+      const first = Math.max(1, Math.min(heartbeatLimitMinutes(), Math.round(Number(params?.first_after_minutes) || every)))
       const now = Date.now()
       const chainId = `hb-${now}-${Math.random().toString(36).slice(2, 6)}`
       const c = config().models
@@ -3431,9 +3436,11 @@ export default function (pi: ExtensionAPI) {
         st.alarms = [...list, alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
         return { ok: writeWorld(st), chainId }
       })
-      if (!res?.ok) return ok("心跳没起成（world.json 被占用或读不出来）。")
+      // res.msg 承载真正的失败原因（如「同时最多 2 条」「world.json 读不出来」），别吞掉
+      if (!res?.ok) return ok(res?.msg || "心跳没起成（world.json 被占用或读不出来）。")
       const maxMin = heartbeatLimitMinutes()
-      const maxJumps = Math.max(1, Math.min(60, Math.floor(maxMin / every)))
+      // 从首跳开始算：还能跳几次 = (上限 - 首跳) / 间隔 + 1
+      const maxJumps = Math.max(1, Math.min(60, Math.floor((maxMin - first) / every) + 1))
       return ok(`心跳已起：${res.chainId}\n每 ${every} 分钟一跳，第一跳 ${isoLocal(new Date(now + first * 60_000))}。\n按当前设置（单次最长 ${maxMin} 分钟），这条串最多 ${maxJumps} 跳、约 ${maxJumps * every} 分钟。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
     },
   })
@@ -3468,7 +3475,7 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "check_alarm",
     label: "Check alarms",
-    description: "看现在的活动、子闹钟、跳过的唤醒和旧版一次性闹钟。",
+    description: "看现在的日程、心跳串、跳过的唤醒和旧版一次性闹钟。",
     parameters: { type: "object", properties: {} },
     async execute() {
       const list = readWorld().alarms || []
@@ -3524,12 +3531,17 @@ export default function (pi: ExtensionAPI) {
       const allFlag = params.all === true
       if (!id && !match && !allFlag) return ok("要取消哪一条？传 id、match，或 all: true 全部取消。")
       const res = withWorldLock(() => {
-        const state = readWorld()
+        const state = readWorldStrict()
+        if (!state) return { ok: false, msg: "world.json 读不出来，未改动" }
         const all = state.alarms || []
         const picked = id ? all.filter((a) => a.id === id) : match ? all.filter((a) => a.note.includes(match)) : all.slice()
         // 心跳串有自己的停法（heartbeat_stop）；cancel_alarm 只在 all: true 时才动它
         const targets = allFlag ? picked : picked.filter((a) => !(a.chainId && !a.parentId))
-        if (!targets.length) return { ok: true, removed: 0, mains: 0 }
+        if (!targets.length) {
+          // 目标存在但全是心跳：告诉它用对工具，别让它误以为不存在
+          if (picked.length) return { ok: true, removed: 0, mains: 0, hint: `那是心跳串，用 heartbeat_stop({ chainId: "${picked[0].chainId}" }) 停。` }
+          return { ok: true, removed: 0, mains: 0 }
+        }
         const mainIds = new Set(targets.filter((a) => a.kind === "main").map((a) => a.id))
         // 关活动留尾声：标 closed + closedAt，已执行的子闹钟留档一天（和看板/强制关闭保持一致）
         for (const a of all) {
@@ -3547,8 +3559,8 @@ export default function (pi: ExtensionAPI) {
         })
         return { ok: writeWorld(state), removed: remove.size + mainIds.size, mains: mainIds.size }
       })
-      if (!res?.ok) return ok("闹钟没改成功（world.json 暂时被占用）。")
-      if (!res.removed) return ok("没找到要取消的闹钟。")
+      if (!res?.ok) return ok(res?.msg || "闹钟没改成功（world.json 暂时被占用）。")
+      if (!res.removed) return ok(res.hint || "没找到要取消的闹钟。")
       const extra = res.mains ? "（活动连同子闹钟）" : ""
       return ok(id ? `取消了 ${res.removed} 条${extra}。` : match ? `取消了 note 含「${match}」的 ${res.removed} 条${extra}。` : `全取消了（${res.removed} 条）。`)
     },

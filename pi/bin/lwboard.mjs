@@ -802,7 +802,12 @@ const server = http.createServer(async (req, res) => {
       const data = await body(req)
       const v = Math.round(Number(data.minutes))
       if (!Number.isFinite(v) || v < 10 || v > 1440) return json(res, 400, { ok: false, msg: "心跳时长要在 10-1440 分钟之间" })
-      const c = readJson(CONFIG_FILE, {})
+      let c = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { c = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      if (!c || typeof c !== "object" || Array.isArray(c)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
       c.world = { ...(c.world || {}), heartbeatMaxMinutes: v }
       if (typeof data.enabled === "boolean") c.world.heartbeatEnabled = data.enabled
       try { writeAtomic(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {

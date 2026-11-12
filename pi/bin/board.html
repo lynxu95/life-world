@@ -439,7 +439,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
       <aside class="rail">
         <section>
         <div class="sec-head"><h2>心跳与关怀</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
-        <label class="check"><input type="checkbox" id="hb-enabled">启用心跳</label>
+        <label class="check"><input type="checkbox" id="hb-enabled" checked>启用心跳</label>
         <div class="row" style="margin-top:8px">
           <input type="number" id="hb-limit" placeholder="20" style="width:96px" aria-label="单次心跳最长分钟数">
           <span class="muted">分钟 / 单次</span>
@@ -710,7 +710,9 @@ function renderUpdate(u, result) {
 }
 
 let hbLimitTouched = false
+let HB_ENABLED = true
 function renderHeartbeatLimit(minutes, enabled) {
+  HB_ENABLED = enabled !== false
   const v = Number(minutes) || 20
   if (!hbLimitTouched) {
     $("hb-limit").value = v
@@ -1054,6 +1056,7 @@ async function loadPlan() {
 }
 function fmtClock(iso) {
   const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return "时间异常"
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 function relTime(iso) {
@@ -1103,9 +1106,10 @@ function renderSubs(list) {
     const done = items.filter((x) => x.status === "fired").sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     const next = live[0]
     const reason = (next && next.reason) || (done[0] && done[0].reason) || "心跳"
-    const every = (next && next.intervalMinutes) || (done[0] && done[0].intervalMinutes) || "?"
-    const seq = next ? Number(next.seq || 1) : (done[0] ? Number(done[0].seq || 0) : 0)
-    const state = live.length ? "跳着" : "已停"
+    const numOr = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d }
+    const every = numOr((next && next.intervalMinutes) || (done[0] && done[0].intervalMinutes), "?")
+    const seq = next ? numOr(next.seq, 1) : (done[0] ? numOr(done[0].seq, 0) : 0)
+    const state = !HB_ENABLED ? "已关闭" : (live.length ? "跳着" : "已停")
     const doneRows = done.slice(0, 5).map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>已执行</span></div>`).join("")
     const actions = live.length ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
     const ended = !live.length
@@ -2138,20 +2142,30 @@ const mergeSave = $("hb-merge-save")
 if (mergeSave) mergeSave.onclick = async () => {
   mergeSave.disabled = true
   mergeSave.textContent = "保存中…"
-  try {
-    const r1 = await postJson("/api/heartbeat-limit", {
-      minutes: Number($("hb-limit").value),
-      enabled: $("hb-enabled").checked,
-    })
-    const r2 = await postJson("/api/care", {
-      randomEnabled: $("care-random").checked,
-      quietStart: $("care-qs").value.trim(),
-      quietEnd: $("care-qe").value.trim(),
-    })
-    $("merge-hint").textContent = (r1.ok && r2.ok) ? "已保存" : (r1.msg || r2.msg || "保存失败")
-    if (r1.ok) hbLimitTouched = false
-    if (r2.ok) careTouched = false
-  } catch (e) { $("merge-hint").textContent = "保存失败：" + e.message }
+  // 两个接口各自独立：一个失败不影响另一个，提示也分开说
+  const attempt = async (fn) => {
+    try { return { ok: true, data: await fn() } }
+    catch (e) {
+      let msg = String((e && e.message) || e)
+      try { const j = JSON.parse(msg); if (j && j.msg) msg = j.msg } catch { /* 不是 JSON */ }
+      return { ok: false, msg }
+    }
+  }
+  const hb = await attempt(() => postJson("/api/heartbeat-limit", {
+    minutes: Number($("hb-limit").value),
+    enabled: $("hb-enabled").checked,
+  }))
+  const care = await attempt(() => postJson("/api/care", {
+    randomEnabled: $("care-random").checked,
+    quietStart: $("care-qs").value.trim(),
+    quietEnd: $("care-qe").value.trim(),
+  }))
+  const parts = []
+  parts.push(hb.ok ? "心跳已保存" : `心跳失败：${hb.msg}`)
+  parts.push(care.ok ? "关怀已保存" : `关怀失败：${care.msg}`)
+  $("merge-hint").textContent = parts.join(" · ")
+  if (hb.ok) hbLimitTouched = false
+  if (care.ok) careTouched = false
   mergeSave.disabled = false
   mergeSave.textContent = "保存"
   setTimeout(() => { $("merge-hint").textContent = "" }, 3000)
