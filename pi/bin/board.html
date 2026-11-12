@@ -517,7 +517,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <div class="schedule timeline" id="schedule"><div class="muted">加载中…</div></div>
           </section>
           <section>
-            <div class="sec-head"><h2>日程 / 心跳</h2><span class="spacer"></span><span class="sec-note" id="subs-note">…</span></div>
+            <div class="sec-head"><h2>心跳 / 日程</h2><span class="spacer"></span><span class="sec-note" id="subs-note">…</span></div>
             <div class="subs" id="subs"><div class="muted">加载中…</div></div>
             <div class="hint">心跳到点如果 AI 正忙，会顺延 30 秒再试，不会被跳过。</div>
             <details class="plan-group" style="margin-top:10px">
@@ -1118,9 +1118,10 @@ function renderSubs(list) {
       ${doneRows}
       ${actions}</div>`
   }).join("")
+  // 心跳放前面：左边「AI 日程」时间线已经有日程了，右边先看心跳不重复
   const parts = []
-  if (cards || legacyHtml) parts.push('<div class="sub-group">日程</div>', cards, legacyHtml)
   if (beatCards) parts.push('<div class="sub-group">心跳</div>', beatCards)
+  if (cards || legacyHtml) parts.push('<div class="sub-group">日程</div>', cards, legacyHtml)
   el.innerHTML = parts.join("")
 }
 async function loadSubs() {
