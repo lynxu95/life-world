@@ -262,6 +262,9 @@ input[type=checkbox]{accent-color:var(--accent)}
 .plan-group summary{cursor:pointer;color:var(--faint);font-size:12px;padding:4px 0}
 .subs{display:flex;flex-direction:column;gap:8px;max-height:380px;overflow:auto;padding-right:2px}
 .sub-card{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--panel-2)}
+.sub-card.ended{opacity:.72}
+.sub-card.ended .sub-head b{color:var(--muted);font-weight:500}
+.sub-card.ended .sub-state{color:var(--faint)}
 .sub-head{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
 .sub-head b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sub-state{margin-left:auto;font-size:11px;color:var(--accent);white-space:nowrap}
@@ -779,7 +782,7 @@ function updateSummary() {
   const now = new Date()
   const wd = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()]
   $("ss-date").textContent = `${dayOfLocal(now)} 周${wd}`
-  const mains = LAST_ALARMS.filter((a) => a.kind === "main")
+  const mains = LAST_ALARMS.filter((a) => a.kind === "main" && a.status !== "closed")
   const active = mains.filter((a) => a.status === "active").length
   $("ss-plan").textContent = mains.length ? `${active}/${mains.length} 进行中` : (LAST_ALARMS.length ? "旧闹钟" : "无活动")
   const nextT = LAST_ALARMS.map((a) => Date.parse(a.at)).filter((t) => Number.isFinite(t) && t > Date.now()).sort((a, b) => a - b)[0]
@@ -975,7 +978,9 @@ function renderSubs(list) {
   const el = $("subs")
   const all = Array.isArray(list) ? list : []
   LAST_ALARMS = all
-  const mains = all.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+  const rankOf = (x) => (x.status === "active" ? 0 : x.status === "closed" ? 2 : 1)
+  const mains = all.filter((a) => a.kind === "main")
+    .sort((a, b) => rankOf(a) - rankOf(b) || Date.parse(a.at) - Date.parse(b.at))
   const legacy = all.filter((a) => !a.kind).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   const subsOf = (id) => all.filter((a) => a.kind === "sub" && a.parentId === id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   const subsAll = all.filter((a) => a.kind === "sub")
@@ -990,17 +995,19 @@ function renderSubs(list) {
     const subs = subsOf(m.id)
     const live = subs.filter((s) => s.status !== "fired")
     const fired = subs.filter((s) => s.status === "fired")
-    const state = m.paused ? "已暂停" : (m.status === "active" ? "进行中" : "待开始")
+    const closed = m.status === "closed"
+    const state = closed ? "已结束" : m.paused ? "已暂停" : (m.status === "active" ? "进行中" : "待开始")
     const items = live.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
     const firedItems = fired.map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>已执行</span></div>`).join("")
     const skip = (m.skipped || []).length
       ? `<div class="sub-skip">跳过：${m.skipped.map((s) => `${fmtClock(s.scheduled)} ${esc2(s.note)}`).join("、")}</div>`
       : ""
-    return `<div class="sub-card"><div class="sub-head"><b>《${esc2(m.note)}》</b><span class="sub-state">${state}</span></div>
-      <div class="sub-meta">${fmtClock(m.at)} 开始 · ${live.length} 条待触发${fired.length ? ` · ${fired.length} 条已执行` : ""} · id ${m.id}</div>
+    const actions = closed ? "" : `<div class="sub-actions"><button data-op="${m.paused ? "resume" : "pause"}" data-id="${m.id}">${m.paused ? "继续活动" : "暂停活动"}</button><button data-op="close" data-id="${m.id}">关闭活动</button></div>`
+    return `<div class="sub-card${closed ? " ended" : ""}"><div class="sub-head"><b>《${esc2(m.note)}》</b><span class="sub-state">${state}</span></div>
+      <div class="sub-meta">${fmtClock(m.at)} 开始${live.length ? ` · ${live.length} 条待触发` : ""}${fired.length ? ` · ${fired.length} 条已执行` : ""} · id ${m.id}</div>
       ${items || (fired.length ? "" : '<div class="sub-empty">没有子闹钟</div>')}
       ${firedItems}
-      <div class="sub-actions"><button data-op="${m.paused ? "resume" : "pause"}" data-id="${m.id}">${m.paused ? "继续活动" : "暂停活动"}</button><button data-op="close" data-id="${m.id}">关闭活动</button></div>
+      ${actions}
       ${skip}</div>`
   }).join("")
   const legacyHtml = legacy.length

@@ -334,6 +334,8 @@ interface Alarm {
   status?: "pending" | "active" | "closed" | "fired"
   paused?: boolean
   activatedAt?: string
+  /** 活动关闭的时间（关闭后留档 24 小时，看板显示「已结束」） */
+  closedAt?: string
   /** 子闹钟实际触发的时间 */
   firedAt?: string
   /** 忙时跳过的子闹钟，下次这个活动醒来时提醒 AI review */
@@ -1469,7 +1471,11 @@ async function tick(): Promise<void> {
       const f = readWorld()
       const list = f.alarms || []
       const cutoff = Date.now() - 24 * 3600_000
-      const kept = list.filter((x) => !(x.kind === "sub" && x.status === "fired" && Date.parse(x.firedAt || x.at) < cutoff))
+      const kept = list.filter((x) => {
+        if (x.kind === "sub" && x.status === "fired" && Date.parse(x.firedAt || x.at) < cutoff) return false
+        if (x.kind === "main" && x.status === "closed" && Date.parse(x.closedAt || x.at) < cutoff) return false
+        return true
+      })
       if (kept.length === list.length) return false
       f.alarms = kept
       return writeWorld(f)
@@ -1510,7 +1516,14 @@ async function tick(): Promise<void> {
         const fresh = readWorld()
         const list = fresh.alarms || []
         const closedIds = new Set(closing.map((x) => x.id))
-        const keep = list.filter((x) => !closedIds.has(x.id) && !(x.kind === "sub" && x.parentId && closedIds.has(x.parentId)))
+        // 被顶掉的活动也留尾声：标 closed，已执行的子闹钟留着，没执行的撤掉
+        for (const x of list) {
+          if (closedIds.has(x.id)) {
+            x.status = "closed"
+            x.closedAt = new Date().toISOString()
+          }
+        }
+        const keep = list.filter((x) => !(x.kind === "sub" && x.parentId && closedIds.has(x.parentId) && x.status !== "fired"))
         const self = keep.find((x) => x.id === a.id)
         if (!self) return false
         self.status = "active"
@@ -2626,10 +2639,16 @@ export default function (pi: ExtensionAPI) {
         if (target.kind !== "sub") return { ok: false, msg: "只能对子闹钟立即触发" }
         target.at = new Date().toISOString()
       } else if (op === "close") {
-        st.alarms = target.kind === "main"
-          ? all.filter((a) => a.id !== target.id && !(a.kind === "sub" && a.parentId === target.id))
-          : all.filter((a) => a.id !== target.id)
-        return { ok: writeWorld(st), msg: target.kind === "main" ? "活动已关闭（子闹钟一起关了）" : "子闹钟已取消" }
+        if (target.kind === "main") {
+          // 关掉的活动留个尾声：状态标 closed，已执行的子闹钟留到 24 小时清理，
+          // 没执行的子闹钟直接取消——看板才能看到这一串几点醒过
+          target.status = "closed"
+          target.closedAt = new Date().toISOString()
+          st.alarms = all.filter((a) => !(a.kind === "sub" && a.parentId === target.id && a.status !== "fired"))
+          return { ok: writeWorld(st), msg: "活动已关闭（没执行的子闹钟一起取消，已执行的留档一天）" }
+        }
+        st.alarms = all.filter((a) => a.id !== target.id)
+        return { ok: writeWorld(st), msg: "子闹钟已取消" }
       }
       return { ok: writeWorld(st), msg: op === "pause" ? "已暂停" : op === "resume" ? "已继续" : "已排到下一轮触发" }
     })
@@ -3065,7 +3084,8 @@ export default function (pi: ExtensionAPI) {
       }
       const lines: string[] = []
       for (const m of list.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
-        lines.push(`- 活动《${m.note}》（${m.status === "active" ? "进行中" : "待开始"}；${shortStamp(m.at)}；id ${m.id}）${m.paused ? "【已暂停】" : ""}`)
+        const mState = m.status === "active" ? "进行中" : m.status === "closed" ? "已结束" : "待开始"
+        lines.push(`- 活动《${m.note}》（${mState}；${shortStamp(m.at)}；id ${m.id}）${m.paused ? "【已暂停】" : ""}`)
         const subs = list.filter((a) => a.kind === "sub" && a.parentId === m.id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
         for (const s of subs) lines.push(`  - 子闹钟 ${shortStamp(s.at)}（${s.status === "fired" ? "已执行" : rel(s.at)}）${s.note}${s.paused ? "【暂停】" : ""}`)
         if (m.skipped?.length) lines.push(`  - 跳过：${m.skipped.map((s) => `${shortStamp(s.scheduled)} ${s.note}`).join("、")}`)

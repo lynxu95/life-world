@@ -142,7 +142,7 @@ function scheduleList(limit = 50) {
   return alarms
     .filter((a) => a && Number.isFinite(Date.parse(a.at)))
     // active 主活动会长期保留，at 是过去时间，不放进时间线，避免挤掉未来闹钟
-    .filter((a) => !(a.kind === "main" && a.status === "active"))
+    .filter((a) => !(a.kind === "main" && (a.status === "active" || a.status === "closed")))
     // 已执行的子闹钟只在活动卡片里留档，不进时间线
     .filter((a) => a.status !== "fired")
     .filter((a) => !a.kind || Date.parse(a.at) >= now - 5 * 60_000)
