@@ -3420,7 +3420,8 @@ export default function (pi: ExtensionAPI) {
         const st = readWorldStrict()
         if (!st) return { ok: false, msg: "world.json 读不出来，先别起心跳。" }
         const list = st.alarms || []
-        const chains = new Set(list.filter((a) => a.chainId && a.status !== "fired").map((a) => a.chainId))
+        // 只数「还在跳」的串：fired 是留档、cancelled 是墓碑，都不该占名额
+        const chains = new Set(list.filter((a) => a.chainId && a.status !== "fired" && a.status !== "cancelled").map((a) => a.chainId))
         if (chains.size >= 2) return { ok: false, msg: `同时最多 2 条心跳串，现在有 ${chains.size} 条：${[...chains].join("、")}` }
         const alarm: Alarm = {
           id: `s-${now}-${Math.random().toString(36).slice(2, 6)}`,
@@ -3504,7 +3505,7 @@ export default function (pi: ExtensionAPI) {
       }
       // 心跳串（独立于日程）
       const beatMap = new Map<string, Alarm[]>()
-      for (const b of list.filter((x) => x.kind === "sub" && x.chainId && x.status !== "fired")) {
+      for (const b of list.filter((x) => x.kind === "sub" && x.chainId && x.status !== "fired" && x.status !== "cancelled")) {
         const k = String(b.chainId)
         if (!beatMap.has(k)) beatMap.set(k, [])
         beatMap.get(k)!.push(b)

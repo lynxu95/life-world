@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.4.10] - 2026-11-12
+
+### 修复
+
+- **心跳名额被墓碑占死**：`heartbeat` 的「同时最多 2 条串」只排除了 `fired`，没排除
+  v1.4.7 新增的 `cancelled`，导致停掉的串仍然算「还在跑」，新心跳再也起不来。
+  现在 `fired` 和 `cancelled` 都不占名额；`check_alarm` 的活跃串列表同样排除墓碑。
+
 ## [1.4.9] - 2026-11-12
 
 ### 修复
