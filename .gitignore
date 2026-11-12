@@ -3,7 +3,6 @@ node_modules/
 .claude/
 *.log
 index.ts.bak-*
-start-tui.sh.bak-*
 worlds/
 .timer.lock
 qq-bridge.json

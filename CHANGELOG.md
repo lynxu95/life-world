@@ -15,6 +15,22 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.1.0] - 2026-11-12
+
+### 变更
+
+- **仓库只保留 pi 版**：移除 opencode 版源码（`index.ts`、根 `install.sh`、`scripts/` 下的旧桥接与启动脚本、根示例配置）。
+- **新增 `pi/bin/rpc-adapter.mjs`**：把 pi RPC 的报文类型、字段名、请求构造集中到一处。
+  `qq-bridge.mjs` 与 `home-rpc.mjs` 已全部接入——pi 升级改协议只需要改这个文件。
+- `install.sh`：新增 pi 版本检查（低于 1.5.0 会警告）；`rpc-adapter.mjs` 作为硬依赖，
+  拷贝失败直接中止安装，不再静默继续。
+
+### 修复
+
+- 适配层同时接受「外层报文」与「内层 message」两种传法，并对字符串形式的 `content` 兜底，
+  避免调用方传错层级时整条 `message_end` 分支静默失效。
+- `install.sh` 的版本解析加 `|| true`，不再因 `set -euo pipefail` 在读不到版本时静默中止。
+
 ## [1.0.9] - 2026-11-12
 
 ### 新增

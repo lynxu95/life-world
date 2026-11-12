@@ -1,7 +1,8 @@
 # life-world · pi agent
 
 > **当前维护分支：`pi-agent-adv`（唯一在维护的 pi 版）。**
-> `pi-agent` / `pi-agent-v2` 已归档，归档 tag 保留提交：`archive/pi-agent-20261111`、`archive/pi-agent-v2-20261111`；`opencode`（原 `main`）是早期 opencode 插件版，**功能不全**，保留存档。分支状态见[分支状态](#分支状态)。
+> 本仓库只维护 pi 版。`pi-agent` / `pi-agent-v2` 已归档（tag：`archive/pi-agent-20261111`、`archive/pi-agent-v2-20261111`）；
+> 早期 opencode 插件版的源码已从仓库移除，只在 git 历史/归档分支里查得到。分支状态见[分支状态](#分支状态)。
 
 给 [pi coding agent](https://github.com/earendil-works/pi) 里的陪伴角色一个会记得、会生活的世界。所有能力都跑在**本地文件 + 本地进程**上，聊天默认用本地模型，需要时借在线模型的算力。
 
@@ -80,7 +81,7 @@ cd life-world
 ./pi/install.sh --global     # 所有 pi 会话加载；只想在仓库目录用改成 --project
 ```
 
-安装脚本会：建世界目录、复制颜文字库、生成世界规则、软链扩展，并把 `browser-*`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwctl`、`lwboard` 等放进 `~/.local/share/life-world/bin/`。
+安装脚本会：检查 pi 版本（低于 1.5.0 会警告）、建世界目录、复制颜文字库、生成世界规则、软链扩展，并把 `browser-*`、`rpc-adapter.mjs`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwctl`、`lwboard` 等放进 `~/.local/share/life-world/bin/`。
 
 ### 3. 配模型
 
@@ -472,7 +473,7 @@ lwctl board stop                # 停止
 | `pi-agent-adv` | **当前维护** | 唯一在维护的 pi 版；新功能都进这里 |
 | `pi-agent` | 已归档 | 轻量稳定版；归档 tag `archive/pi-agent-20261111` |
 | `pi-agent-v2` | 已归档 | 增强版（保留向量检索）；归档 tag `archive/pi-agent-v2-20261111` |
-| `opencode`（原 `main`） | 存档 | 早期 opencode 插件版，**功能不全**；归档 tag `archive/main-20261111` |
+| `opencode`（原 `main`） | 历史 | 早期 opencode 插件版，源码已移除；归档 tag `archive/main-20261111` |
 
 > 归档分支不再接收功能更新；需要旧版代码时用对应 tag 检出。`pi-agent-adv` 不依赖 v2 的语义向量检索，二者是并行实现，不是前后代关系。
 

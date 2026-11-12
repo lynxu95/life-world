@@ -15,6 +15,28 @@ ROOT="${LIFE_WORLD_ROOT:-$HOME/.local/share/life-world}"
 AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 MODE="${1:---global}"
 
+check_pi() {
+  if ! command -v pi >/dev/null 2>&1; then
+    echo "⚠ 没找到 pi 命令；装好 pi 后再跑一次本脚本"
+    return
+  fi
+  local ver
+  # 末尾的 || true 不能省：pipefail + set -e 会让「读不到版本」直接中止整个安装
+  ver="$(pi --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if [ -z "$ver" ]; then
+    echo "· 读不到 pi 版本（不影响安装）"
+    return
+  fi
+  local major minor
+  major="$(echo "$ver" | cut -d. -f1)"
+  minor="$(echo "$ver" | cut -d. -f2)"
+  if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 5 ]; }; then
+    echo "⚠ 当前 pi $ver，低于 1.5.0；life-world 依赖 1.5 的扩展 API 和 rpc 协议，请先 pi update"
+  else
+    echo "  ✓ pi $ver"
+  fi
+}
+
 ensure_world() {
   echo "== 世界目录 =="
   mkdir -p "$ROOT" "$ROOT/worlds/default" "$ROOT/pi-sessions"
@@ -27,7 +49,7 @@ ensure_world() {
   chmod 600 "$ROOT/install-mode" 2>/dev/null || true
   cp "$SRC/../data/kaomoji.json" "$ROOT/pi-kaomoji.json"
   echo "  ✓ 颜文字库 → $ROOT/pi-kaomoji.json"
-  # 配套脚本：只装 pi 版实际引用的（避免覆盖同机 opencode 版的 qq-bridge）
+  # 配套脚本：只装 pi 版实际引用的
   mkdir -p "$ROOT/bin"
   cp "$SRC"/../scripts/browser-* "$ROOT/bin/" 2>/dev/null || true
   cp "$SRC"/bin/qq-bridge.mjs "$ROOT/bin/pi-qq-bridge.mjs" 2>/dev/null || true
@@ -35,6 +57,11 @@ ensure_world() {
   cp "$SRC"/bin/lwctl.mjs "$ROOT/bin/lwctl" 2>/dev/null || true
   cp "$SRC"/bin/world-backup.mjs "$ROOT/bin/world-backup.mjs" 2>/dev/null || true
   cp "$SRC"/bin/usage-stats.mjs "$ROOT/bin/usage-stats.mjs" 2>/dev/null || true
+  cp "$SRC"/bin/rpc-adapter.mjs "$ROOT/bin/rpc-adapter.mjs"
+  if [ ! -f "$ROOT/bin/rpc-adapter.mjs" ]; then
+    echo "✗ 缺少 rpc-adapter.mjs —— 桥接和家会话都起不来，安装中止" >&2
+    exit 1
+  fi
   cp "$SRC"/bin/control-queue.mjs "$ROOT/bin/control-queue.mjs" 2>/dev/null || true
   cp "$SRC"/bin/lwboard.mjs "$ROOT/bin/lwboard.mjs" 2>/dev/null || true
   cp "$SRC"/bin/board.html "$ROOT/bin/board.html" 2>/dev/null || true
@@ -73,6 +100,7 @@ link_extension() { # $1 = target dir
 
 case "$MODE" in
   --global)
+    check_pi
     ensure_world
     build_prompt
     echo "== 全局扩展 =="
@@ -90,6 +118,7 @@ QQ 桥接（可选）：
 EOF
     ;;
   --project)
+    check_pi
     ensure_world
     build_prompt
     PROJECT="${LIFE_WORLD_PROJECT:-$(cd "$SRC/.." && pwd)}"

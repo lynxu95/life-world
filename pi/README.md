@@ -1,7 +1,8 @@
 # life-world · pi 版
 
-> 本目录是 life-world 的 **pi 1.5.0 移植版**，独立于仓库根目录的 opencode 插件。
-> 分支：`pi-agent-adv` 是**当前唯一维护的 pi 版**；`pi-agent` / `pi-agent-v2` 已归档（对应 tag 保留），`opencode`（原 `main`）是早期 opencode 版存档，功能不全。
+> 本目录是 life-world 的 **pi 1.5.0 版**，仓库里只有这一版。
+> 分支：`pi-agent-adv` 是**当前唯一维护的版本**；`pi-agent` / `pi-agent-v2` 已归档（对应 tag 保留），
+> 早期 opencode 插件版的源码已从仓库移除（归档 tag：`archive/main-20261111`）。
 >
 > 评估与决策见 vault：`AI/开发中项目/life-world 迁 pi · 扩展点评估.md`；
 > 实施记录见 `AI/开发中项目/piagent 迁移 worklog.md`。
@@ -324,6 +325,7 @@ TZ=Asia/Shanghai TEST_MS=45000 node pi/bin/qq-bridge.mjs --test-user "在吗"
 ```
 pi/
 ├── ext/life-world.ts        pi 扩展（工具/注入/归档/定时器/delegate/gal）
+├── bin/rpc-adapter.mjs      pi RPC 报文契约（升级只改这里）
 ├── bin/qq-bridge.mjs        OneBot WS ↔ pi RPC 桥接
 ├── bin/home-rpc.mjs         家会话 RPC 常驻（定时器）
 ├── build-prompt.mjs         从 ../modules/*.md 生成 prompt/world.md

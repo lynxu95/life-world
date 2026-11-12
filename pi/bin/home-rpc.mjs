@@ -15,6 +15,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import { spawn } from "node:child_process"
+import { isMessageEnd, isAgentSettled, isExtensionUIRequest, isAssistant, textOf, reqExtensionUIResponse } from "./rpc-adapter.mjs"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const LOG = join(ROOT, "home-rpc.log")
@@ -77,14 +78,14 @@ function startChild() {
       if (!line.trim()) continue
       let msg
       try { msg = JSON.parse(line) } catch { continue }
-      if (msg.type === "message_end" && msg.message?.role === "assistant") {
-        const text = (msg.message.content || []).filter((p) => p?.type === "text").map((p) => p.text).join("\n").trim()
+      if (isMessageEnd(msg) && isAssistant(msg)) {
+        const text = textOf(msg)
         if (text) log("assistant", text.slice(0, 300))
-      } else if (msg.type === "agent_settled") {
+      } else if (isAgentSettled(msg)) {
         log("agent settled")
-      } else if (msg.type === "extension_ui_request") {
+      } else if (isExtensionUIRequest(msg)) {
         // 无头会话没人能点面板：立即回 cancelled，避免整轮 agent 卡死
-        try { c.stdin.write(JSON.stringify({ type: "extension_ui_response", id: msg.id, cancelled: true }) + "\n") } catch { /* ignore */ }
+        try { c.stdin.write(JSON.stringify(reqExtensionUIResponse(msg.id)) + "\n") } catch { /* ignore */ }
       }
     }
   })

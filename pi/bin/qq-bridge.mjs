@@ -19,6 +19,11 @@ import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import { spawn, spawnSync } from "node:child_process"
+import {
+  isResponse, isMessageEnd, isAgentStart, isAgentSettled, isExtensionUIRequest,
+  isAssistant, isToolUse, isError, isOverflow, errorMessage, settledAborted, responseOk, responseError,
+  textOf as rpcTextOf, toolCallOf, reqPrompt, reqAbort, reqAbortBash, reqExtensionUIResponse,
+} from "./rpc-adapter.mjs"
 
 const HOME = homedir()
 const ROOT = process.env.LIFE_WORLD_ROOT || join(HOME, ".local/share/life-world")
@@ -558,21 +563,21 @@ class PiSession {
   onRecord(msg) {
     // 任何一条 pi 输出都算「有动静」，看门狗据此判断是不是真卡住了
     this.lastEventAt = Date.now()
-    if (msg.type === "response" && msg.id && this.pendingResponses?.has(msg.id)) {
+    if (isResponse(msg) && msg.id && this.pendingResponses?.has(msg.id)) {
       const p = this.pendingResponses.get(msg.id)
       this.pendingResponses.delete(msg.id)
-      if (msg.success) p.resolve(msg)
-      else p.reject(new Error(msg.error || "command failed"))
+      if (responseOk(msg)) p.resolve(msg)
+      else p.reject(new Error(responseError(msg)))
       return
     }
-    if (msg.type === "message_end") {
+    if (isMessageEnd(msg)) {
       const m = msg.message
-      if (m?.role === "assistant") {
-        const tool = Array.isArray(m.content) ? m.content.find((p) => p?.type === "toolCall") : null
-        if (tool) this.currentTool = { name: String(tool.name || "工具"), args: tool.arguments || {}, at: Date.now() }
-        const text = (Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : String(m.content || "")).trim()
+      if (isAssistant(m)) {
+        const tool = toolCallOf(m)
+        if (tool) this.currentTool = { ...tool, at: Date.now() }
+        const text = rpcTextOf(m)
         if (text) {
-          if (m.stopReason === "toolUse") {
+          if (isToolUse(m)) {
             // 她要先应一声：这句立刻发出去，不等整轮跑完
             if (!this.ackSent && typeof this.onAck === "function") {
               this.ackSent = true
@@ -583,25 +588,23 @@ class PiSession {
           }
         }
         // 没说话就直接调工具：桥接不替她开口，安静等最终结果
-        if (m.stopReason === "error") log("message_end error", String(m.errorMessage || "").slice(0, 120))
-        if (m.stopReason === "error" && /context window|exceeds the context|too many tokens|maximum context/i.test(String(m.errorMessage || ""))) {
-          this.lastOverflow = true
-        }
+        if (isError(m)) log("message_end error", errorMessage(m).slice(0, 120))
+        if (isOverflow(m)) this.lastOverflow = true
       }
       return
     }
-    if (msg.type === "agent_start") {
+    if (isAgentStart(msg)) {
       this.running = true
       this.turnStartedAt = Date.now()
       this.currentTool = null
       return
     }
-    if (msg.type === "agent_settled") {
+    if (isAgentSettled(msg)) {
       this.running = false
       this.currentTool = null
       const collected = this.texts.splice(0)
       // 被中断的这一轮不要半截回复（msg.aborted 是 pi 自己的信号）
-      const texts = (this.abortRequested || msg.aborted) ? [] : collected
+      const texts = (this.abortRequested || settledAborted(msg)) ? [] : collected
       this.abortRequested = false
       const waiters = this.waiters.splice(0)
       for (const w of waiters) w.resolve(texts)
@@ -609,9 +612,9 @@ class PiSession {
       for (const r of idle) r()
       return
     }
-    if (msg.type === "extension_ui_request") {
+    if (isExtensionUIRequest(msg)) {
       // QQ 不渲染面板：直接取消
-      this.write({ type: "extension_ui_response", id: msg.id, cancelled: true })
+      this.write(reqExtensionUIResponse(msg.id))
     }
   }
   write(obj) { try { this.child?.stdin.write(JSON.stringify(obj) + "\n") } catch (e) { log("pi write failed", String(e)) } }
@@ -678,9 +681,7 @@ class PiSession {
         reject: (e) => { if (timer) clearTimeout(timer); reject(e) },
       })
     })
-    const body = { type: "prompt", message: text }
-    if (images.length) body.images = images
-    this.write(body)
+    this.write(reqPrompt(undefined, text, images))
     return wait
   }
   overflowMarkerPath() {
@@ -898,10 +899,10 @@ async function handleOwnerCommand(msg, cmd) {
     if (!pi.running) { await reply("没在忙，不用停。"); return }
     log("owner stop · abort current turn")
     pi.abortRequested = true
-    pi.write({ type: "abort" })
+    pi.write(reqAbort())
     let ok = await pi.waitIdle(3000)
     if (!ok) {
-      pi.write({ type: "abort_bash" })
+      pi.write(reqAbortBash())
       ok = await pi.waitIdle(4000)
     }
     await reply(ok ? "已停下。" : "中断发出去了，还没停住；再发一次 /stop 试试。")
@@ -1217,10 +1218,10 @@ async function abortFromBoard(id) {
   if (!pi.running) { ack(true, "本来就没在忙"); return }
   log("board abort · requested")
   pi.abortRequested = true
-  pi.write({ type: "abort" })
+  pi.write(reqAbort())
   let ok = await pi.waitIdle(3000)
   if (!ok) {
-    pi.write({ type: "abort_bash" })
+    pi.write(reqAbortBash())
     ok = await pi.waitIdle(4000)
   }
   ack(ok, ok ? "已中断当前轮" : "中断发出去了，但这一轮还没停住")
@@ -1237,10 +1238,10 @@ async function idleWatchdog() {
   try {
     log("watchdog · idle", Math.round(idle / 1000), "s · abort current turn")
     pi.abortRequested = true
-    pi.write({ type: "abort" })
+    pi.write(reqAbort())
     let ok = await pi.waitIdle(3000)
     if (!ok) {
-      pi.write({ type: "abort_bash" })
+      pi.write(reqAbortBash())
       ok = await pi.waitIdle(4000)
     }
     if (!ok) {
