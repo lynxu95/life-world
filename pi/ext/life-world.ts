@@ -210,7 +210,7 @@ interface MultimodalOptions {
 }
 
 interface Config {
-  world: { enabled: boolean; running: boolean; reviewHour: number; fallbackWakeTime: string; recentLimit: number; heartbeatMaxMinutes: number; hydrate: { hours: number; chars: number; mapDays: number } }
+  world: { enabled: boolean; running: boolean; reviewHour: number; fallbackWakeTime: string; recentLimit: number; heartbeatMaxMinutes: number; heartbeatEnabled: boolean; hydrate: { hours: number; chars: number; mapDays: number } }
   bridge: { enabled: boolean; ownerQQ: number; wsUrl: string; group: { enabled: boolean; id?: string } }
   subagent: { model: string }
   multimodal: MultimodalOptions
@@ -296,7 +296,7 @@ interface CareOptions {
 
 function config(): Config {
   const base: Config = {
-    world: { enabled: true, running: true, reviewHour: 23, fallbackWakeTime: "09:00", recentLimit: 80, heartbeatMaxMinutes: 120, hydrate: { hours: 48, chars: 2000, mapDays: 3 } },
+    world: { enabled: true, running: true, reviewHour: 23, fallbackWakeTime: "09:00", recentLimit: 80, heartbeatMaxMinutes: 20, heartbeatEnabled: true, hydrate: { hours: 48, chars: 2000, mapDays: 3 } },
     bridge: { enabled: false, ownerQQ: 0, wsUrl: "ws://127.0.0.1:3001", group: { enabled: false } },
     subagent: { model: "deepseek-flash" },
     multimodal: { enabled: false, model: "", timeoutMs: 300_000, warnImageBytes: 8 * 1024 * 1024, warnVideoBytes: 200 * 1024 * 1024 },
@@ -1419,11 +1419,15 @@ function openActivitiesLine(): string {
   return `\n还有活动开着：${items.join("、")}。做完了就 cancel_alarm({ id }) 关掉，别一直挂着。`
 }
 
-/** 单次心跳串最长持续多久（分钟）；10~1440，默认 120 */
+/** 单次心跳串最长持续多久（分钟）；10~1440，默认 20 */
 function heartbeatLimitMinutes(): number {
   const v = Number(config().world.heartbeatMaxMinutes)
-  if (!Number.isFinite(v) || v <= 0) return 120
+  if (!Number.isFinite(v) || v <= 0) return 20
   return Math.max(10, Math.min(1440, Math.round(v)))
+}
+/** 心跳总开关（看板「心跳时长」里可以关掉） */
+function heartbeatEnabled(): boolean {
+  return config().world.heartbeatEnabled !== false
 }
 
 /** 心跳串到点时的唤醒文本：带上理由、第几跳、怎么停 */
@@ -1649,6 +1653,8 @@ async function tick(): Promise<void> {
         }
         // —— 心跳串：独立于主活动，触发后自动续下一跳 ——
         if (a.chainId && !a.parentId) {
+          // 总开关关掉时不再触发（未执行的跳保留，打开后接着跳）
+          if (!heartbeatEnabled()) continue
           if (a.paused) continue
           if (isAgentBusy()) {
             // 心跳不该被跳过：忙就往后挪 30 秒再试
@@ -3389,6 +3395,7 @@ export default function (pi: ExtensionAPI) {
     },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能起心跳。")
+      if (!heartbeatEnabled()) return ok("心跳功能已经关掉了（看板「心跳时长」里可以重新打开）。")
       const reason = String(params?.reason || "").trim()
       if (!reason) return ok("说一下为什么要起这个心跳。")
       const every = Math.round(Number(params?.every_minutes) || 0)

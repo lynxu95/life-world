@@ -438,16 +438,26 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
       </main>
       <aside class="rail">
         <section>
-        <div class="sec-head"><h2>心跳时长</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
-        <div class="row">
-          <input type="number" id="hb-limit" placeholder="120" style="width:96px" aria-label="单次心跳最长分钟数">
+        <div class="sec-head"><h2>心跳与关怀</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
+        <label class="check"><input type="checkbox" id="hb-enabled">启用心跳</label>
+        <div class="row" style="margin-top:8px">
+          <input type="number" id="hb-limit" placeholder="20" style="width:96px" aria-label="单次心跳最长分钟数">
           <span class="muted">分钟 / 单次</span>
-          <button class="primary" id="hb-limit-save">保存</button>
         </div>
-        <div class="hint">单条心跳串最长跑多久，到点自动结束（默认 120 分钟，10~1440）。心跳很费 token，别设太长。</div>
+        <div class="hint">心跳到点就把自己叫醒；单条最长跑这么久（默认 20，10~1440）。很费 token，别设太长。</div>
+        <label class="check" style="margin-top:14px"><input type="checkbox" id="care-random">随机想起</label>
+        <div class="row">
+          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
+          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="hb-merge-save">保存</button>
+          <span class="muted" id="merge-hint"></span>
+        </div>
+        <div class="hint">关掉随机想起 = 全天不主动找你；关掉心跳 = 不再自动醒来。日程和晨间唤醒不受影响。</div>
       </section>
         <section>
-        <div class="sec-head"><h2>模型</h2></div>
+        <div class="sec-head"><h2>模型设置</h2></div>
         <label class="field">本地<select id="m-local"></select></label>
         <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
         <label class="field" style="margin-top:8px">分身<select id="m-subagent"></select></label>
@@ -459,19 +469,6 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
         <div class="hint">辅助感知只补主模型缺的能力（视频/音频，或主模型不支持图片时）；留空即停用，推荐 qwen3.8-omni-flash。</div>
         <div class="hint" id="mode-hint"></div>
-      </section>
-        <section>
-        <div class="sec-head"><h2>主动关怀</h2></div>
-        <label class="check"><input type="checkbox" id="care-random">随机想起</label>
-        <div class="row">
-          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
-          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="care-save">保存</button>
-          <span class="muted" id="care-hint"></span>
-        </div>
-        <div class="hint">关掉随机想起 = 全天不主动找你，闹钟和晨间唤醒不受影响。</div>
       </section>
         <section>
         <div class="sec-head"><h2>快捷操作</h2></div>
@@ -713,10 +710,13 @@ function renderUpdate(u, result) {
 }
 
 let hbLimitTouched = false
-function renderHeartbeatLimit(minutes) {
-  const v = Number(minutes) || 120
-  if (!hbLimitTouched) $("hb-limit").value = v
-  $("hb-limit-note").textContent = `最长 ${v} 分钟`
+function renderHeartbeatLimit(minutes, enabled) {
+  const v = Number(minutes) || 20
+  if (!hbLimitTouched) {
+    $("hb-limit").value = v
+    $("hb-enabled").checked = enabled !== false
+  }
+  $("hb-limit-note").textContent = enabled === false ? "已关闭" : `最长 ${v} 分钟`
 }
 
 function renderBoardAddr(b) {
@@ -765,7 +765,7 @@ async function loadOverview() {
       group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
     renderUpdate(d.update, d.updateResult)
-    renderHeartbeatLimit(d.heartbeatMaxMinutes)
+    renderHeartbeatLimit(d.heartbeatMaxMinutes, d.heartbeatEnabled)
     renderBoardAddr(d.board)
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
@@ -1176,21 +1176,6 @@ function bindQuick() {
 let careTouched = false
 for (const id of ["care-qs", "care-qe"]) $(id).addEventListener("input", () => { careTouched = true })
 $("care-random").addEventListener("change", () => { careTouched = true })
-$("care-save").onclick = async () => {
-  const b = $("care-save"); b.disabled = true; b.textContent = "保存中…"
-  try {
-    const r = await getJson("/api/care", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-      randomEnabled: $("care-random").checked,
-      quietStart: $("care-qs").value.trim(),
-      quietEnd: $("care-qe").value.trim(),
-    }) })
-    $("care-hint").textContent = r.ok ? "已保存" : (r.msg || "保存失败")
-    careTouched = false
-  } catch (e) { $("care-hint").textContent = "保存失败：" + e.message }
-  b.disabled = false; b.textContent = "保存"
-  setTimeout(() => { $("care-hint").textContent = "" }, 3000)
-  loadOverview()
-}
 
 let mTouched = false
 let mLoaded = false
@@ -2149,18 +2134,34 @@ if (updateBtn) updateBtn.onclick = async () => {
   try { await loadOverview() } catch { /* ignore */ }
 }
 
-const hbLimitSave = $("hb-limit-save")
-if (hbLimitSave) hbLimitSave.onclick = async () => {
-  const minutes = Number($("hb-limit").value)
-  $("hb-limit-note").textContent = "保存中…"
+const mergeSave = $("hb-merge-save")
+if (mergeSave) mergeSave.onclick = async () => {
+  mergeSave.disabled = true
+  mergeSave.textContent = "保存中…"
   try {
-    const r = await postJson("/api/heartbeat-limit", { minutes })
-    $("hb-limit-note").textContent = r.msg || (r.ok ? "已保存" : "失败")
-    if (r.ok) { hbLimitTouched = false; setTimeout(() => loadOverview(), 800) }
-  } catch { $("hb-limit-note").textContent = "失败" }
+    const r1 = await postJson("/api/heartbeat-limit", {
+      minutes: Number($("hb-limit").value),
+      enabled: $("hb-enabled").checked,
+    })
+    const r2 = await postJson("/api/care", {
+      randomEnabled: $("care-random").checked,
+      quietStart: $("care-qs").value.trim(),
+      quietEnd: $("care-qe").value.trim(),
+    })
+    $("merge-hint").textContent = (r1.ok && r2.ok) ? "已保存" : (r1.msg || r2.msg || "保存失败")
+    if (r1.ok) hbLimitTouched = false
+    if (r2.ok) careTouched = false
+  } catch (e) { $("merge-hint").textContent = "保存失败：" + e.message }
+  mergeSave.disabled = false
+  mergeSave.textContent = "保存"
+  setTimeout(() => { $("merge-hint").textContent = "" }, 3000)
+  loadOverview()
 }
-const hbLimitEl = $("hb-limit")
-if (hbLimitEl) hbLimitEl.addEventListener("input", () => { hbLimitTouched = true })
+;["hb-limit", "hb-enabled"].forEach((id) => {
+  const el = $(id)
+  if (el) el.addEventListener("input", () => { hbLimitTouched = true })
+  if (el) el.addEventListener("change", () => { hbLimitTouched = true })
+})
 
 const boardSave = $("board-save")
 if (boardSave) boardSave.onclick = async () => {

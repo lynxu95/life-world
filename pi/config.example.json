@@ -3,7 +3,8 @@
     "enabled": true,
     "running": true,
     "reviewHour": 23,
-    "heartbeatMaxMinutes": 120,
+    "heartbeatMaxMinutes": 20,
+    "heartbeatEnabled": true,
     "fallbackWakeTime": "09:00",
     "hydrate": {
       "hours": 48,
