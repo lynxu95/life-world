@@ -82,6 +82,8 @@ if (!ownerQQ) { log("ownerQQ missing, exit"); process.exit(1) }
 const wsUrl = bridge.wsUrl || "ws://127.0.0.1:3001"
 const wsToken = bridge.token || ""
 const afterglowCfg = Object.assign({ enabled: true, delayMs: 60000, maxRounds: 2 }, bridge.afterglow || {})
+/** 一轮多久没有任何动静就算卡死、自动掐掉；0 = 关闭 */
+const idleTimeoutSec = Number(bridge.idleTimeoutSec) > 0 ? Number(bridge.idleTimeoutSec) : 600
 let groupCfgCache = { at: 0, cfg: null }
 /** 群聊配置热加载：最多缓存 2 秒，改 life-world.json 立即生效 */
 function groupCfg() {
@@ -474,6 +476,8 @@ class PiSession {
     /** 当前这一轮的起点与正在跑的工具，给 /show 和看板用 */
     this.turnStartedAt = 0
     this.currentTool = null
+    /** 最后一次收到 pi 任何输出的时间（看门狗用） */
+    this.lastEventAt = 0
     /** /stop 之后丢弃这一轮已经吐出来的半截话 */
     this.abortRequested = false
   }
@@ -539,6 +543,8 @@ class PiSession {
     }
   }
   onRecord(msg) {
+    // 任何一条 pi 输出都算「有动静」，看门狗据此判断是不是真卡住了
+    this.lastEventAt = Date.now()
     if (msg.type === "response" && msg.id && this.pendingResponses?.has(msg.id)) {
       const p = this.pendingResponses.get(msg.id)
       this.pendingResponses.delete(msg.id)
@@ -1147,6 +1153,31 @@ async function abortFromBoard(id) {
   ack(ok, ok ? "已中断当前轮" : "中断发出去了，但这一轮还没停住")
 }
 
+// 静默看门狗：一轮超过 idleTimeoutSec 没有任何事件，就认定卡死，掐掉重来
+let watchdogBusy = false
+async function idleWatchdog() {
+  if (watchdogBusy || !pi.running || !idleTimeoutSec) return
+  const since = pi.lastEventAt || pi.turnStartedAt || Date.now()
+  const idle = Date.now() - since
+  if (idle < idleTimeoutSec * 1000) return
+  watchdogBusy = true
+  try {
+    log("watchdog · idle", Math.round(idle / 1000), "s · abort current turn")
+    pi.abortRequested = true
+    pi.write({ type: "abort" })
+    let ok = await pi.waitIdle(3000)
+    if (!ok) {
+      pi.write({ type: "abort_bash" })
+      ok = await pi.waitIdle(4000)
+    }
+    await sendPrivate(`刚才那轮卡住了（${fmtSpan(idle)}没动静），我掐了重来。`)
+  } catch (e) {
+    log("watchdog failed", String(e))
+  } finally {
+    watchdogBusy = false
+  }
+}
+
 function pollBridgeControl() {
   try {
     const d = new Date()
@@ -1180,6 +1211,7 @@ setInterval(() => { if (!wsReady && !reconnectTimer) scheduleReconnect("watchdog
 setInterval(cleanupGroupSessions, 10 * 60_000).unref?.()
 setInterval(writeBusy, 2000).unref?.()
 setInterval(pollBridgeControl, 2000).unref?.()
+setInterval(idleWatchdog, 30_000).unref?.()
 log("bridge started", { ownerQQ, wsUrl, model: MODEL, afterglow: afterglowCfg })
 process.on("exit", () => {
   try { pi.child?.kill("SIGTERM") } catch { /* ignore */ }

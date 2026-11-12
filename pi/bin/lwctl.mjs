@@ -457,35 +457,50 @@ function cmdVersion() {
 }
 
 function cmdUpdate(args = []) {
+  const startedAt = new Date().toISOString()
+  const result = { ok: false, from: "", to: "", version: "", msg: "" }
+  // 结果落盘：看板用它显示「更新成功 / 失败原因」，看板重启也不丢
+  const finish = (ok, msg) => {
+    result.ok = ok
+    result.msg = msg
+    try {
+      writeFileSync(join(ROOT, "update-result.json"), JSON.stringify({
+        ...result, version: readVersion(repoPath()), at: new Date().toISOString(), startedAt,
+      }, null, 2))
+    } catch { /* ignore */ }
+    return ok
+  }
   const noRestart = args.includes("--no-restart")
   const project = args.includes("--project")
   const bi = args.indexOf("--branch")
   const branchArg = bi >= 0 ? String(args[bi + 1] || "").trim() : ""
   const repo = repoPath()
-  if (!repo) { console.error("找不到仓库路径：$ROOT/repo-path 和 $ROOT/ext 软链都不在。"); return false }
-  if (!existsSync(join(repo, "pi/install.sh"))) { console.error(`当前仓库不是 pi 版（${repo}），先切到 pi-agent-adv 再更新。`); return false }
+  if (!repo) { console.error("找不到仓库路径：$ROOT/repo-path 和 $ROOT/ext 软链都不在。"); return finish(false, "找不到仓库路径，先重跑一次 pi/install.sh") }
+  if (!existsSync(join(repo, "pi/install.sh"))) { console.error(`当前仓库不是 pi 版（${repo}），先切到 pi-agent-adv 再更新。`); return finish(false, "当前仓库不是 pi 版（缺 pi/install.sh）") }
   // 只看已跟踪文件的改动；未跟踪文件不会因 ff 合并丢失，冲突时 git 会自己拒绝
   const dirty = runGit(repo, ["status", "--porcelain", "--untracked-files=no"])
-  if (dirty.status !== 0) { console.error(`git status 失败：${String(dirty.stderr || "").trim()}`); return false }
+  if (dirty.status !== 0) { console.error(`git status 失败：${String(dirty.stderr || "").trim()}`); return finish(false, "git status 失败") }
   if (String(dirty.stdout || "").trim()) {
     console.error("仓库有未提交改动，先 commit / stash 再更新：\n" + String(dirty.stdout).trim())
-    return false
+    return finish(false, "仓库有未提交改动，先 commit / stash")
   }
   const cur = String(runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout || "").trim()
   const branch = branchArg || (cur && cur !== "HEAD" ? cur : "pi-agent-adv")
   const old = String(runGit(repo, ["rev-parse", "HEAD"]).stdout || "").trim()
+  result.from = old.slice(0, 7)
   const fetch = runGit(repo, ["fetch", "origin"])
-  if (fetch.status !== 0) { console.error(`git fetch 失败：${String(fetch.stderr || "").trim()}`); return false }
+  if (fetch.status !== 0) { console.error(`git fetch 失败：${String(fetch.stderr || "").trim()}`); return finish(false, "git fetch 失败（网络不通？）") }
   const target = `origin/${branch}`
-  if (runGit(repo, ["rev-parse", "--verify", target]).status !== 0) { console.error(`远端没有 ${target}。`); return false }
+  if (runGit(repo, ["rev-parse", "--verify", target]).status !== 0) { console.error(`远端没有 ${target}。`); return finish(false, `远端没有分支 ${branch}`) }
   console.log(`更新 ${branch}：${old.slice(0, 7)} → ${target} …`)
   const merge = runGit(repo, ["merge", "--ff-only", target])
   if (merge.status !== 0) {
     console.error(`快进合并失败（本地和远端分叉了）：\n${String(merge.stderr || merge.stdout || "").trim()}`)
     console.error(`旧 HEAD：${old}`)
-    return false
+    return finish(false, `快进合并失败，本地和远端分叉了（旧 HEAD ${old.slice(0, 7)}）`)
   }
   const neu = String(runGit(repo, ["rev-parse", "HEAD"]).stdout || "").trim()
+  result.to = neu.slice(0, 7)
   if (neu === old) console.log("代码已经是最新。")
   const cfg = join(ROOT, "life-world.json")
   const before = fileHash(cfg)
@@ -496,21 +511,21 @@ function cmdUpdate(args = []) {
   if (inst.status !== 0) {
     console.error(`install.sh 失败（exit ${inst.status}）。旧 HEAD：${old}`)
     console.error(`可回滚：git -C ${repo} reset --hard ${old} && ${join(repo, "pi/install.sh")} ${mode}`)
-    return false
+    return finish(false, `install.sh 失败（exit ${inst.status}）；回滚：git -C ${repo} reset --hard ${old.slice(0, 7)}`)
   }
   const after = fileHash(cfg)
   if (before && after && before === after) console.log("✓ 配置未变（life-world.json 哈希一致）")
   else if (before && after) console.warn("⚠ life-world.json 哈希变了，检查 install 是否动了配置")
   else console.log("（没有 life-world.json，未做哈希对比）")
   console.log(`✓ 已更新到 ${neu.slice(0, 7)}；数据在 ${join(ROOT, "worlds/default")}，配置在 ${cfg}，均未改动。`)
-  if (noRestart) { console.log("按 --no-restart 跳过重启；下次 pi / qq / home 启动时生效。"); return true }
+  if (noRestart) { console.log("按 --no-restart 跳过重启；下次 pi / qq / home 启动时生效。"); return finish(true, `已更新到 ${neu.slice(0, 7)}（未重启）`) }
   const self = process.argv[1]
   for (const sub of [["board", "restart"], ["restart", "qq"], ["restart", "home"]]) {
     const r = spawnSync(process.execPath, [self, ...sub], { stdio: "inherit", env: process.env })
     if (r.status !== 0) console.warn(`⚠ lwctl ${sub.join(" ")} 失败（exit ${r.status}）`)
   }
   console.log("✓ 常驻会话已重启；当前终端里的 pi TUI 要自己退出重开才会加载新代码。")
-  return true
+  return finish(true, `已更新到 ${neu.slice(0, 7)}，常驻会话已重启`)
 }
 
 // —— Web 看板 ——

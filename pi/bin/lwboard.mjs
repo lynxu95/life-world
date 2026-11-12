@@ -8,7 +8,7 @@
  * 提供：会话/模型、模型热切换、用量、记忆检索、日记、日志、快照。
  */
 import http from "node:http"
-import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
@@ -520,6 +520,8 @@ const server = http.createServer(async (req, res) => {
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
         update: readJson(UPDATE_CHECK_FILE, null),
+        updateResult: readJson(join(ROOT, "update-result.json"), null),
+        board: { host: HOST, port: PORT },
         schedule: scheduleList(),
         usage: overviewCache.data.usage,
         backup: overviewCache.data.backup,
@@ -755,6 +757,46 @@ const server = http.createServer(async (req, res) => {
         child.on("error", () => { clearTimeout(timer); resolve(false) })
       })
       return json(res, 200, { ok, msg: ok ? "快照完成" : "快照失败" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/update-run") {
+      // 真更新：交给 lwctl，detached 跑——它会重启看板（连自己一起），不能等在这里
+      try { unlinkSync(join(ROOT, "update-result.json")) } catch { /* ignore */ }
+      const env = { ...process.env, LIFE_WORLD_ROOT: ROOT }
+      delete env.LW_BOARD_HOST
+      delete env.LW_BOARD_PORT
+      const child = spawn(process.execPath, [LWCTL, "update"], {
+        env,
+        cwd: ROOT,
+        detached: true,
+        stdio: ["ignore", openSync(join(ROOT, "update-run.log"), "a"), openSync(join(ROOT, "update-run.log"), "a")],
+      })
+      child.unref()
+      return json(res, 200, { ok: true, msg: "正在更新，看板会短暂断开，十几秒后刷新本页" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/board-address") {
+      const data = await body(req)
+      const host = String(data.host || "").trim()
+      const port = Number(data.port)
+      if (!host || !/^[A-Za-z0-9_.:-]+$/.test(host)) return json(res, 400, { ok: false, msg: "监听地址不合法" })
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return json(res, 400, { ok: false, msg: "端口要在 1-65535" })
+      const c = readJson(CONFIG_FILE, {})
+      c.board = { ...(c.board || {}), host, port }
+      try { writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {
+        return json(res, 500, { ok: false, msg: `写配置失败：${String(e)}` })
+      }
+      // 换监听地址要重启看板才生效；同样 detached，别把自己杀掉
+      // 注意别把当前进程的 LW_BOARD_HOST/PORT 传下去，否则 lwctl 会用旧值覆盖新配置
+      const env = { ...process.env, LIFE_WORLD_ROOT: ROOT }
+      delete env.LW_BOARD_HOST
+      delete env.LW_BOARD_PORT
+      const child = spawn(process.execPath, [LWCTL, "board", "restart"], {
+        env,
+        cwd: ROOT,
+        detached: true,
+        stdio: ["ignore", openSync(join(ROOT, "board-restart.log"), "a"), openSync(join(ROOT, "board-restart.log"), "a")],
+      })
+      child.unref()
+      return json(res, 200, { ok: true, msg: `已保存 ${host}:${port}，正在重启看板` })
     }
     if (req.method === "POST" && url.pathname === "/api/update-check") {
       const started = runUpdateCheck()

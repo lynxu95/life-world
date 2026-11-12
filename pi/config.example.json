@@ -21,6 +21,7 @@
     "wsUrl": "ws://127.0.0.1:3001",
     "token": "",
     "privateSessionTitle": "qq-chat",
+    "idleTimeoutSec": 600,
     "afterglow": {
       "enabled": true,
       "delayMs": 60000,

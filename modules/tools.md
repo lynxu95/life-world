@@ -44,5 +44,5 @@
 
 ## 插件更新
 - 查有没有新版本：`bash $LIFE_WORLD_ROOT/bin/lwctl check-update`（只查，不改文件）。
-- 发现更新，就告诉对方去终端跑 `$LIFE_WORLD_ROOT/bin/lwctl update`；**不要自己跑 update**——它会重装脚本并重启桥接，在自己的窗口里跑会把自己杀掉。
+- 发现更新，告诉对方打开看板、点右上角的「更新插件」；看板不方便时，再让他去终端跑 `$LIFE_WORLD_ROOT/bin/lwctl update`。**不要自己跑 update**——它会重装脚本并重启桥接，在自己的窗口里跑会把自己杀掉。
 - 不用天天查，对方问起、或隔几天顺手看一眼就够。

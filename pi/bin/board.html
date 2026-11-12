@@ -145,7 +145,7 @@ button.primary{background:linear-gradient(180deg,var(--accent),color-mix(in okla
   border-color:transparent;color:#04211d;font-weight:650}
 button.ghost{background:transparent}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-input[type=search],select{font:inherit;color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
+input[type=search],input[type=text],input[type=number],select{font:inherit;color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
   border-radius:var(--radius-sm);padding:8px 10px;min-width:0}
 input[type=search]::placeholder{color:var(--faint)}
 label.field{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);min-width:0}
@@ -395,7 +395,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
   <div class="update-bar" id="update-bar" hidden>
     <span id="update-text"></span>
     <span class="spacer"></span>
-    <code>~/.local/share/life-world/bin/lwctl update</code>
+    <code id="update-cmd">~/.local/share/life-world/bin/lwctl update</code>
   </div>
   <div class="tab-panel" id="tab-overview">
     <div class="dash">
@@ -447,6 +447,18 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
         <div class="hint">辅助感知只补主模型缺的能力（视频/音频，或主模型不支持图片时）；留空即停用，推荐 qwen3.8-omni-flash。</div>
         <div class="hint" id="mode-hint"></div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>看板监听</h2><span class="spacer"></span><span class="sec-note" id="board-addr-note">…</span></div>
+        <div class="row">
+          <input type="text" id="board-host" placeholder="127.0.0.1" style="flex:1;min-width:0" aria-label="监听地址">
+          <input type="number" id="board-port" placeholder="8099" style="width:88px" aria-label="端口">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="primary" id="board-save">保存并重启</button>
+          <span class="muted" id="board-hint"></span>
+        </div>
+        <div class="hint">0.0.0.0 = 局域网可访问（看板没有登录鉴权，别放公网）；127.0.0.1 = 仅本机，配合 SSH 隧道最稳。</div>
       </section>
         <section>
         <div class="sec-head"><h2>健康</h2><span class="spacer"></span><span class="sec-note" id="health-note">…</span></div>
@@ -622,10 +634,22 @@ async function getJson(url, opts) {
 }
 const postJson = (url, data) => getJson(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}) })
 
-function renderUpdate(u) {
+function renderUpdate(u, result) {
   const bar = $("update-bar")
   const btn = $("update-btn")
+  const cmd = $("update-cmd")
   if (!bar || !btn) return
+  // 刚更新过：10 分钟内优先显示结果
+  if (result && result.at && Date.now() - Date.parse(result.at) < 10 * 60_000) {
+    bar.hidden = false
+    if (cmd) cmd.hidden = true
+    $("update-text").innerHTML = result.ok
+      ? `✓ ${esc2(result.msg || "更新完成")}${result.version ? ` · 当前 v${esc2(result.version)}` : ""}`
+      : `✗ 更新失败：${esc2(result.msg || "原因未知")}<br><span class="muted">可以到终端手动跑一次 update 看详细输出</span>`
+    btn.textContent = "检查更新"
+    btn.classList.remove("update-on")
+    return
+  }
   const n = u && u.ok ? Number(u.behind) || 0 : 0
   if (n > 0) {
     const cv = u.current && u.current.version ? `v${u.current.version}` : ""
@@ -634,9 +658,10 @@ function renderUpdate(u) {
     const first = u.commits && u.commits[0] ? ` · 最新：${esc2(u.commits[0])}` : ""
     $("update-text").innerHTML =
       `发现 <b>${n}</b> 个新提交${esc2(range)}${first}<br>` +
-      `<span class="muted">在终端执行右边命令更新；worlds/default、会话和配置都不会动</span>`
+      `<span class="muted">点右上角「更新插件」直接更新；worlds/default、会话和配置都不会动</span>`
+    if (cmd) cmd.hidden = false
     bar.hidden = false
-    btn.textContent = `有 ${n} 个更新`
+    btn.textContent = `更新插件（${n}）`
     btn.classList.add("update-on")
   } else {
     bar.hidden = true
@@ -644,6 +669,16 @@ function renderUpdate(u) {
     btn.classList.remove("update-on")
   }
 }
+
+function renderBoardAddr(b) {
+  if (!b) return
+  $("board-addr-note").textContent = `${b.host}:${b.port}`
+  if (!boardTouched) {
+    $("board-host").value = b.host || ""
+    $("board-port").value = b.port || ""
+  }
+}
+let boardTouched = false
 
 async function loadOverview() {
   try {
@@ -680,7 +715,8 @@ async function loadOverview() {
       multimodal: (d.multimodal && d.multimodal.model) || "",
       group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
-    renderUpdate(d.update)
+    renderUpdate(d.update, d.updateResult)
+    renderBoardAddr(d.board)
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
     renderNow(d)
@@ -1999,11 +2035,45 @@ try { setTab(localStorage.getItem("lw-tab") || "overview", false) } catch { setT
 
 const updateBtn = $("update-btn")
 if (updateBtn) updateBtn.onclick = async () => {
+  // 按钮已经是「更新插件」：直接更新
+  if (updateBtn.classList.contains("update-on")) {
+    if (!confirm("现在更新插件？看板会重启一下，十几秒后自动刷新本页。")) return
+    updateBtn.disabled = true
+    updateBtn.textContent = "更新中…"
+    try { await postJson("/api/update-run") } catch { /* ignore */ }
+    // 等看板重启回来
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 3000))
+      try {
+        const r = await fetch("/api/health", { cache: "no-store" })
+        if (r.ok) { location.reload(); return }
+      } catch { /* 还没起来 */ }
+    }
+    updateBtn.disabled = false
+    updateBtn.textContent = "更新可能失败，看终端"
+    return
+  }
   updateBtn.disabled = true
   updateBtn.textContent = "检查中…"
   try { await postJson("/api/update-check") } catch { /* ignore */ }
   setTimeout(() => { updateBtn.disabled = false; loadOverview() }, 4000)
 }
+
+const boardSave = $("board-save")
+if (boardSave) boardSave.onclick = async () => {
+  const host = $("board-host").value.trim()
+  const port = Number($("board-port").value)
+  $("board-hint").textContent = "保存中…"
+  try {
+    const r = await postJson("/api/board-address", { host, port })
+    $("board-hint").textContent = r.msg || (r.ok ? "已保存" : "失败")
+    if (r.ok) setTimeout(() => location.reload(), 7000)
+  } catch { $("board-hint").textContent = "失败" }
+}
+;["board-host", "board-port"].forEach((id) => {
+  const el = $(id)
+  if (el) el.addEventListener("input", () => { boardTouched = true })
+})
 
 loadOverview(); loadDates(); loadLog(); loadBrain(); loadDay(dayOfLocal())
 loadHealth(); loadPlan(); loadSubs(); loadActivity(); loadEvents(); loadNowImps(); bindQuick()
