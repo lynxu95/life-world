@@ -355,6 +355,8 @@ interface Alarm {
   closedAt?: string
   /** 子闹钟实际触发的时间 */
   firedAt?: string
+  /** 心跳被手动停止的时间（没触发的跳留作墓碑） */
+  cancelledAt?: string
   /**
    * 心跳串：同一条串上的每一跳共享 chainId 和 reason。
    * 有 chainId 且没有 parentId 的 sub 闹钟 = 独立心跳，不属于任何主活动。
@@ -1552,6 +1554,7 @@ async function tick(): Promise<void> {
       const cutoff = Date.now() - 24 * 3600_000
       const kept = list.filter((x) => {
         if (x.kind === "sub" && x.status === "fired" && Date.parse(x.firedAt || x.at) < cutoff) return false
+        if (x.kind === "sub" && x.status === "cancelled" && Date.parse(x.cancelledAt || x.at) < cutoff) return false
         if (x.kind === "main" && x.status === "closed" && Date.parse(x.closedAt || x.at) < cutoff) return false
         return true
       })
@@ -1641,7 +1644,7 @@ async function tick(): Promise<void> {
     }
     // 子闹钟：忙就跳过并记录，闲才唤醒
     if (!woke) {
-      for (const a of alarmsNow.filter((x) => x.kind === "sub" && x.status !== "closed" && x.status !== "fired")) {
+      for (const a of alarmsNow.filter((x) => x.kind === "sub" && x.status !== "closed" && x.status !== "fired" && x.status !== "cancelled")) {
         // 旧机制残留（挂在活动下的子闹钟）：这套已经废弃，遇到就清掉
         if (a.parentId && !a.chainId) {
           withWorldLock(() => {
@@ -3462,10 +3465,16 @@ export default function (pi: ExtensionAPI) {
         const st = readWorldStrict()
         if (!st) return { ok: false, removed: 0 }
         const list = st.alarms || []
-        const kept = list.filter((a) => !(a.chainId === chainId && a.status !== "fired"))
-        const removed = list.length - kept.length
-        st.alarms = kept
-        return { ok: writeWorld(st), removed }
+        let cancelled = 0
+        for (const a of list) {
+          // 没触发的跳不删：标成 cancelled 留个墓碑，看板能看到「起过、但没等」
+          if (a.chainId === chainId && a.status !== "fired" && a.status !== "cancelled") {
+            a.status = "cancelled"
+            a.cancelledAt = new Date().toISOString()
+            cancelled++
+          }
+        }
+        return { ok: writeWorld(st), removed: cancelled }
       })
       if (!res?.ok) return ok("没停成（world.json 被占用）。")
       return ok(res.removed ? `已停止心跳 ${chainId}（撤掉 ${res.removed} 跳未触发的）。` : `心跳 ${chainId} 本来就没有待触发的了。`)
@@ -3506,7 +3515,7 @@ export default function (pi: ExtensionAPI) {
       }
       // 已经停掉/跑完的串，也报一句，免得它凭空消失
       const stopped = new Map<string, number>()
-      for (const b of list.filter((x) => x.kind === "sub" && x.chainId && x.status === "fired")) {
+      for (const b of list.filter((x) => x.kind === "sub" && x.chainId && (x.status === "fired" || x.status === "cancelled"))) {
         const k = String(b.chainId)
         if (beatMap.has(k)) continue
         stopped.set(k, (stopped.get(k) || 0) + 1)

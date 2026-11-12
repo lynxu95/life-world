@@ -283,6 +283,8 @@ input[type=checkbox]{accent-color:var(--accent)}
 .sub-item .t{font-family:var(--mono);color:var(--fg);white-space:nowrap}
 .sub-item .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sub-item.fired{opacity:.55}
+.sub-item.cancelled{opacity:.38}
+.sub-item.cancelled .t,.sub-item.cancelled .n{text-decoration:line-through}
 .sub-item.fired .t,.sub-item.fired .n{color:var(--faint);text-decoration:line-through;text-decoration-thickness:1px}
 .sub-item button,.sub-actions button{font-size:11px;padding:2px 7px;border-radius:6px;border:1px solid var(--line-strong);background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap}
 .sub-item button:hover,.sub-actions button:hover{border-color:var(--accent);color:var(--accent)}
@@ -1109,20 +1111,31 @@ function renderSubs(list) {
     : ""
   // —— 心跳：和日程平行，按串分组 ——
   const beatCards = [...chains.entries()].map(([cid, items]) => {
-    const live = items.filter((x) => x.status !== "fired").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    const live = items.filter((x) => x.status !== "fired" && x.status !== "cancelled").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
     const done = items.filter((x) => x.status === "fired").sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     const next = live[0]
-    const reason = (next && next.reason) || (done[0] && done[0].reason) || "心跳"
+    const cancelledItems = items.filter((x) => x.status === "cancelled").sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    // 理由/间隔/跳数：优先取在跳的那条，其次已执行，最后取「起过但没等」的墓碑
+    const sample = next || done[0] || cancelledItems[0]
+    const reason = (sample && sample.reason) || "心跳"
     const numOr = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d }
-    const every = numOr((next && next.intervalMinutes) || (done[0] && done[0].intervalMinutes), "?")
-    const seq = next ? numOr(next.seq, 1) : (done[0] ? numOr(done[0].seq, 0) : 0)
+    const every = numOr(sample && sample.intervalMinutes, "?")
+    const seq = next ? numOr(next.seq, 1) : (sample ? numOr(sample.seq, 0) : 0)
     const state = !HB_ENABLED ? "已关闭" : (live.length ? "跳着" : "已停")
-    const doneRows = done.slice(0, 5).map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>已执行</span></div>`).join("")
+    // 执行过和「起过但没等」的跳按时间混排，后者标成「未执行」
+    const history = items
+      .filter((x) => x.status === "fired" || x.status === "cancelled")
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+      .slice(0, 5)
+      .map((s) => s.status === "fired"
+        ? `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>已执行</span></div>`
+        : `<div class="sub-item cancelled"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>未执行</span></div>`)
+      .join("")
     const actions = live.length ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
     const ended = !live.length
     return `<div class="sub-card beat${ended ? " ended" : ""}"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
       <div class="sub-meta">每 ${esc2(every)} 分钟 · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""} · 已执行 ${done.length} 次</div>
-      ${doneRows}
+      ${history}
       ${actions}</div>`
   }).join("")
   // 心跳放前面：左边「AI 日程」时间线已经有日程了，右边先看心跳不重复
