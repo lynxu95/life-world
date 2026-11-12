@@ -213,7 +213,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .plan-item.done{color:var(--faint);text-decoration:line-through}
 .plan-item.done .box{background:var(--accent-soft);border-color:var(--accent)}
 /* —— 最近事件 —— */
-.events{display:flex;flex-direction:column;gap:5px;max-height:280px;overflow:auto}
+.events{display:flex;flex-direction:column;gap:5px;min-height:clamp(260px,34vh,400px);max-height:clamp(320px,44vh,520px);overflow:auto}
 .event{display:flex;gap:8px;font-size:12px;font-family:var(--mono);color:var(--muted)}
 .event time{color:var(--faint);flex:none}
 .event span{min-width:0;overflow-wrap:anywhere}
