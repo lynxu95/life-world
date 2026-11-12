@@ -102,6 +102,24 @@ async function availableModels() {
 }
 
 let overviewCache = { at: 0, data: null }
+/** 浏览器同源 POST 才放行：挡住别的网页用表单偷偷触发的 POST */
+function sameOrigin(req) {
+  const origin = req.headers.origin
+  if (!origin) return true // curl / 本机脚本没有 Origin，照常放行
+  const norm = (h) => {
+    const s = String(h || "").toLowerCase()
+    const [host, port] = s.split(":")
+    return `${host === "localhost" ? "127.0.0.1" : host}:${port || ""}`
+  }
+  try {
+    const u = new URL(origin)
+    const target = norm(u.host)
+    // 反向代理常把 Host 改成本机，再看一眼转发的原始 Host
+    const candidates = [req.headers.host, String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()]
+    return candidates.some((h) => h && norm(h) === target)
+  } catch { return false }
+}
+
 const json = (res, code, data) => {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" })
   res.end(JSON.stringify(data))
@@ -482,6 +500,7 @@ function memoryGraph(limit = 400) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`)
   try {
+    if (req.method === "POST" && !sameOrigin(req)) return json(res, 403, { ok: false, msg: "跨站请求被拒绝" })
     if (req.method === "GET" && url.pathname === "/nebula.jpg") {
       const file = join(HERE, "nebula.jpg")
       if (!existsSync(file)) { res.writeHead(404); res.end(); return }
@@ -770,6 +789,7 @@ const server = http.createServer(async (req, res) => {
         detached: true,
         stdio: ["ignore", openSync(join(ROOT, "update-run.log"), "a"), openSync(join(ROOT, "update-run.log"), "a")],
       })
+      child.on("error", (e) => console.error("[lwboard] spawn lwctl update failed:", String(e)))
       child.unref()
       return json(res, 200, { ok: true, msg: "正在更新，看板会短暂断开，十几秒后刷新本页" })
     }
@@ -781,7 +801,7 @@ const server = http.createServer(async (req, res) => {
       if (!Number.isInteger(port) || port < 1 || port > 65535) return json(res, 400, { ok: false, msg: "端口要在 1-65535" })
       const c = readJson(CONFIG_FILE, {})
       c.board = { ...(c.board || {}), host, port }
-      try { writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {
         return json(res, 500, { ok: false, msg: `写配置失败：${String(e)}` })
       }
       // 换监听地址要重启看板才生效；同样 detached，别把自己杀掉
@@ -795,6 +815,7 @@ const server = http.createServer(async (req, res) => {
         detached: true,
         stdio: ["ignore", openSync(join(ROOT, "board-restart.log"), "a"), openSync(join(ROOT, "board-restart.log"), "a")],
       })
+      child.on("error", (e) => console.error("[lwboard] spawn lwctl board restart failed:", String(e)))
       child.unref()
       return json(res, 200, { ok: true, msg: `已保存 ${host}:${port}，正在重启看板` })
     }

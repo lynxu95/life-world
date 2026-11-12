@@ -474,7 +474,10 @@ function cmdUpdate(args = []) {
     return ok
   }
   const noRestart = args.includes("--no-restart")
-  const project = args.includes("--project")
+  // 沿用当初的安装模式：没显式指定时读 $ROOT/install-mode，别把 project 静默改成 global
+  let storedMode = ""
+  try { storedMode = readFileSync(join(ROOT, "install-mode"), "utf8").trim() } catch { /* ignore */ }
+  const project = args.includes("--project") || (!args.includes("--global") && storedMode === "project")
   const bi = args.indexOf("--branch")
   const branchArg = bi >= 0 ? String(args[bi + 1] || "").trim() : ""
   const repo = repoPath()
@@ -619,6 +622,7 @@ async function startBoard() {
     stdio: "ignore",
     env: { ...process.env, LW_BOARD_HOST: host, LW_BOARD_PORT: String(port) },
   })
+  child.on("error", (e) => console.error(`看板进程启动失败：${String(e)}`))
   child.unref()
   writeFileSync(BOARD_PID, String(child.pid))
   let ok = false

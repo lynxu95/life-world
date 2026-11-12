@@ -82,8 +82,9 @@ if (!ownerQQ) { log("ownerQQ missing, exit"); process.exit(1) }
 const wsUrl = bridge.wsUrl || "ws://127.0.0.1:3001"
 const wsToken = bridge.token || ""
 const afterglowCfg = Object.assign({ enabled: true, delayMs: 60000, maxRounds: 2 }, bridge.afterglow || {})
-/** 一轮多久没有任何动静就算卡死、自动掐掉；0 = 关闭 */
-const idleTimeoutSec = Number(bridge.idleTimeoutSec) > 0 ? Number(bridge.idleTimeoutSec) : 600
+/** 一轮多久没有任何动静就算卡死、自动掐掉；显式写 0 = 关闭，不写则默认 600 秒 */
+const idleRaw = bridge.idleTimeoutSec
+const idleTimeoutSec = String(idleRaw).trim() === "0" ? 0 : (Number(idleRaw) > 0 ? Number(idleRaw) : 600)
 let groupCfgCache = { at: 0, cfg: null }
 /** 群聊配置热加载：最多缓存 2 秒，改 life-world.json 立即生效 */
 function groupCfg() {
@@ -246,7 +247,8 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 const MAX_VOICE_BYTES = 20 * 1024 * 1024
 /** 工作文件不设上限（下载走流式落盘，不进内存） */
 const MAX_FILE_BYTES = Infinity
-const MAX_TOTAL_BYTES = Infinity
+/** 单条私聊的附件总量兜底：防止一次塞进一堆大文件把盘写满 */
+const MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 /** 群文件是外部输入，默认 100MB 上限；私聊工作文件仍不设上限 */
 const DEFAULT_GROUP_FILE_BYTES = 100 * 1024 * 1024
 /** 群里一次触发最多下载 200MB（同一条消息可带多个文件） */
@@ -255,10 +257,6 @@ const DEFAULT_GROUP_BATCH_BYTES = 200 * 1024 * 1024
 const HARD_CAP_BYTES = 40 * 1024 * 1024
 /** 最近一次附件失败原因，用来给出准确提示 */
 let lastAttachmentIssue = ""
-function safeName(name, fallback) {
-  const s = String(name || "").replace(/[\\/:*?"<>|\r\n\t]/g, "_").replace(/\.\./g, "_").trim().slice(0, 80)
-  return s || fallback
-}
 function mimeOf(path) {
   const ext = (String(path).match(/\.[A-Za-z0-9]+$/) || [""])[0].toLowerCase()
   return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" })[ext] || "image/jpeg"
@@ -395,7 +393,14 @@ async function downloadMedia(m, maxBytes) {
   if (m.base64) buf = Buffer.from(String(m.base64), "base64")
   else if (m.localPath && existsSync(m.localPath)) buf = readFileSync(m.localPath)
   else if (/^https?:\/\//i.test(m.url || "")) {
-    const res = await fetch(m.url, { signal: AbortSignal.timeout(15000) })
+    let res
+    try {
+      res = await fetch(m.url, { signal: AbortSignal.timeout(15000) })
+    } catch (e) {
+      lastAttachmentIssue = "download"
+      log("attachment fetch failed", String(e).slice(0, 160))
+      return undefined
+    }
     if (!res.ok) { lastAttachmentIssue = "download"; return undefined }
     const len = Number(res.headers.get("content-length") || 0)
     if (len > HARD_CAP_BYTES) {
@@ -403,7 +408,13 @@ async function downloadMedia(m, maxBytes) {
       log("attachment too large (hard cap)", len)
       return undefined
     }
-    buf = Buffer.from(await res.arrayBuffer())
+    try {
+      buf = Buffer.from(await res.arrayBuffer())
+    } catch (e) {
+      lastAttachmentIssue = "download"
+      log("attachment body read failed", String(e).slice(0, 160))
+      return undefined
+    }
   } else { lastAttachmentIssue = "download"; return undefined }
   if (buf.length > HARD_CAP_BYTES) { lastAttachmentIssue = "too_large"; return undefined }
   mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 })
@@ -478,6 +489,8 @@ class PiSession {
     this.currentTool = null
     /** 最后一次收到 pi 任何输出的时间（看门狗用） */
     this.lastEventAt = 0
+    /** prompt 串行队列 */
+    this.promptChain = Promise.resolve()
     /** /stop 之后丢弃这一轮已经吐出来的半截话 */
     this.abortRequested = false
   }
@@ -638,8 +651,16 @@ class PiSession {
     return lines.join("\n")
   }
 
+  prompt(text, images = [], timeoutMs = 0) {
+    // 同一会话的 prompt 串行排队：agent_settled 会一次性放行所有 idle 等待者，
+    // 不排队的话群聊密集时多个 prompt 会同时写入、回复串台
+    const run = this.promptChain.then(() => this.promptRaw(text, images, timeoutMs))
+    this.promptChain = run.catch(() => {})
+    return run
+  }
+
   // timeoutMs = 0：不限时（本地模型慢，等它说完）
-  async prompt(text, images = [], timeoutMs = 0) {
+  async promptRaw(text, images = [], timeoutMs = 0) {
     this.lastUsed = Date.now()
     this.lastOverflow = false
     this.ackSent = false
@@ -713,6 +734,13 @@ class PiSession {
     await sleep(800)
     this.stopping = false
     this.sessionFile = ""
+    // 换会话后这些轮次状态必须归零，否则上一轮的「已中断」会吞掉新会话的第一条回复
+    this.abortRequested = false
+    this.ackSent = false
+    this.lastOverflow = false
+    this.running = false
+    this.currentTool = null
+    this.texts = []
     delete state.piSessionFile
     saveState()
     this.start()
@@ -832,8 +860,12 @@ async function handlePrivateNow(msg) {
     if (replied && afterglowCfg.enabled && afterglowCfg.maxRounds > 0) armAfterglow(1)
   } catch (e) {
     stopTyping()
-    log("private prompt failed", String(e))
-    await call("send_private_msg", { user_id: ownerQQ, message: "（我这边暂时没接上，稍后再发一次试试）" }).catch(() => {})
+    const msg = String(e)
+    log("private prompt failed", msg)
+    // /new 或超限换会话属于正常中止，别再多补一条「没接上」
+    if (!/session reset|watchdog timeout/i.test(msg)) {
+      await call("send_private_msg", { user_id: ownerQQ, message: "（我这边暂时没接上，稍后再发一次试试）" }).catch(() => {})
+    }
   } finally {
     pi.onAck = null
   }
@@ -916,10 +948,18 @@ async function handleGroup(msg) {
   const trigger = groupTrigger(msg, text)
   const mediaLabel = media.some((m) => m.type === "image") ? "[图片]" : "[文件]"
   buf.push({ sender: nameOf(msg), text: text || mediaLabel, media, trigger, at: Date.now() })
+  // 群一直刷屏时防抖会一直重置，缓冲必须有上限；优先丢普通消息，别把 @ 点名挤掉
+  while (buf.length > 50) {
+    const idx = buf.findIndex((m) => !m.trigger)
+    if (idx >= 0) buf.splice(idx, 1)
+    else buf.shift()
+  }
   log("group in", key, nameOf(msg), trigger ? "T" : "-", (text || "[图片]").slice(0, 40))
   groupBuffers.set(key, buf)
   if (buf.timer) clearTimeout(buf.timer)
   buf.timer = setTimeout(async () => {
+    // 整个回调兜底：附件下载失败 / 判官异常都不能把桥接进程带走
+    try {
     const current = groupBuffers.get(key) || []
     const batch = current.splice(0)
     // 清掉定时器标记，否则闲置回收会一直以为“还有防抖中的消息”
@@ -967,6 +1007,9 @@ async function handleGroup(msg) {
         if (ok) { st.lastReplyAt = Date.now(); st.replies.push(Date.now()) }
       }
     } catch (e) { log("group prompt failed", String(e)) }
+    } catch (e) {
+      log("group batch failed", String(e))
+    }
   }, 3000)
 }
 
@@ -1005,7 +1048,6 @@ function cleanupGroupSessions() {
 }
 
 // ———————————————— outbox ————————————————
-const outboxAttempts = new Map()
 function outboxFile(day) { return join(OUTBOX_DIR, `${day}.jsonl`) }
 function recentDays(n) { const out = []; for (let i = n - 1; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); out.push(dayOf(d)) } return out }
 async function sendOutboxMedia(item) {
@@ -1048,7 +1090,19 @@ async function sendOutboxMedia(item) {
     return { ok: false, retryable: /ws not ready/i.test(msg) }
   }
 }
+let lastOutboxPrune = 0
 async function pollOutboxNow() {
+  // 每天几次把 7 天前的 outbox 文件清掉，别一直堆
+  if (Date.now() - lastOutboxPrune > 6 * 3600_000) {
+    lastOutboxPrune = Date.now()
+    try {
+      const cutoff = Date.now() - 7 * 86400_000
+      for (const f of readdirSync(OUTBOX_DIR)) {
+        if (!f.endsWith(".jsonl")) continue
+        if (statSync(join(OUTBOX_DIR, f)).mtimeMs < cutoff) unlinkSync(join(OUTBOX_DIR, f))
+      }
+    } catch { /* ignore */ }
+  }
   const freshState = !state.outbox
   const offsets = state.outbox || (state.outbox = { offsets: {}, since: new Date().toISOString() })
   // 只有全新状态才把 since 定在“现在”（防首次启动把当天旧条目整段重发）；
@@ -1101,10 +1155,29 @@ async function pollOutboxNow() {
 }
 
 let outboxBusy = false
+/** 忙的时候 reach_out 会先存进 reachBuffer；空闲下来要有东西把它送出去，不能只等下一句私聊 */
+async function flushReachBuffer() {
+  if (pi.running) return
+  const buf = Array.isArray(state.reachBuffer) ? state.reachBuffer : []
+  if (!buf.length) return
+  const lines = buf.splice(0)
+  for (let i = 0; i < lines.length; i++) {
+    const ok = await sendPrivate(lines[i])
+    if (!ok) {
+      state.reachBuffer = lines.slice(i).concat(state.reachBuffer || [])
+      saveState()
+      return
+    }
+  }
+  saveState()
+}
 async function pollOutbox() {
   if (outboxBusy) return
   outboxBusy = true
-  try { await pollOutboxNow() } finally { outboxBusy = false }
+  try {
+    await pollOutboxNow()
+    await flushReachBuffer()
+  } finally { outboxBusy = false }
 }
 
 // ———————————————— 当前状态 / 看板中断 ————————————————
@@ -1119,7 +1192,7 @@ function writeBusy() {
           updated: new Date().toISOString(),
         }
       : { running: false, updated: new Date().toISOString() }
-    writeFileSync(BUSY_FILE, JSON.stringify(data))
+    writeJson(BUSY_FILE, data)
   } catch { /* ignore */ }
 }
 
@@ -1128,7 +1201,7 @@ let bridgeSeen = (() => { try { return JSON.parse(readFileSync(BRIDGE_SEEN, "utf
 function saveBridgeSeen() {
   try {
     const keys = Object.keys(bridgeSeen)
-    if (keys.length > 300) for (const k of keys.slice(0, keys.length - 200)) delete bridgeSeen[k]
+    if (keys.length > 5000) for (const k of keys.slice(0, keys.length - 4000)) delete bridgeSeen[k]
     writeFileSync(BRIDGE_SEEN, JSON.stringify(bridgeSeen))
   } catch { /* ignore */ }
 }
@@ -1170,6 +1243,21 @@ async function idleWatchdog() {
       pi.write({ type: "abort_bash" })
       ok = await pi.waitIdle(4000)
     }
+    if (!ok) {
+      // 彻底卡死：reject 排队者、清掉中断标记，然后真的把子进程杀掉重拉
+      // （只清内存状态不杀进程的话，下一条消息要么被 abortRequested 吞掉，要么永远等不到事件）
+      for (const w of pi.waiters.splice(0)) {
+        try { w.reject(new Error("watchdog timeout")) } catch { /* ignore */ }
+      }
+      pi.abortRequested = false
+      pi.running = false
+      pi.currentTool = null
+      if (pi.child) {
+        try { pi.child.kill("SIGKILL") } catch { /* ignore */ }
+      } else {
+        pi.start()
+      }
+    }
     await sendPrivate(`刚才那轮卡住了（${fmtSpan(idle)}没动静），我掐了重来。`)
   } catch (e) {
     log("watchdog failed", String(e))
@@ -1184,7 +1272,8 @@ function pollBridgeControl() {
     const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
     const file = join(ROOT, "control", `commands-${day}.jsonl`)
     if (!existsSync(file)) return
-    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-80)
+    // 不按固定尾窗截断：一次突发几百条时，靠前的 abort 也要能被认领
+    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-2000)
     let changed = false
     for (const line of lines) {
       let c
@@ -1213,6 +1302,12 @@ setInterval(writeBusy, 2000).unref?.()
 setInterval(pollBridgeControl, 2000).unref?.()
 setInterval(idleWatchdog, 30_000).unref?.()
 log("bridge started", { ownerQQ, wsUrl, model: MODEL, afterglow: afterglowCfg })
+// 兜底：任何漏掉的 Promise 异常只记日志，不要带走整个桥接
+process.on("unhandledRejection", (e) => log("unhandledRejection", String(e).slice(0, 300)))
+// 长期不重启也要轮转日志
+setInterval(() => {
+  try { if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > 5 * 1024 * 1024) renameSync(LOG_FILE, `${LOG_FILE}.1`) } catch { /* ignore */ }
+}, 6 * 60 * 60_000).unref?.()
 process.on("exit", () => {
   try { pi.child?.kill("SIGTERM") } catch { /* ignore */ }
   for (const s of groupSessions.values()) { try { s.child?.kill("SIGTERM") } catch { /* ignore */ } }

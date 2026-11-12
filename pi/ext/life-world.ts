@@ -342,10 +342,36 @@ interface Alarm {
   skipped?: Array<{ at: string; scheduled: string; note: string }>
 }
 interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastControlPrune?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string }
-function readWorld(): WorldState { return readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] }) }
+function readWorld(): WorldState {
+  const s = readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] })
+  // 合法 JSON 但 elements 坏掉（null / 字符串）会让 tick 每轮抛异常，先滤掉
+  return { ...s, alarms: Array.isArray(s.alarms) ? s.alarms.filter((a) => a && typeof a === "object") : [] }
+}
+/**
+ * 严格读：文件存在但解析失败时返回 null。
+ * 用于「读-改-写」路径——解析失败时宁可不写，也不能拿空对象把真实闹钟抹掉。
+ */
+function readWorldStrict(): WorldState | null {
+  if (!existsSync(WORLD_FILE)) return { running: true, alarms: [] }
+  try {
+    const s = JSON.parse(readFileSync(WORLD_FILE, "utf8")) as WorldState
+    return { ...s, alarms: Array.isArray(s.alarms) ? s.alarms.filter((a) => a && typeof a === "object") : [] }
+  } catch { return null }
+}
 function writeWorld(state: WorldState): boolean {
   try { atomicWrite(WORLD_FILE, JSON.stringify({ ...state, alarms: state.alarms || [] }, null, 2)); return true } catch (e) { log(`writeWorld failed ${String(e)}`); return false }
 }
+/** 统一的世界状态写入口：读-改-写都在锁内完成，避免并发时互相覆盖 */
+function updateWorld(mutator: (s: WorldState) => void | WorldState): boolean {
+  const r = withWorldLock(() => {
+    const s = readWorldStrict()
+    if (!s) return false
+    const out = mutator(s)
+    return writeWorld(out && typeof out === "object" ? (out as WorldState) : s)
+  })
+  return r === true
+}
+
 
 /** world.json 跨进程读改写的轻量锁（home/qq/cli 会同时改闹钟） */
 function withWorldLock<T>(fn: () => T): T | undefined {
@@ -713,14 +739,14 @@ function decayStrengths(): boolean {
     if (!Number.isFinite(days) || days < 0.25) {
       // 首次没有标记：写一个起点，下次才按天数衰减
       if (!state.lastDecay) {
-        writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
+        if (!updateWorld((s) => { s.lastDecay = new Date(now).toISOString() })) log("decay 标记没写进去，下轮可能重复衰减")
         return true
       }
       return false
     }
     const factor = Math.pow(0.5, days / Math.max(1, cfg.halfLifeDays))
     db.prepare("UPDATE mem SET strength = max(?, strength * ?)").run(cfg.minStrength, factor)
-    writeWorld({ ...readWorld(), lastDecay: new Date(now).toISOString() })
+    if (!updateWorld((s) => { s.lastDecay = new Date(now).toISOString() })) log("decay 标记没写进去，下轮可能重复衰减")
     log(`decay applied ×${factor.toFixed(3)} · ${days.toFixed(1)}d`)
     return true
   } catch (e) { log(`decay failed ${String(e)}`); return false }
@@ -836,7 +862,7 @@ function decayEdges(): void {
     const now = new Date().toISOString()
     db.prepare("UPDATE edges SET w = w * max(0.01, exp(-? * max(0, julianday(?) - julianday(last)))), last = ?").run(cfg.decayPerDay, now, now)
     db.exec("DELETE FROM edges WHERE w < 0.02")
-    writeWorld({ ...readWorld(), lastEdgeDecay: now })
+    if (!updateWorld((s) => { s.lastEdgeDecay = now })) log("edge decay 标记没写进去，下轮可能重复衰减")
   } catch (e) { log(`decayEdges failed ${String(e)}`) }
 }
 
@@ -1424,6 +1450,11 @@ async function tick(): Promise<void> {
     rotateLog(LOG_FILE)
     const c = config()
     if (!c.world.enabled || !c.world.running) return
+    // world.json 损坏时整轮跳过：否则每个 tick 都会重发同一条后台任务，还写不进去标记
+    if (!readWorldStrict()) {
+      log("world.json 解析失败，本轮跳过（等修好或下次重启）")
+      return
+    }
     const state = readWorld()
     const now = new Date()
     const today = dayOf(now)
@@ -1431,7 +1462,7 @@ async function tick(): Promise<void> {
     // 每日回顾
     if (hour >= c.world.reviewHour && state.lastReview !== today) {
       sendTime(`【后台任务·每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。${openActivitiesLine()}`)
-      writeWorld({ ...readWorld(), lastReview: today })
+      updateWorld((s) => { s.lastReview = today })
       return
     }
     // 每日快照：放到子进程跑，别阻塞主会话
@@ -1441,7 +1472,7 @@ async function tick(): Promise<void> {
         try {
           const script = join(EXT_DIR, "../bin/world-backup.mjs")
           if (existsSync(script)) {
-            if (!writeWorld({ ...readWorld(), lastBackupAttempt: new Date().toISOString() })) {
+            if (!updateWorld((s) => { s.lastBackupAttempt = new Date().toISOString() })) {
               log("backup · skip (world.json not writable)")
               return
             }
@@ -1449,7 +1480,7 @@ async function tick(): Promise<void> {
               detached: true, stdio: "ignore", env: { ...process.env, LIFE_WORLD_ROOT: ROOT },
             })
             child.on("exit", (code) => {
-              if (code === 0) { writeWorld({ ...readWorld(), lastBackup: today }); log("backup · ok") }
+              if (code === 0) { updateWorld((s) => { s.lastBackup = today }); log("backup · ok") }
               else log(`backup · fail exit ${code}`)
             })
             child.on("error", (e) => log(`backup spawn failed ${String(e)}`))
@@ -1460,11 +1491,11 @@ async function tick(): Promise<void> {
     }
     // 每日清理 tmp；桥接心跳检查
     if (state.lastCleanup !== today) {
-      if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) writeWorld({ ...readWorld(), lastCleanup: today })
+      if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) updateWorld((s) => { s.lastCleanup = today })
     }
     if (state.lastControlPrune !== today) {
       pruneControlQueue(3)
-      writeWorld({ ...readWorld(), lastControlPrune: today })
+      updateWorld((s) => { s.lastControlPrune = today })
     }
     // 已执行的子闹钟留档 24 小时，过期清掉（活动关闭时会连子闹钟一起删，不用等这里）
     withWorldLock(() => {
@@ -1492,8 +1523,10 @@ async function tick(): Promise<void> {
     for (const a of alarmsNow.filter((x) => !x.kind && !x.status)) {
       if (woke) break
       const text = `【后台任务】${shortStamp(a.at)}：${a.note}。\n做完就结束；要让他知道就用 reach_out。做完想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
-      if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
-      else sendTime(text)
+      const legacySent = a.model
+        ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
+        : sendTime(text)
+      if (!legacySent) { log("alarm send failed, retry next tick"); continue }
       withWorldLock(() => {
         const fresh = readWorld()
         fresh.alarms = (fresh.alarms || []).filter((x) => x.id !== a.id)
@@ -1536,8 +1569,20 @@ async function tick(): Promise<void> {
       const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
       const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
       const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要把它拆成几步、过一会儿再醒来，就用 plan_next({ parent: "${a.id}", after_minutes: 20, note: "这一步要看什么/做什么" }) 排子闹钟；一次排几条也行。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动（子闹钟一起关）。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
-      if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
-      else sendTime(text)
+      const sentOk = a.model
+        ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
+        : sendTime(text)
+      if (!sentOk) {
+        // 发不出去就把 active 回滚成 pending，否则下轮过滤会跳过它、这条活动永远醒不来
+        log("alarm send failed, rollback to pending")
+        withWorldLock(() => {
+          const f = readWorld()
+          const self = (f.alarms || []).find((x) => x.id === a.id)
+          if (self) { self.status = "pending"; delete self.activatedAt }
+          return writeWorld(f)
+        })
+        continue
+      }
       withWorldLock(() => {
         const fresh = readWorld()
         const self = (fresh.alarms || []).find((x) => x.id === a.id)
@@ -1572,8 +1617,10 @@ async function tick(): Promise<void> {
         }
         const skipNote = skippedLine(parent.skipped)
         const text = `【后台任务·子闹钟】${shortStamp(a.at)}：${a.note}\n（活动《${parent.note}》，id ${parent.id}）\n做完这一步就结束；要继续就再 plan_next 排下一条；要收尾就 cancel_alarm({ id: "${parent.id}" })。${skipNote ? `\n${skipNote}` : ""}`
-        if (a.model) void switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); sendTime(text) })
-        else sendTime(text)
+        const subSent = a.model
+          ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
+          : sendTime(text)
+        if (!subSent) { log("sub alarm send failed, retry next tick"); continue }
         withWorldLock(() => {
           const f = readWorld()
           const p = (f.alarms || []).find((x) => x.id === parent.id)
@@ -1603,7 +1650,7 @@ async function tick(): Promise<void> {
         log(`impression · switch model · ${r}`)
         if (r.startsWith("切不过去")) log("impression · 本地不可用，按当前模型继续")
       }
-      if (sendTime(impressionPrompt(impCfg))) writeWorld({ ...readWorld(), lastImpression: today })
+      if (sendTime(impressionPrompt(impCfg))) updateWorld((s) => { s.lastImpression = today })
       else log("impression · send failed, will retry")
     }
     // 早上兜底
@@ -1617,7 +1664,7 @@ async function tick(): Promise<void> {
     if (mins < fh * 60 + fm || mins >= fh * 60 + fm + 240) return
     const weather = c.care.enabled && c.care.weatherEnabled ? await fetchWeather(c.care.weatherCity) : ""
     sendTime(`【后台任务·早上】新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
-    writeWorld({ ...readWorld(), lastWake: today })
+    updateWorld((s) => { s.lastWake = today })
   } catch (e) { log(`tick failed ${String(e)}`) }
   finally { ticking = false }
 }
@@ -1670,7 +1717,7 @@ function guardBridge(): void {
         return s.updated && now - Date.parse(s.updated) < Math.max(30, c.guard.staleSeconds) * 1000
       })
     if (fresh) return
-    writeWorld({ ...state, lastGuard: new Date(now).toISOString() })
+    updateWorld((s) => { s.lastGuard = new Date(now).toISOString() })
     const lwctl = join(ROOT, "bin", "lwctl")
     if (!existsSync(lwctl)) return
     log("guard · qq bridge stale, restarting")
@@ -1696,7 +1743,7 @@ function maybeRandomCare(): void {
     const chance = Number(c.care.randomChancePerTick)
     const p = Number.isFinite(chance) ? Math.max(0, Math.min(1, chance)) : 0.02
     if (Math.random() >= p) return
-    writeWorld({ ...state, lastRandom: now.toISOString() })
+    updateWorld((s) => { s.lastRandom = now.toISOString() })
     sendTime("【想起你】这会儿没在聊天，但你忽然想起了对方。想发就写一两句，用 reach_out 发到 QQ；不想打扰就只回 [SILENT]。")
   } catch (e) { log(`random care failed ${String(e)}`) }
 }
@@ -2638,6 +2685,8 @@ export default function (pi: ExtensionAPI) {
       else if (op === "fire_now") {
         if (target.kind !== "sub") return { ok: false, msg: "只能对子闹钟立即触发" }
         target.at = new Date().toISOString()
+        // 暂停中的也一并恢复，否则改完时间仍会被调度跳过
+        target.paused = false
       } else if (op === "close") {
         if (target.kind === "main") {
           // 关掉的活动留个尾声：状态标 closed，已执行的子闹钟留到 24 小时清理，
@@ -2671,6 +2720,8 @@ export default function (pi: ExtensionAPI) {
     }
     if (String(c.action || "") === "alarm") { await handleAlarmCommand(c); return }
     if (String(c.action || "") === "abort") {
+      // qq 的中断由桥接处理（它握着 pi 子进程）；扩展再写一份回执会和桥接打架
+      if (c.target === "qq") return
       // 看板「中断」：掐掉当前这一轮
       try { (lastCtx as any)?.abort?.() } catch { /* ignore */ }
       writeAck(c.id, { ok: true, msg: "已发出中断" })
@@ -3023,7 +3074,8 @@ export default function (pi: ExtensionAPI) {
         if (tooSoon.length) return ok("子闹钟时间至少要在 10 秒之后。")
         const density = checkSubDensity(state.alarms || [], found.parent.id, unique)
         if (density) return ok(density)
-        const pending = (state.alarms || []).filter((a) => a.kind === "sub" && a.parentId === found.parent!.id).length
+        // 只数还没执行的：fired 是留档，不该占额度
+        const pending = (state.alarms || []).filter((a) => a.kind === "sub" && a.parentId === found.parent!.id && a.status !== "fired" && a.status !== "closed").length
         if (pending + unique.length > 24) return ok("这个活动的子闹钟太多了（上限 24 条），先取消一些。")
         const parent = found.parent
         const subs: Alarm[] = unique.map((t, i) => ({
@@ -3058,7 +3110,8 @@ export default function (pi: ExtensionAPI) {
         status: "pending",
       }
       const saved = withWorldLock(() => {
-        const state = readWorld()
+        const state = readWorldStrict()
+        if (!state) return false
         state.alarms = [...(state.alarms || []), alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
         return writeWorld(state)
       })
@@ -3101,21 +3154,35 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "cancel_alarm",
     label: "Cancel alarm",
-    description: "取消/关闭闹钟。传 id 精确定位；传 match 取消 note 含这个词的；都不传全取消。取消活动会连带关闭它的子闹钟。",
-    parameters: { type: "object", properties: { id: { type: "string", description: "活动或闹钟 id" }, match: { type: "string", description: "note 关键词" } } },
+    description: "取消/关闭闹钟。传 id 精确定位；传 match 取消 note 含这个词的；要全部取消必须显式给 all: true。关闭活动会保留已执行的子闹钟留档一天。",
+    parameters: { type: "object", properties: { id: { type: "string", description: "活动或闹钟 id" }, match: { type: "string", description: "note 关键词" }, all: { type: "boolean", description: "确认全部取消；不传 id/match 时必须显式给 true" } } },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能改闹钟。")
       const id = String(params.id || "").trim()
       const match = String(params.match || "").trim()
+      const allFlag = params.all === true
+      if (!id && !match && !allFlag) return ok("要取消哪一条？传 id、match，或 all: true 全部取消。")
       const res = withWorldLock(() => {
         const state = readWorld()
         const all = state.alarms || []
         const targets = id ? all.filter((a) => a.id === id) : match ? all.filter((a) => a.note.includes(match)) : all.slice()
         if (!targets.length) return { ok: true, removed: 0, mains: 0 }
         const mainIds = new Set(targets.filter((a) => a.kind === "main").map((a) => a.id))
-        const remove = new Set(targets.map((a) => a.id))
-        state.alarms = all.filter((a) => !remove.has(a.id) && !(a.kind === "sub" && a.parentId && mainIds.has(a.parentId)))
-        return { ok: writeWorld(state), removed: remove.size, mains: mainIds.size }
+        // 关活动留尾声：标 closed + closedAt，已执行的子闹钟留档一天（和看板/强制关闭保持一致）
+        for (const a of all) {
+          if (a.kind === "main" && mainIds.has(a.id) && a.status !== "closed") {
+            a.status = "closed"
+            a.closedAt = new Date().toISOString()
+          }
+        }
+        // 已执行的子闹钟是留档，24 小时自己会清，不跟着全量取消一起删
+        const remove = new Set(targets.filter((a) => a.kind !== "main" && a.status !== "fired").map((a) => a.id))
+        state.alarms = all.filter((a) => {
+          if (remove.has(a.id)) return false
+          if (a.kind === "sub" && a.parentId && mainIds.has(a.parentId) && a.status !== "fired") return false
+          return true
+        })
+        return { ok: writeWorld(state), removed: remove.size + mainIds.size, mains: mainIds.size }
       })
       if (!res?.ok) return ok("闹钟没改成功（world.json 暂时被占用）。")
       if (!res.removed) return ok("没找到要取消的闹钟。")
@@ -3362,6 +3429,7 @@ export default function (pi: ExtensionAPI) {
           script: { type: "string", description: "相对技能目录的脚本路径，如 scripts/run.sh；省略则用 SKILL.md 的 run:" },
           args: { type: "array", items: { type: "string" }, description: "传给脚本的参数" },
           timeout_seconds: { type: "number", description: "超时秒数，默认 60，最大 300" },
+          confirm: { type: "boolean", description: "下载来的技能必须显式 true 才执行" },
         },
         required: ["name"],
       },
@@ -3376,6 +3444,10 @@ export default function (pi: ExtensionAPI) {
           return ok(`没找到这个技能：${String(params?.name || "")}。现有：${names.length ? names.join("、") : "（空）"}`)
         }
         if (!s.enabled) return ok(`技能「${s.name}」已停用；先 skill_toggle({ name: "${s.name}", enabled: true })。`)
+        // 下载来的技能里带的 run: 等于第三方代码，每次调用都要显式确认
+        if (s.source === "downloaded" && params?.confirm !== true) {
+          return ok(`「${s.name}」是从外部下载的技能，跑它的脚本等于执行第三方代码。确认要跑，就带上 confirm: true 再调一次。`)
+        }
         const timeout = Math.max(5, Math.min(300, Number(params?.timeout_seconds) || 60))
         const args = Array.isArray(params?.args) ? params.args.map((x: any) => String(x)) : []
         const r = await runSkill(s, String(params?.script || "").trim(), args, timeout)

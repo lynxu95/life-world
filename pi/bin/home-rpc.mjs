@@ -33,6 +33,16 @@ try {
   }
 } catch { /* ignore */ }
 
+// 长期不重启也要轮转
+setInterval(() => {
+  try {
+    if (existsSync(LOG) && statSync(LOG).size > 5 * 1024 * 1024) {
+      try { if (existsSync(`${LOG}.1`)) renameSync(`${LOG}.1`, `${LOG}.2`) } catch { /* ignore */ }
+      renameSync(LOG, `${LOG}.1`)
+    }
+  } catch { /* ignore */ }
+}, 6 * 60 * 60_000).unref?.()
+
 function log(...args) {
   const line = `[${new Date().toISOString()}] ${args.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")}`
   try { appendFileSync(LOG, line + "\n", { mode: 0o600 }) } catch { /* ignore */ }
