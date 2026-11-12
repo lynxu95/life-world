@@ -210,7 +210,7 @@ interface MultimodalOptions {
 }
 
 interface Config {
-  world: { enabled: boolean; running: boolean; reviewHour: number; fallbackWakeTime: string; recentLimit: number; hydrate: { hours: number; chars: number; mapDays: number } }
+  world: { enabled: boolean; running: boolean; reviewHour: number; fallbackWakeTime: string; recentLimit: number; heartbeatMaxMinutes: number; hydrate: { hours: number; chars: number; mapDays: number } }
   bridge: { enabled: boolean; ownerQQ: number; wsUrl: string; group: { enabled: boolean; id?: string } }
   subagent: { model: string }
   multimodal: MultimodalOptions
@@ -296,7 +296,7 @@ interface CareOptions {
 
 function config(): Config {
   const base: Config = {
-    world: { enabled: true, running: true, reviewHour: 23, fallbackWakeTime: "09:00", recentLimit: 80, hydrate: { hours: 48, chars: 2000, mapDays: 3 } },
+    world: { enabled: true, running: true, reviewHour: 23, fallbackWakeTime: "09:00", recentLimit: 80, heartbeatMaxMinutes: 120, hydrate: { hours: 48, chars: 2000, mapDays: 3 } },
     bridge: { enabled: false, ownerQQ: 0, wsUrl: "ws://127.0.0.1:3001", group: { enabled: false } },
     subagent: { model: "deepseek-flash" },
     multimodal: { enabled: false, model: "", timeoutMs: 300_000, warnImageBytes: 8 * 1024 * 1024, warnVideoBytes: 200 * 1024 * 1024 },
@@ -366,6 +366,8 @@ interface Alarm {
   intervalMinutes?: number
   /** 这一串的第几跳 */
   seq?: number
+  /** 这一串第一跳的时间，用来算「单次最长持续多久」 */
+  startedAt?: string
   /** 忙时跳过的子闹钟，下次这个活动醒来时提醒 AI review */
   skipped?: Array<{ at: string; scheduled: string; note: string }>
 }
@@ -1417,8 +1419,15 @@ function openActivitiesLine(): string {
   return `\n还有活动开着：${items.join("、")}。做完了就 cancel_alarm({ id }) 关掉，别一直挂着。`
 }
 
+/** 单次心跳串最长持续多久（分钟）；10~1440，默认 120 */
+function heartbeatLimitMinutes(): number {
+  const v = Number(config().world.heartbeatMaxMinutes)
+  if (!Number.isFinite(v) || v <= 0) return 120
+  return Math.max(10, Math.min(1440, Math.round(v)))
+}
+
 /** 心跳串到点时的唤醒文本：带上理由、第几跳、怎么停 */
-function heartbeatText(a: Alarm, last = false): string {
+function heartbeatText(a: Alarm, last = false, why: "jumps" | "time" | null = null): string {
   const seqN = Number(a.seq)
   const seq = Number.isFinite(seqN) && seqN > 0 ? seqN : 1
   const everyN = Number(a.intervalMinutes)
@@ -1426,7 +1435,9 @@ function heartbeatText(a: Alarm, last = false): string {
   const reason = String(a.reason || "")
   const body = String(a.note || reason)
   const tail = last
-    ? `（串 ${a.chainId}，第 ${seq} 跳是最后一跳，串到此结束）`
+    ? (why === "time"
+        ? `（串 ${a.chainId}，已到心跳时长上限（${heartbeatLimitMinutes()} 分钟），到此结束）`
+        : `（串 ${a.chainId}，到 60 跳上限了，到此结束）`)
     : `（串 ${a.chainId}，每 ${every} 分钟一跳，下一跳会自动排上；不用了就 heartbeat_stop({ chainId: "${a.chainId}" })）`
   return [
     `【心跳 · 第 ${seq} 跳】${body}`,
@@ -1649,7 +1660,15 @@ async function tick(): Promise<void> {
             })
             continue
           }
-          const hbText = heartbeatText(a, Number(a.seq) >= 60)
+          const seqN0 = Number(a.seq)
+          const seq0 = Number.isFinite(seqN0) && seqN0 > 0 ? seqN0 : 1
+          const everyN0 = Number(a.intervalMinutes)
+          const every0 = Number.isFinite(everyN0) && everyN0 >= 1 && everyN0 <= 60 ? everyN0 : 2
+          const startedMs = Date.parse(String(a.startedAt || a.setAt || a.at)) || Date.now()
+          const maxMin = heartbeatLimitMinutes()
+          const timeUp = (Date.now() - startedMs) / 60_000 + every0 > maxMin
+          const willContinue = seq0 < 60 && !timeUp
+          const hbText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null))
           const hbSent = a.model
             ? await switchForAlarm(a).then(() => sendTime(hbText)).catch((e) => { log(`heartbeat switch failed ${String(e)}`); return sendTime(hbText) })
             : sendTime(hbText)
@@ -1662,20 +1681,17 @@ async function tick(): Promise<void> {
             if (!cur || cur.status === "fired") return writeWorld(f)
             cur.status = "fired"
             cur.firedAt = new Date().toISOString()
-            const seqN = Number(a.seq)
-            const seq = Number.isFinite(seqN) && seqN > 0 ? seqN : 1
-            const everyN = Number(a.intervalMinutes)
-            const every = Number.isFinite(everyN) && everyN >= 1 && everyN <= 60 ? everyN : 2
-            // 最多 60 跳，防止忘了停一直烧 token
-            if (seq < 60) {
+            // 最多 60 跳，且累计时长不超过 heartbeatMaxMinutes，防止忘了停一直烧 token
+            if (willContinue) {
               const base = Date.parse(a.at)
-              const nextMs = Math.max(Date.now(), (Number.isFinite(base) ? base : Date.now()) + every * 60_000)
+              const nextMs = Math.max(Date.now(), (Number.isFinite(base) ? base : Date.now()) + every0 * 60_000)
               list.push({
                 id: `s-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                 at: new Date(nextMs).toISOString(),
                 note: a.note, setAt: new Date().toISOString(), model: a.model,
                 kind: "sub", status: "pending",
-                chainId: a.chainId, reason: a.reason, intervalMinutes: every, seq: seq + 1,
+                chainId: a.chainId, reason: a.reason, intervalMinutes: every0, seq: seq0 + 1,
+                startedAt: a.startedAt || a.setAt,
               })
             }
             f.alarms = list
@@ -3403,12 +3419,15 @@ export default function (pi: ExtensionAPI) {
           reason: reason.slice(0, 200),
           intervalMinutes: every,
           seq: 1,
+          startedAt: new Date(now).toISOString(),
         }
         st.alarms = [...list, alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
         return { ok: writeWorld(st), chainId }
       })
       if (!res?.ok) return ok("心跳没起成（world.json 被占用或读不出来）。")
-      return ok(`心跳已起：${res.chainId}\n每 ${every} 分钟一跳，第一跳 ${isoLocal(new Date(now + first * 60_000))}。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
+      const maxMin = heartbeatLimitMinutes()
+      const maxJumps = Math.max(1, Math.min(60, Math.floor(maxMin / every)))
+      return ok(`心跳已起：${res.chainId}\n每 ${every} 分钟一跳，第一跳 ${isoLocal(new Date(now + first * 60_000))}。\n按当前设置（单次最长 ${maxMin} 分钟），这条串最多 ${maxJumps} 跳、约 ${maxJumps * every} 分钟。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
     },
   })
 

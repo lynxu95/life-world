@@ -452,6 +452,15 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint" id="mode-hint"></div>
       </section>
         <section>
+        <div class="sec-head"><h2>心跳时长</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
+        <div class="row">
+          <input type="number" id="hb-limit" placeholder="120" style="width:96px" aria-label="单次心跳最长分钟数">
+          <span class="muted">分钟 / 单次</span>
+          <button class="primary" id="hb-limit-save">保存</button>
+        </div>
+        <div class="hint">单条心跳串最长跑多久，到点自动结束（默认 120 分钟，10~1440）。心跳很费 token，别设太长。</div>
+      </section>
+        <section>
         <div class="sec-head"><h2>看板监听</h2><span class="spacer"></span><span class="sec-note" id="board-addr-note">…</span></div>
         <div class="row">
           <input type="text" id="board-host" placeholder="127.0.0.1" style="flex:1;min-width:0" aria-label="监听地址">
@@ -703,6 +712,13 @@ function renderUpdate(u, result) {
   }
 }
 
+let hbLimitTouched = false
+function renderHeartbeatLimit(minutes) {
+  const v = Number(minutes) || 120
+  if (!hbLimitTouched) $("hb-limit").value = v
+  $("hb-limit-note").textContent = `最长 ${v} 分钟`
+}
+
 function renderBoardAddr(b) {
   if (!b) return
   $("board-addr-note").textContent = `${b.host}:${b.port}`
@@ -749,6 +765,7 @@ async function loadOverview() {
       group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
     renderUpdate(d.update, d.updateResult)
+    renderHeartbeatLimit(d.heartbeatMaxMinutes)
     renderBoardAddr(d.board)
     renderUsage(d.usage)
     renderSchedule(d.schedule || [])
@@ -1091,7 +1108,8 @@ function renderSubs(list) {
     const state = live.length ? "跳着" : "已停"
     const doneRows = done.slice(0, 5).map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>已执行</span></div>`).join("")
     const actions = live.length ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
-    return `<div class="sub-card beat"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
+    const ended = !live.length
+    return `<div class="sub-card beat${ended ? " ended" : ""}"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
       <div class="sub-meta">每 ${esc2(every)} 分钟 · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""} · 已执行 ${done.length} 次</div>
       ${doneRows}
       ${actions}</div>`
@@ -2130,6 +2148,19 @@ if (updateBtn) updateBtn.onclick = async () => {
   updateBtn.disabled = false
   try { await loadOverview() } catch { /* ignore */ }
 }
+
+const hbLimitSave = $("hb-limit-save")
+if (hbLimitSave) hbLimitSave.onclick = async () => {
+  const minutes = Number($("hb-limit").value)
+  $("hb-limit-note").textContent = "保存中…"
+  try {
+    const r = await postJson("/api/heartbeat-limit", { minutes })
+    $("hb-limit-note").textContent = r.msg || (r.ok ? "已保存" : "失败")
+    if (r.ok) { hbLimitTouched = false; setTimeout(() => loadOverview(), 800) }
+  } catch { $("hb-limit-note").textContent = "失败" }
+}
+const hbLimitEl = $("hb-limit")
+if (hbLimitEl) hbLimitEl.addEventListener("input", () => { hbLimitTouched = true })
 
 const boardSave = $("board-save")
 if (boardSave) boardSave.onclick = async () => {

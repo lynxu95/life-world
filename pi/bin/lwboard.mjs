@@ -538,6 +538,10 @@ const server = http.createServer(async (req, res) => {
         })(),
         care: { ...DEFAULT_CARE, ...(c.care || {}) },
         features: FEATURES,
+        heartbeatMaxMinutes: (() => {
+          const v = Number(c.world && c.world.heartbeatMaxMinutes)
+          return Number.isFinite(v) && v > 0 ? Math.max(10, Math.min(1440, Math.round(v))) : 120
+        })(),
         update: readJson(UPDATE_CHECK_FILE, null),
         updateResult: readJson(join(ROOT, "update-result.json"), null),
         board: { host: HOST, port: PORT },
@@ -792,6 +796,17 @@ const server = http.createServer(async (req, res) => {
       child.on("error", (e) => console.error("[lwboard] spawn lwctl update failed:", String(e)))
       child.unref()
       return json(res, 200, { ok: true, msg: "正在更新，看板会短暂断开，十几秒后刷新本页" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/heartbeat-limit") {
+      const data = await body(req)
+      const v = Math.round(Number(data.minutes))
+      if (!Number.isFinite(v) || v < 10 || v > 1440) return json(res, 400, { ok: false, msg: "心跳时长要在 10-1440 分钟之间" })
+      const c = readJson(CONFIG_FILE, {})
+      c.world = { ...(c.world || {}), heartbeatMaxMinutes: v }
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {
+        return json(res, 500, { ok: false, msg: `写配置失败：${String(e)}` })
+      }
+      return json(res, 200, { ok: true, msg: `已保存：单次心跳最长 ${v} 分钟` })
     }
     if (req.method === "POST" && url.pathname === "/api/board-address") {
       const data = await body(req)
