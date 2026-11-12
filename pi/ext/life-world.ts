@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, extname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -41,6 +41,23 @@ const SKILL_OWN_DIR = join(SKILLS_DIR, "own")
 const SKILL_DL_DIR = join(SKILLS_DIR, "downloaded")
 const SKILL_INDEX = join(SKILLS_DIR, "INDEX.md")
 const WORLD_FILE = join(WORLD, "world.json")
+/** 后台任务的 job / 日志目录 */
+const BG_DIR = join(ROOT, "bg")
+/** 从文件尾部读固定字节，避免把几百 MB 日志整个读进内存 */
+function readTail(file: string, bytes: number): string {
+  const st = statSync(file)
+  const start = Math.max(0, st.size - bytes)
+  const len = st.size - start
+  const fd = openSync(file, "r")
+  try {
+    const buf = Buffer.alloc(len)
+    readSync(fd, buf, 0, len, start)
+    return buf.toString("utf8")
+  } finally { closeSync(fd) }
+}
+
+/** 路径转成 shell 单引号字面量 */
+const shqPath = (v: string): string => `'${String(v).replace(/'/g, `'\\''`)}'`
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const BRIDGE_STATE = join(ROOT, "qq-bridge-state.json")
 const LOG_FILE = join(ROOT, "debug.log")
@@ -1492,6 +1509,24 @@ async function tick(): Promise<void> {
     // 每日清理 tmp；桥接心跳检查
     if (state.lastCleanup !== today) {
       if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) updateWorld((s) => { s.lastCleanup = today })
+      // 后台任务的 job / 日志留 7 天；日志超 20MB 截断到 1MB
+      try {
+        if (existsSync(BG_DIR)) {
+          const cutoff = Date.now() - 7 * 86400_000
+          for (const f of readdirSync(BG_DIR)) {
+            try {
+              const p = join(BG_DIR, f)
+              const st = statSync(p)
+              if (!st.isFile()) continue
+              if (st.mtimeMs < cutoff) { unlinkSync(p); continue }
+              if (f.endsWith(".log") && st.size > 20 * 1024 * 1024) {
+                const keep = readTail(p, 1024 * 1024)
+                writeFileSync(p, `[日志超过 20MB，已截断，只保留最后 1MB]\n${keep}`, { mode: 0o600 })
+              }
+            } catch { /* 单个文件失败不影响其它 */ }
+          }
+        }
+      } catch { /* ignore */ }
     }
     if (state.lastControlPrune !== today) {
       pruneControlQueue(3)
@@ -1754,7 +1789,7 @@ let lastCtx: any = null
 // ———————— 扩展 ————————
 function argSummary(name: string, args: any): string {
   if (!args) return ""
-  const value = args.note || args.query || args.date || args.text || args.path || args.task || args.scene || args.question
+  const value = args.note || args.command || args.query || args.date || args.text || args.path || args.task || args.scene || args.question || args.id
   return value ? String(value).replace(/\s+/g, " ").slice(0, 50) : ""
 }
 
@@ -2823,7 +2858,7 @@ export default function (pi: ExtensionAPI) {
       return
     }
 
-    if (!["read", "grep", "find", "ls", "bash"].includes(name)) return
+    if (!["read", "grep", "find", "ls", "bash", "bg_run"].includes(name)) return
     let blob = ""
     try { blob = JSON.stringify(input) } catch { blob = "" }
     if (hitsDrawer(blob)) return { block: true, reason: `云端模式不能打开机密抽屉。${HINT}` }
@@ -2840,8 +2875,8 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason: `机密抽屉在 ${input.path} 底下，云端模式别递归翻；点名具体文件，或切回本地。${HINT}` }
     }
 
-    // bash：递归 / 打包 / 裸 find 整个世界目录也拦
-    if (name === "bash") {
+    // bash / bg_run：递归 / 打包 / 裸 find 整个世界目录也拦
+    if (name === "bash" || name === "bg_run") {
       const touchesWorld = blob.includes(WORLD) || blob.includes("worlds/default")
       const recursive = /-r|--recursive|-R|-exec|\btar\s|\bfind\s|\bgrep\s+-[A-Za-z]*r/.test(blob)
       if (touchesWorld && recursive) {
@@ -3118,6 +3153,219 @@ export default function (pi: ExtensionAPI) {
       if (!saved) return ok("闹钟没能写进 world.json。")
       const modelText = model === "cloud" ? "在线模型" : model === "local" ? "本地模型" : "当前模型"
       return ok(`活动定好了：${isoLocal(new Date(target))} —— ${alarm.note}\nid：${alarm.id}（到点用${modelText}跑；子闹钟用 parent 指向这个 id）`)
+    },
+  })
+
+  // —— 后台任务：生图 / 转码这类长命令扔到 detached 进程，先回话，稍后再查 ——
+  const BG_MAX_PARALLEL = 3
+  const readBgJobs = (): any[] => {
+    try {
+      return readdirSync(BG_DIR)
+        .filter((f) => f.endsWith(".json"))
+        .map((f) => {
+          try {
+            const j = JSON.parse(readFileSync(join(BG_DIR, f), "utf8"))
+            if (!j || typeof j !== "object") return null
+            // 文件名必须和 id 一致、日志必须在 bg/ 里：挡住伪造 job 拿来读任意文件
+            if (`${j.id}.json` !== f) return null
+            if (j.log && !String(j.log).startsWith(BG_DIR + sep)) return null
+            if (j.exit && !String(j.exit).startsWith(BG_DIR + sep)) return null
+            return j
+          } catch { return null }
+        })
+        .filter(Boolean)
+    } catch { return [] }
+  }
+  const bgAlive = (job: any): boolean => {
+    if (!job || job.endedAt || !job.pid) return false
+    // 只靠 kill(pid,0) 会被 pid 复用骗到：再核对命令行里有没有本任务的唯一路径
+    const marker = String(job.exit || "")
+    if (marker) {
+      const psBin = existsSync("/bin/ps") ? "/bin/ps" : "ps"
+      const r = spawnSync(psBin, ["-p", String(job.pid), "-o", "args="], { encoding: "utf8", timeout: 2000 })
+      // ps 不可用时宁可当它没在跑，也别退回 kill(pid,0)——pid 复用会被骗
+      if (r.error) return false
+      const args = String(r.stdout || "")
+      if (args) return args.includes(marker)
+      return false
+    }
+    try { process.kill(Number(job.pid), 0); return true } catch { return false }
+  }
+  /** 任务状态：退出码文件最可信（pid 结束后可能变僵尸或被复用），其次才看进程 */
+  const bgState = (job: any): { state: string; code: number | null; signal?: string | null } => {
+    let code: number | null = null
+    try {
+      const raw = readFileSync(job.exit || join(BG_DIR, `${job.id}.exit`), "utf8").trim()
+      const n = Number(raw)
+      if (raw !== "" && Number.isFinite(n)) code = n
+    } catch { /* 还没写出来 */ }
+    if (code !== null) return { state: code === 0 ? "done" : "failed", code }
+    if (job.endedAt) {
+      if (job.exitCode !== null && job.exitCode !== undefined) {
+        return { state: Number(job.exitCode) === 0 ? "done" : "failed", code: Number(job.exitCode), signal: job.signal || null }
+      }
+      return { state: "failed", code: null, signal: job.signal || null }
+    }
+    if (bgAlive(job)) return { state: "running", code: null }
+    return { state: "unknown", code: null }
+  }
+  const bgSpan = (ms: number): string => {
+    const total = Math.max(0, Math.round(ms / 1000))
+    if (total < 60) return `${total} 秒`
+    const m = Math.floor(total / 60)
+    if (m < 60) return `${m} 分 ${total % 60} 秒`
+    return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
+  }
+
+  addTool(pi, {
+    name: "bg_run",
+    label: "Background run",
+    description: "把可能跑很久的命令扔到后台，立刻返回，不占着这一轮。适合生图、转码、下载、长脚本。跑完用 bg_status 看状态、bg_output 读输出。",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "要执行的 shell 命令（在 life-world 根目录下跑）" },
+        label: { type: "string", description: "一句话说明这是干嘛的，查状态时好认" },
+      },
+      required: ["command"],
+    },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不能跑后台任务。")
+      const command = String(params?.command || "").trim()
+      if (!command) return ok("没给命令。")
+      mkdirSync(BG_DIR, { recursive: true, mode: 0o700 })
+      // 用 bgState 而不是 bgAlive：已结束的进程可能留下僵尸或被复用，会一直占名额
+      const running = readBgJobs().filter((j) => bgState(j).state === "running")
+      if (running.length >= BG_MAX_PARALLEL) {
+        return ok(`同时最多 ${BG_MAX_PARALLEL} 个后台任务，现在有 ${running.length} 个在跑：\n${running.map((j) => `- ${j.id} ${j.label || String(j.command).slice(0, 40)}`).join("\n")}`)
+      }
+      const id = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      const log = join(BG_DIR, `${id}.log`)
+      const exitFile = join(BG_DIR, `${id}.exit`)
+      const job = {
+        id, label: String(params?.label || "").replace(/\s+/g, " ").trim().slice(0, 60),
+        command: command.slice(0, 2000),
+        pid: 0, startedAt: new Date().toISOString(), endedAt: null, exitCode: null,
+        log, exit: exitFile, cwd: ROOT,
+      }
+      let child
+      try {
+        const fd = openSync(log, "a", 0o600)
+        // 让命令自己把退出码写进文件：pi 进程中途退出也丢不了结果
+        const runner = `(${command}); __bg_code=$?; printf '%s' "$__bg_code" > ${shqPath(exitFile)}`
+        child = spawn("/bin/bash", ["-lc", runner], { cwd: ROOT, detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } })
+        closeSync(fd)
+      } catch (e) {
+        return ok(`后台进程起不来：${String(e)}`)
+      }
+      job.pid = child.pid || 0
+      try {
+        atomicWrite(join(BG_DIR, `${id}.json`), JSON.stringify(job, null, 2))
+      } catch (e) {
+        try { process.kill(-Number(child.pid), "SIGKILL") } catch { /* ignore */ }
+        return ok(`任务记录写不进去，已撤掉：${String(e)}`)
+      }
+      child.on("exit", (code, signal) => {
+        try {
+          const file = join(BG_DIR, `${id}.json`)
+          const cur = JSON.parse(readFileSync(file, "utf8"))
+          cur.endedAt = new Date().toISOString()
+          cur.exitCode = code
+          cur.signal = signal || null
+          writeFileSync(file, JSON.stringify(cur, null, 2), { mode: 0o600 })
+        } catch { /* ignore */ }
+      })
+      child.on("error", (e) => log(`bg_run spawn failed · ${String(e)}`))
+      child.unref()
+      // 跨进程（home + qq）可能同时通过检查，起完再复核一次
+      const runningNow = readBgJobs().filter((j) => bgState(j).state === "running")
+      if (runningNow.length > BG_MAX_PARALLEL) {
+        try { process.kill(-Number(job.pid), "SIGKILL") } catch { /* ignore */ }
+        return ok(`同时最多 ${BG_MAX_PARALLEL} 个后台任务，这次没排上。`)
+      }
+      return ok(`已在后台跑起来：${id}${job.label ? `（${job.label}）` : ""}\npid ${job.pid} · 日志 ${log}\n可以先去回话；跑完用 bg_status({ id: "${id}" }) 看结果，bg_output({ id: "${id}" }) 读输出。`)
+    },
+  })
+
+  addTool(pi, {
+    name: "bg_status",
+    label: "Background status",
+    description: "看后台任务：不传 id 列出最近的，传 id 看单条。",
+    parameters: { type: "object", properties: { id: { type: "string", description: "任务 id，可省略" } } },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不能看后台任务。")
+      const all = readBgJobs().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
+      if (!all.length) return ok("没有后台任务。")
+      const id = String(params?.id || "").trim()
+      const pick = id ? all.filter((j) => j.id === id) : all.slice(0, 10)
+      if (!pick.length) return ok(`没有这个任务：${id}`)
+      const lines = pick.map((j) => {
+        const st = bgState(j)
+        const state = st.state === "running" ? "运行中"
+          : st.state === "done" ? "完成"
+          : st.state === "failed" ? (st.signal ? `被 ${st.signal} 终止` : `失败（退出码 ${st.code}）`)
+          : "已结束（未知）"
+        const endMs = j.endedAt ? Date.parse(j.endedAt) : Date.now()
+        const spent = bgSpan(Math.max(0, endMs - Date.parse(j.startedAt)))
+        return `- ${j.id} · ${state} · 用了 ${spent} · ${j.label || String(j.command).slice(0, 50)}${st.state === "running" ? ` · pid ${j.pid}` : ""}\n  日志：${j.log}`
+      })
+      return ok((id ? "" : "最近的后台任务：\n") + lines.join("\n"))
+    },
+  })
+
+  addTool(pi, {
+    name: "bg_output",
+    label: "Background output",
+    description: "读后台任务的输出，默认最后 40 行。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "任务 id" },
+        tail: { type: "number", description: "要看最后多少行，默认 40，最多 500" },
+      },
+      required: ["id"],
+    },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不能读后台任务。")
+      const id = String(params?.id || "").trim()
+      if (!/^bg-\d+-[a-z0-9]+$/i.test(id)) return ok("任务 id 不对。")
+      let job: any
+      try { job = JSON.parse(readFileSync(join(BG_DIR, `${id}.json`), "utf8")) } catch { return ok(`没有这个任务：${id}`) }
+      let logPath = ""
+      try { logPath = realpathSync(String(job?.log || "")) } catch { return ok("任务日志不存在。") }
+      if (!logPath.startsWith(BG_DIR + sep)) return ok("任务日志路径不合法。")
+      job = { ...job, log: logPath }
+      let text = ""
+      try { text = readTail(job.log, 256 * 1024) } catch { return ok(`读不到日志：${job.log}`) }
+      const n = Math.max(1, Math.min(500, Number(params?.tail) || 40))
+      const lines = text.trimEnd().split("\n")
+      // 行数之外再按字符兜底：单行几 MB 的日志也不能整段塞进上下文
+      const body = lines.slice(-n).join("\n").slice(-40000)
+      return ok(`任务 ${id}（${bgState(job).state === "running" ? "运行中" : "已结束"}）\n${body || "（还没有输出）"}`)
+    },
+  })
+
+  addTool(pi, {
+    name: "bg_kill",
+    label: "Background kill",
+    description: "停掉一个后台任务（连同它的整个进程组）。卡住、跑飞了、不想等的时候用。",
+    parameters: { type: "object", properties: { id: { type: "string", description: "任务 id" } }, required: ["id"] },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不能管后台任务。")
+      const id = String(params?.id || "").trim()
+      if (!/^bg-\d+-[a-z0-9]+$/i.test(id)) return ok("任务 id 不对。")
+      let job: any
+      try { job = JSON.parse(readFileSync(join(BG_DIR, `${id}.json`), "utf8")) } catch { return ok(`没有这个任务：${id}`) }
+      if (!bgAlive(job)) return ok(`这个任务已经结束了（${bgState(job).state}）。`)
+      const sig = (s: string) => {
+        try { process.kill(-Number(job.pid), s) } catch {
+          try { process.kill(Number(job.pid), s) } catch { /* ignore */ }
+        }
+      }
+      sig("SIGTERM")
+      await new Promise((r) => setTimeout(r, 800))
+      if (bgAlive(job)) sig("SIGKILL")
+      return ok(`已停止 ${id}。`)
     },
   })
 

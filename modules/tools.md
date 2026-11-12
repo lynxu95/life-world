@@ -42,6 +42,16 @@
 - 读写普通文件直接用 `read` / `write` / `edit` / `grep` / `ls` / `bash`。
 - `机密抽屉/` 例外：云端模式下不许碰，见《隐私与机密抽屉》。
 
+## 后台任务
+- 长命令（生图、转码、下载、长脚本）别用 `bash` 硬等：`bg_run({ command: "…", label: "画图" })`
+  立刻返回 job id，这一轮马上就能继续说话。
+- 先回话，再 `plan_next({ note: "回来看后台任务 <id>", after_minutes: 3 })` 安排回来查
+  （回来那一步记得 `cancel_alarm({ id })` 收掉，别一直挂着）；
+  `bg_status({ id })` 看进度，`bg_output({ id, tail })` 读输出（默认最后 40 行）。
+- 卡住、跑飞了、不想等了：`bg_kill({ id })` 连同进程组一起停。
+- 同时最多 3 个后台任务；job 和日志 7 天后自动清，单份日志超过 20MB 会截断到 1MB。
+- 命令和输出都会落盘（`$LIFE_WORLD_ROOT/bg/`），别把密钥写进命令行。
+
 ## 插件更新
 - 查有没有新版本：`bash $LIFE_WORLD_ROOT/bin/lwctl check-update`（只查，不改文件）。
 - 发现更新，告诉对方打开看板、点右上角的「更新插件」；看板不方便时，再让他去终端跑 `$LIFE_WORLD_ROOT/bin/lwctl update`。**不要自己跑 update**——它会重装脚本并重启桥接，在自己的窗口里跑会把自己杀掉。
