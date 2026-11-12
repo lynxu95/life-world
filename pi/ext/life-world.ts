@@ -562,6 +562,107 @@ function isAfterglow(text: string): boolean {
   return cleanUserText(text).startsWith("【余波】")
 }
 
+/** 上次喂过上下文的时间点，避免重复注入 */
+const WAKE_STATE = join(ROOT, ".wake-context.json")
+
+/** 这次唤醒能不能把「其他窗口的原文」喂进来：配了本地模型且当前不在本地时，一律不喂 */
+function wakeContextAllowed(prefer?: string): boolean {
+  const o = config().models
+  if (!o.local) return true // 纯云端部署：本来就没有可切换的本地，抽屉也不启用
+  const cur = lastCtx ? modelIdOf(lastCtx) : ""
+  const actual = prefer === "cloud" ? "cloud" : prefer === "local" ? "local" : (cur === o.local ? "local" : "cloud")
+  return actual === "local"
+}
+
+/** 行首的 [私聊｜…]、行尾的（这是 QQ 私聊：…）都是桥接加的注解，注入前剥掉 */
+function stripChannelNotes(text: string, role: string): string {
+  let t = String(text || "").trim()
+  if (role === "user") t = t.replace(/^\[(私聊|群聊)[^\]]*\]\s*/, "")
+  t = t.replace(/\s*（这是 QQ[^）]*）\s*$/s, "")
+  return t.trim()
+}
+
+/** 按字符（不是 UTF-16 单元）截断，避免切断 emoji 的代理对 */
+function cutChars(text: string, n: number): string {
+  const arr = Array.from(text)
+  return arr.length <= n ? text : arr.slice(0, n).join("")
+}
+
+/**
+ * 取「上次唤醒之后、其他窗口新增的对话」，喂给 home 这个总脑。
+ * 只读 conversations 归档；返回结果和新的水位，由调用方在发送成功后再提交水位。
+ */
+function peekRecentContext(maxItems = 20, maxChars = 1500): { text: string; nextAt: string } | null {
+  try {
+    if (!existsSync(CONV_DIR)) return null
+    const scanStart = new Date().toISOString()
+    let lastAt = 0
+    try { lastAt = Date.parse(JSON.parse(readFileSync(WAKE_STATE, "utf8")).lastAt || "") || 0 } catch { /* ignore */ }
+    if (!lastAt) lastAt = Date.now() - 10 * 60_000 // 首次只喂最近 10 分钟
+    const files = readdirSync(CONV_DIR).filter((f) => f.endsWith(".jsonl")).sort().slice(-4)
+    const items: Array<{ t: string; src: string; role: string; text: string }> = []
+    for (const f of files) {
+      for (const line of readFileSync(join(CONV_DIR, f), "utf8").split("\n")) {
+        if (!line.trim()) continue
+        let rec: any
+        try { rec = JSON.parse(line) } catch { continue }
+        const ts = Date.parse(rec.t || "")
+        if (!Number.isFinite(ts) || ts <= lastAt) continue
+        const src = String(rec.src || "")
+        if (src === ROLE || src.startsWith(`${ROLE}-`)) continue // 自己这一路的发言不复读
+        items.push({ t: rec.t, src, role: String(rec.role || ""), text: String(rec.text || "") })
+      }
+    }
+    // 水位取最大值，避免乱序时间戳把水位带回去、下一轮重复喂
+    let nextAt = scanStart
+    for (const it of items) {
+      const ts = Date.parse(it.t)
+      if (Number.isFinite(ts) && ts > (Date.parse(nextAt) || 0)) nextAt = it.t
+    }
+    if (!items.length) return { text: "", nextAt }
+    const picked = items.slice(-maxItems)
+    const label = (src: string) => (src.startsWith("group") ? "群聊" : src === "qq" ? "QQ私聊" : src === "cli" ? "终端" : "另一窗口")
+    const header = "—— 你不在的这段时间，其他窗口 ——"
+    // 从最新一行往前累加，保证「最新发生的事」一定在；超出预算的旧内容会先被舍掉
+    const lines: string[] = []
+    let used = header.length
+    for (let i = picked.length - 1; i >= 0; i--) {
+      const r = picked[i]
+      const d = new Date(r.t)
+      const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+      const who = r.role === "user" ? "对方" : "你"
+      const body = cutChars(stripChannelNotes(r.text, r.role).replace(/\s+/g, " "), 120)
+      const line = `[${label(r.src)} ${hm}] ${who}：${body}`
+      if (used + line.length + 1 > maxChars) break
+      lines.unshift(line)
+      used += line.length + 1
+    }
+    if (!lines.length) return { text: "", nextAt }
+    const omitted = lines.length < picked.length ? "（更早的几条省略）\n" : ""
+    return { text: `${header}\n${omitted}${lines.join("\n")}`, nextAt }
+  } catch (e) {
+    log(`wake context failed ${String(e)}`)
+    return null
+  }
+}
+
+/** 发送成功后再推进水位：发不出去的这段下次还能补上 */
+function commitWakeContext(nextAt: string): void {
+  try { atomicWrite(WAKE_STATE, JSON.stringify({ lastAt: nextAt })) } catch (e) { log(`wake context commit failed ${String(e)}`) }
+}
+
+/** 只有 home（总脑）在定时唤醒时补一段其他窗口的动静；返回文本和待提交的水位 */
+function wakeSuffix(prefer?: string): { text: string; nextAt: string | null } {
+  if (ROLE !== "home") return { text: "", nextAt: null }
+  if (!wakeContextAllowed(prefer)) {
+    log("wake context skipped · 当前不是本地模型，不喂其他窗口原文")
+    return { text: "", nextAt: null }
+  }
+  const ctx = peekRecentContext()
+  if (!ctx || !ctx.text) return { text: "", nextAt: null }
+  return { text: `\n\n${ctx.text}`, nextAt: ctx.nextAt }
+}
+
 function archive(message: any): void {
   try {
     if (typeof message?.customType === "string" && message.customType.startsWith("life-world-")) return
@@ -579,7 +680,9 @@ function archive(message: any): void {
     if (archived.has(id)) return
     archived.add(id)
     mkdirSync(CONV_DIR, { recursive: true, mode: 0o700 })
-    appendFileSync(join(CONV_DIR, `${dayOf(new Date(t))}.jsonl`), `${JSON.stringify({ id, t, role, text })}\n`, { mode: 0o600 })
+    // src 标明这句话来自哪个窗口：qq / home / group-xxx
+    const src = ROLE === "group" ? `group-${process.env.LIFE_WORLD_GROUP_ID || "?"}` : ROLE
+    appendFileSync(join(CONV_DIR, `${dayOf(new Date(t))}.jsonl`), `${JSON.stringify({ id, t, role, text, src })}\n`, { mode: 0o600 })
     indexRecord({ id, t, role, text })
   } catch (e) { log(`archive failed ${String(e)}`) }
 }
@@ -1619,7 +1722,8 @@ async function tick(): Promise<void> {
       if (!saved) continue
       const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
       const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
-      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要盯某件事、过一会儿回来看，就用 heartbeat({ reason: "接着做「${a.note.slice(0, 20)}」", every_minutes: 3 }) 起一条心跳；也可以直接排一条新的日程。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
+      const wc = wakeSuffix(a.model)
+      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要盯某件事、过一会儿回来看，就用 heartbeat({ reason: "接着做「${a.note.slice(0, 20)}」", every_minutes: 3 }) 起一条心跳；也可以直接排一条新的日程。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}` + wc.text
       const sentOk = a.model
         ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
         : sendTime(text)
@@ -1634,6 +1738,7 @@ async function tick(): Promise<void> {
         })
         continue
       }
+      if (wc.nextAt) commitWakeContext(wc.nextAt)
       withWorldLock(() => {
         const fresh = readWorld()
         const self = (fresh.alarms || []).find((x) => x.id === a.id)
@@ -1680,11 +1785,13 @@ async function tick(): Promise<void> {
           const maxMin = heartbeatLimitMinutes()
           const timeUp = (Date.now() - startedMs) / 60_000 + every0 > maxMin
           const willContinue = seq0 < 60 && !timeUp
-          const hbText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null))
+          const wc = wakeSuffix(a.model)
+          const hbText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null)) + wc.text
           const hbSent = a.model
             ? await switchForAlarm(a).then(() => sendTime(hbText)).catch((e) => { log(`heartbeat switch failed ${String(e)}`); return sendTime(hbText) })
             : sendTime(hbText)
           if (!hbSent) { log("heartbeat send failed, retry next tick"); continue }
+          if (wc.nextAt) commitWakeContext(wc.nextAt)
           withWorldLock(() => {
             const f = readWorld()
             const list = f.alarms || []
@@ -1739,7 +1846,10 @@ async function tick(): Promise<void> {
     const mins = hour * 60 + now.getMinutes()
     if (mins < fh * 60 + fm || mins >= fh * 60 + fm + 240) return
     const weather = c.care.enabled && c.care.weatherEnabled ? await fetchWeather(c.care.weatherCity) : ""
-    sendTime(`【后台任务·早上】新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}`)
+    const wc = wakeSuffix()
+    if (sendTime(`【后台任务·早上】新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}` + wc.text) && wc.nextAt) {
+      commitWakeContext(wc.nextAt)
+    }
     updateWorld((s) => { s.lastWake = today })
   } catch (e) { log(`tick failed ${String(e)}`) }
   finally { ticking = false }
@@ -1820,7 +1930,10 @@ function maybeRandomCare(): void {
     const p = Number.isFinite(chance) ? Math.max(0, Math.min(1, chance)) : 0.02
     if (Math.random() >= p) return
     updateWorld((s) => { s.lastRandom = now.toISOString() })
-    sendTime("【想起你】这会儿没在聊天，但你忽然想起了对方。想发就写一两句，用 reach_out 发到 QQ；不想打扰就只回 [SILENT]。")
+    const wc = wakeSuffix()
+    if (sendTime("【想起你】这会儿没在聊天，但你忽然想起了对方。想发就写一两句，用 reach_out 发到 QQ；不想打扰就只回 [SILENT]。" + wc.text) && wc.nextAt) {
+      commitWakeContext(wc.nextAt)
+    }
   } catch (e) { log(`random care failed ${String(e)}`) }
 }
 
