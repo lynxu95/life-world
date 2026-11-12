@@ -250,14 +250,14 @@ lwctl board stop
 - 群聊不注册这四个工具；下载的技能会提示先确认内容；
 - 脚本 / 参考 / 素材收在技能文件夹里，放外面的要在 `SKILL.md` 写清绝对路径和原因；`pi/examples/skills/own/时间/` 是示例。
 
-### 活动 / 子闹钟
+### 日程 / 心跳
 
 - `plan_next({ note, at|after_minutes, model })` 开一个**活动**，到点唤醒并保持 `active`；
-- `plan_next({ parent, times: [...], after_minutes, note })` 给活动排**子闹钟**，同一活动任意 30 分钟最多 3 条；
-- 子闹钟到点若 home 正在跑一轮，自动跳过并记进活动的 `skipped`；下次这个活动醒来时把跳过列表带给 AI review；
+- `heartbeat({ reason, every_minutes, note })` 起一条**心跳串**，独立于日程、固定间隔自动续跳（最多 60 跳），同时最多 2 条；`heartbeat_stop` 停掉；
+- 心跳到点若 home 正在跑一轮，会顺延 30 秒再试，不会被跳过；
 - 下一条主活动开始时，上一条还 `active` 的活动会被强制关闭并提醒；
-- `cancel_alarm({ id })` 关闭活动会连带关闭子闹钟；看板日程页可暂停/继续/关闭/立即触发；
-- 安静时段只限制「随机想念」，不拦主活动/子闹钟。
+- `cancel_alarm({ id })` 关闭日程；看板「日程 / 心跳」页可暂停/继续/关闭，心跳可单独停止；
+- 安静时段只限制「随机想念」，不拦日程和心跳。
 
 ### 辅助感知
 

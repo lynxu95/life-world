@@ -263,6 +263,9 @@ input[type=checkbox]{accent-color:var(--accent)}
 .subs{display:flex;flex-direction:column;gap:8px;max-height:380px;overflow:auto;padding-right:2px}
 .sub-card{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--panel-2)}
 .sub-card.ended{opacity:.72}
+.sub-group{font-size:11px;letter-spacing:.14em;color:var(--faint);margin:12px 0 6px;text-transform:uppercase}
+.sub-group:first-child{margin-top:0}
+.sub-card.beat .sub-head b{color:var(--accent)}
 .sub-card.ended .sub-head b{color:var(--muted);font-weight:500}
 .sub-card.ended .sub-state{color:var(--faint)}
 .sub-head{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
@@ -500,7 +503,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <div class="ss-date" id="ss-date">…</div>
           <div class="ss-item"><span class="k">活动</span><span class="v" id="ss-plan">…</span></div>
           <div class="ss-item"><span class="k">下一条</span><span class="v" id="ss-next">…</span></div>
-          <div class="ss-item"><span class="k">子闹钟</span><span class="v" id="ss-count">…</span></div>
+          <div class="ss-item"><span class="k">心跳</span><span class="v" id="ss-count">…</span></div>
         </section>
         <div class="sched-cols">
           <section>
@@ -508,9 +511,9 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <div class="schedule timeline" id="schedule"><div class="muted">加载中…</div></div>
           </section>
           <section>
-            <div class="sec-head"><h2>活动 / 子闹钟</h2><span class="spacer"></span><span class="sec-note" id="subs-note">…</span></div>
+            <div class="sec-head"><h2>日程 / 心跳</h2><span class="spacer"></span><span class="sec-note" id="subs-note">…</span></div>
             <div class="subs" id="subs"><div class="muted">加载中…</div></div>
-            <div class="hint">子闹钟到点时如果 AI 正忙，会自动跳过，等它下次醒来自己 review。</div>
+            <div class="hint">心跳到点如果 AI 正忙，会顺延 30 秒再试，不会被跳过。</div>
             <details class="plan-group" style="margin-top:10px">
               <summary>今日计划原文（折叠）</summary>
               <div class="plan" id="plan" style="margin-top:8px"><div class="muted">加载中…</div></div>
@@ -850,12 +853,14 @@ function updateSummary() {
   $("ss-date").textContent = `${dayOfLocal(now)} 周${wd}`
   const mains = LAST_ALARMS.filter((a) => a.kind === "main" && a.status !== "closed")
   const active = mains.filter((a) => a.status === "active").length
-  $("ss-plan").textContent = mains.length ? `${active}/${mains.length} 进行中` : (LAST_ALARMS.length ? "旧闹钟" : "无活动")
+  $("ss-plan").textContent = mains.length
+    ? `${active}/${mains.length} 进行中`
+    : (LAST_ALARMS.some((a) => a.chainId) ? "只有心跳" : (LAST_ALARMS.length ? "旧闹钟" : "无日程"))
   const nextT = LAST_ALARMS.map((a) => Date.parse(a.at)).filter((t) => Number.isFinite(t) && t > Date.now()).sort((a, b) => a - b)[0]
   $("ss-next").textContent = nextT
     ? `${pad2(new Date(nextT).getHours())}:${pad2(new Date(nextT).getMinutes())} · ${fmtDuration(nextT - Date.now())}`
     : "接下来没有闹钟"
-  const subsAll = LAST_ALARMS.filter((a) => a.kind === "sub")
+  const subsAll = LAST_ALARMS.filter((a) => a.kind === "sub" && a.chainId)
   const subsLive = subsAll.filter((a) => a.status !== "fired").length
   $("ss-count").textContent = `${subsLive} 条${subsAll.length > subsLive ? ` · ${subsAll.length - subsLive} 已执行` : ""}`
 }
@@ -1048,38 +1053,53 @@ function renderSubs(list) {
   const mains = all.filter((a) => a.kind === "main")
     .sort((a, b) => rankOf(a) - rankOf(b) || Date.parse(a.at) - Date.parse(b.at))
   const legacy = all.filter((a) => !a.kind).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-  const subsOf = (id) => all.filter((a) => a.kind === "sub" && a.parentId === id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-  const subsAll = all.filter((a) => a.kind === "sub")
-  const subsLive = subsAll.filter((a) => a.status !== "fired").length
-  $("subs-note").textContent = `${mains.length} 个活动 · ${subsLive} 条待触发${subsAll.length > subsLive ? ` · ${subsAll.length - subsLive} 条已执行` : ""}`
+  const beats = all.filter((a) => a.kind === "sub" && a.chainId && !a.parentId)
+  const chains = new Map()
+  for (const b of beats) {
+    if (!chains.has(b.chainId)) chains.set(b.chainId, [])
+    chains.get(b.chainId).push(b)
+  }
+  $("subs-note").textContent = `${mains.length} 个日程 · ${chains.size} 条心跳`
   updateSummary()
-  if (!mains.length && !legacy.length) {
-    el.innerHTML = '<div class="sub-empty">还没有活动。AI 用 plan_next 建活动，再用 parent 排子闹钟。</div>'
+  if (!mains.length && !legacy.length && !chains.size) {
+    el.innerHTML = '<div class="sub-empty">还没有日程。AI 用 plan_next 给自己定事；临时想被叫醒就用 heartbeat 起一条心跳。</div>'
     return
   }
   const cards = mains.map((m) => {
-    const subs = subsOf(m.id)
-    const live = subs.filter((s) => s.status !== "fired")
-    const fired = subs.filter((s) => s.status === "fired")
     const closed = m.status === "closed"
     const state = closed ? "已结束" : m.paused ? "已暂停" : (m.status === "active" ? "进行中" : "待开始")
-    const items = live.map((s) => `<div class="sub-item"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>${relTime(s.at)}</span><button data-op="fire_now" data-id="${s.id}">现在</button><button data-op="${s.paused ? "resume" : "pause"}" data-id="${s.id}">${s.paused ? "继续" : "暂停"}</button></div>`).join("")
-    const firedItems = fired.map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n" title="${escAttr(s.note)}">${esc2(s.note)}</span><span>已执行</span></div>`).join("")
     const skip = (m.skipped || []).length
       ? `<div class="sub-skip">跳过：${m.skipped.map((s) => `${fmtClock(s.scheduled)} ${esc2(s.note)}`).join("、")}</div>`
       : ""
     const actions = closed ? "" : `<div class="sub-actions"><button data-op="${m.paused ? "resume" : "pause"}" data-id="${m.id}">${m.paused ? "继续活动" : "暂停活动"}</button><button data-op="close" data-id="${m.id}">关闭活动</button></div>`
     return `<div class="sub-card${closed ? " ended" : ""}"><div class="sub-head"><b>《${esc2(m.note)}》</b><span class="sub-state">${state}</span></div>
-      <div class="sub-meta">${fmtClock(m.at)} 开始${live.length ? ` · ${live.length} 条待触发` : ""}${fired.length ? ` · ${fired.length} 条已执行` : ""} · id ${m.id}</div>
-      ${items || (fired.length ? "" : '<div class="sub-empty">没有子闹钟</div>')}
-      ${firedItems}
+      <div class="sub-meta">${fmtClock(m.at)} 开始 · id ${m.id}</div>
       ${actions}
       ${skip}</div>`
   }).join("")
   const legacyHtml = legacy.length
     ? `<div class="sub-card"><div class="sub-head"><b>旧版一次性闹钟</b></div>${legacy.map((a) => `<div class="sub-item"><span class="t">${fmtClock(a.at)}</span><span class="n">${esc2(a.note)}</span><span>${relTime(a.at)}</span><button data-op="close" data-id="${a.id}">取消</button></div>`).join("")}</div>`
     : ""
-  el.innerHTML = cards + legacyHtml
+  // —— 心跳：和日程平行，按串分组 ——
+  const beatCards = [...chains.entries()].map(([cid, items]) => {
+    const live = items.filter((x) => x.status !== "fired").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    const done = items.filter((x) => x.status === "fired").sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    const next = live[0]
+    const reason = (next && next.reason) || (done[0] && done[0].reason) || "心跳"
+    const every = (next && next.intervalMinutes) || (done[0] && done[0].intervalMinutes) || "?"
+    const seq = next ? Number(next.seq || 1) : (done[0] ? Number(done[0].seq || 0) : 0)
+    const state = live.length ? "跳着" : "已停"
+    const doneRows = done.slice(0, 5).map((s) => `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>已执行</span></div>`).join("")
+    const actions = live.length ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
+    return `<div class="sub-card beat"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
+      <div class="sub-meta">每 ${esc2(every)} 分钟 · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""} · 已执行 ${done.length} 次</div>
+      ${doneRows}
+      ${actions}</div>`
+  }).join("")
+  const parts = []
+  if (cards || legacyHtml) parts.push('<div class="sub-group">日程</div>', cards, legacyHtml)
+  if (beatCards) parts.push('<div class="sub-group">心跳</div>', beatCards)
+  el.innerHTML = parts.join("")
 }
 async function loadSubs() {
   try {

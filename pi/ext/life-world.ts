@@ -355,6 +355,17 @@ interface Alarm {
   closedAt?: string
   /** 子闹钟实际触发的时间 */
   firedAt?: string
+  /**
+   * 心跳串：同一条串上的每一跳共享 chainId 和 reason。
+   * 有 chainId 且没有 parentId 的 sub 闹钟 = 独立心跳，不属于任何主活动。
+   */
+  chainId?: string
+  /** 起串时写一次的理由，之后每一跳都带着 */
+  reason?: string
+  /** 固定间隔（分钟） */
+  intervalMinutes?: number
+  /** 这一串的第几跳 */
+  seq?: number
   /** 忙时跳过的子闹钟，下次这个活动醒来时提醒 AI review */
   skipped?: Array<{ at: string; scheduled: string; note: string }>
 }
@@ -1398,43 +1409,30 @@ function parseWhen(raw: string): number {
   return d.getTime()
 }
 
-/** 子闹钟密度：同一活动任意 30 分钟窗口最多 3 条 */
-function checkSubDensity(existing: Alarm[], parentId: string, times: number[]): string {
-  const list = existing
-    .filter((a) => a.kind === "sub" && a.parentId === parentId && a.status !== "closed" && a.status !== "fired")
-    .map((a) => Date.parse(a.at))
-    .filter((t) => Number.isFinite(t))
-  const all = [...list, ...times].sort((a, b) => a - b)
-  const WIN = 30 * 60_000
-  for (let i = 0; i < all.length; i++) {
-    let n = 0
-    for (let j = i; j < all.length && all[j] - all[i] < WIN; j++) n++
-    if (n > 3) return `30 分钟内最多 3 条子闹钟，当前排不下（${new Date(all[i]).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 起 30 分钟内已有 ${n} 条）`
-  }
-  return ""
-}
-
-function findParentAlarm(list: Alarm[], ref: string): { parent?: Alarm; error?: string } {
-  const key = String(ref || "").trim()
-  if (!key) return { error: "没给 parent（主活动 id 或标题）" }
-  const byId = list.find((a) => a.id === key)
-  if (byId) {
-    if (byId.kind !== "main") return { error: `那是个子闹钟，不是活动：${key}` }
-    if (byId.status === "closed") return { error: `活动已经关闭：${key}` }
-    return { parent: byId }
-  }
-  const matches = list.filter((a) => a.kind === "main" && a.status !== "closed" && a.note.includes(key))
-  if (matches.length === 1) return { parent: matches[0] }
-  if (matches.length > 1) return { error: `有 ${matches.length} 个活动都含「${key}」，请用 id 指定` }
-  return { error: `找不到这个活动：${key}` }
-}
-
 /** 每天回顾时提醒还开着的活动，避免 AI 忘了关 */
 function openActivitiesLine(): string {
   const open = (readWorld().alarms || []).filter((a) => a.kind === "main" && a.status === "active")
   if (!open.length) return ""
   const items = open.map((a) => `《${a.note}》（id ${a.id}${a.activatedAt ? `，${shortStamp(a.activatedAt)} 开始` : ""}）`)
   return `\n还有活动开着：${items.join("、")}。做完了就 cancel_alarm({ id }) 关掉，别一直挂着。`
+}
+
+/** 心跳串到点时的唤醒文本：带上理由、第几跳、怎么停 */
+function heartbeatText(a: Alarm, last = false): string {
+  const seqN = Number(a.seq)
+  const seq = Number.isFinite(seqN) && seqN > 0 ? seqN : 1
+  const everyN = Number(a.intervalMinutes)
+  const every = Number.isFinite(everyN) && everyN >= 1 ? everyN : 2
+  const reason = String(a.reason || "")
+  const body = String(a.note || reason)
+  const tail = last
+    ? `（串 ${a.chainId}，第 ${seq} 跳是最后一跳，串到此结束）`
+    : `（串 ${a.chainId}，每 ${every} 分钟一跳，下一跳会自动排上；不用了就 heartbeat_stop({ chainId: "${a.chainId}" })）`
+  return [
+    `【心跳 · 第 ${seq} 跳】${body}`,
+    reason && reason !== body ? `（起这个心跳的理由：${reason}）` : "",
+    tail,
+  ].filter(Boolean).join("\n")
 }
 
 function skippedLine(skipped?: Array<{ scheduled: string; note: string }>, max = 6): string {
@@ -1603,7 +1601,7 @@ async function tick(): Promise<void> {
       if (!saved) continue
       const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
       const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
-      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要把它拆成几步、过一会儿再醒来，就用 plan_next({ parent: "${a.id}", after_minutes: 20, note: "这一步要看什么/做什么" }) 排子闹钟；一次排几条也行。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动（子闹钟一起关）。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
+      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要盯某件事、过一会儿回来看，就用 heartbeat({ reason: "接着做「${a.note.slice(0, 20)}」", every_minutes: 3 }) 起一条心跳；也可以直接排一条新的日程。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
       const sentOk = a.model
         ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
         : sendTime(text)
@@ -1629,8 +1627,8 @@ async function tick(): Promise<void> {
     // 子闹钟：忙就跳过并记录，闲才唤醒
     if (!woke) {
       for (const a of alarmsNow.filter((x) => x.kind === "sub" && x.status !== "closed" && x.status !== "fired")) {
-        const parent = (readWorld().alarms || []).find((x) => x.id === a.parentId && x.kind === "main" && x.status !== "closed")
-        if (!parent) {
+        // 旧机制残留（挂在活动下的子闹钟）：这套已经废弃，遇到就清掉
+        if (a.parentId && !a.chainId) {
           withWorldLock(() => {
             const f = readWorld()
             f.alarms = (f.alarms || []).filter((x) => x.id !== a.id)
@@ -1638,40 +1636,55 @@ async function tick(): Promise<void> {
           })
           continue
         }
-        if (parent.paused || a.paused) continue
-        if (isAgentBusy()) {
-          withWorldLock(() => {
-            const f = readWorld()
-            const p = (f.alarms || []).find((x) => x.id === parent.id)
-            if (p) p.skipped = [...(p.skipped || []), { at: new Date().toISOString(), scheduled: a.at, note: a.note }].slice(-20)
-            f.alarms = (f.alarms || []).filter((x) => x.id !== a.id)
-            return writeWorld(f)
-          })
-          log(`sub alarm skipped (busy) · ${a.note.slice(0, 40)}`)
-          continue
-        }
-        const skipNote = skippedLine(parent.skipped)
-        const text = `【后台任务·子闹钟】${shortStamp(a.at)}：${a.note}\n（活动《${parent.note}》，id ${parent.id}）\n做完这一步就结束；要继续就再 plan_next 排下一条；要收尾就 cancel_alarm({ id: "${parent.id}" })。${skipNote ? `\n${skipNote}` : ""}`
-        const subSent = a.model
-          ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
-          : sendTime(text)
-        if (!subSent) { log("sub alarm send failed, retry next tick"); continue }
-        withWorldLock(() => {
-          const f = readWorld()
-          const p = (f.alarms || []).find((x) => x.id === parent.id)
-          if (p) delete p.skipped
-          // 触发过的子闹钟不删，标成 fired 留在活动下面，看板能看到她几点醒过；
-          // 24 小时后由 tick 统一清理
-          const sub = (f.alarms || []).find((x) => x.id === a.id)
-          if (sub) {
-            sub.status = "fired"
-            sub.firedAt = new Date().toISOString()
+        // —— 心跳串：独立于主活动，触发后自动续下一跳 ——
+        if (a.chainId && !a.parentId) {
+          if (a.paused) continue
+          if (isAgentBusy()) {
+            // 心跳不该被跳过：忙就往后挪 30 秒再试
+            withWorldLock(() => {
+              const f = readWorld()
+              const x = (f.alarms || []).find((y) => y.id === a.id)
+              if (x) x.at = new Date(Date.now() + 30_000).toISOString()
+              return writeWorld(f)
+            })
+            continue
           }
-          f.lastWake = today
-          return writeWorld(f)
-        })
-        woke = true
-        break
+          const hbText = heartbeatText(a, Number(a.seq) >= 60)
+          const hbSent = a.model
+            ? await switchForAlarm(a).then(() => sendTime(hbText)).catch((e) => { log(`heartbeat switch failed ${String(e)}`); return sendTime(hbText) })
+            : sendTime(hbText)
+          if (!hbSent) { log("heartbeat send failed, retry next tick"); continue }
+          withWorldLock(() => {
+            const f = readWorld()
+            const list = f.alarms || []
+            const cur = list.find((x) => x.id === a.id)
+            // 发送期间被 heartbeat_stop 停掉了：不要把它复活
+            if (!cur || cur.status === "fired") return writeWorld(f)
+            cur.status = "fired"
+            cur.firedAt = new Date().toISOString()
+            const seqN = Number(a.seq)
+            const seq = Number.isFinite(seqN) && seqN > 0 ? seqN : 1
+            const everyN = Number(a.intervalMinutes)
+            const every = Number.isFinite(everyN) && everyN >= 1 && everyN <= 60 ? everyN : 2
+            // 最多 60 跳，防止忘了停一直烧 token
+            if (seq < 60) {
+              const base = Date.parse(a.at)
+              const nextMs = Math.max(Date.now(), (Number.isFinite(base) ? base : Date.now()) + every * 60_000)
+              list.push({
+                id: `s-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                at: new Date(nextMs).toISOString(),
+                note: a.note, setAt: new Date().toISOString(), model: a.model,
+                kind: "sub", status: "pending",
+                chainId: a.chainId, reason: a.reason, intervalMinutes: every, seq: seq + 1,
+              })
+            }
+            f.alarms = list
+            f.lastWake = today
+            return writeWorld(f)
+          })
+          woke = true
+          break
+        }
       }
     }
     if (woke) return
@@ -2706,12 +2719,26 @@ export default function (pi: ExtensionAPI) {
   const handleAlarmCommand = async (c: ControlCmd) => {
     const op = String(c.op || "")
     const id = String(c.alarmId || "")
-    if (!id || !["pause", "resume", "close", "fire_now"].includes(op)) {
+    if (!id || !["pause", "resume", "close", "fire_now", "stop_chain"].includes(op)) {
       writeAck(c.id, { ok: false, msg: "闹钟命令参数不对" })
       return
     }
+    if (op === "stop_chain") {
+      const r = withWorldLock(() => {
+        const st = readWorldStrict()
+        if (!st) return { ok: false, msg: "world.json 读不出来，未改动" }
+        const all = st.alarms || []
+        const kept = all.filter((a) => !(a.chainId === id && a.status !== "fired"))
+        st.alarms = kept
+        return { ok: writeWorld(st), removed: all.length - kept.length }
+      })
+      writeAck(c.id, { ok: !!r?.ok, msg: r?.ok ? `心跳已停（撤掉 ${r.removed} 跳）` : "world.json 暂时被占用" })
+      writeStatus()
+      return
+    }
     const res = withWorldLock(() => {
-      const st = readWorld()
+      const st = readWorldStrict()
+      if (!st) return { ok: false, msg: "world.json 读不出来，未改动" }
       const all = st.alarms || []
       const target = all.find((a) => a.id === id)
       if (!target) return { ok: false, msg: "找不到这个活动/闹钟" }
@@ -3065,15 +3092,13 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "plan_next",
     label: "Plan next",
-    description: "定活动或子闹钟。不带 parent = 开始一个活动，到点唤醒并保持 active；带 parent = 给这个活动排子闹钟（times 可一次排多条，同一活动 30 分钟内最多 3 条）。note 写清做什么、怎么算做成。",
+    description: "定一个日程活动：到点唤醒并保持 active，直到你关闭或下一条活动开始。note 写清做什么、怎么算做成。临时想被反复叫醒用 heartbeat。",
     parameters: {
       type: "object",
       properties: {
         note: { type: "string", description: "做什么，以及怎么算做成了" },
-        at: { type: "string", description: "活动开始时间，或子闹钟的单条时间；带时区 ISO 或 HH:MM" },
-        times: { type: "array", items: { type: "string" }, description: "子闹钟：一次排多个时间点（ISO 或 HH:MM）" },
+        at: { type: "string", description: "活动开始时间，带时区 ISO 或 HH:MM" },
         after_minutes: { type: "number", description: "从现在起多少分钟" },
-        parent: { type: "string", description: "主活动 id 或标题关键词；给了就是排子闹钟" },
         model: { type: "string", enum: ["local", "cloud"], description: "到点用哪个模型跑；不传就沿用当前模型" },
       },
       required: ["note"],
@@ -3081,56 +3106,17 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: any) {
       if (JUDGE) return ok("判官会话不能定闹钟。")
       if (CHANNEL === "group") return ok("群聊里不能定闹钟。")
+      // 旧提示词/旧记忆可能还在传 parent/times：明确拒绝，别静默建成一个新活动
+      if (params?.parent || params?.times) {
+        return ok("挂在活动下的子闹钟已经移除；要每隔几分钟反复醒来，用 heartbeat({ reason, every_minutes })。")
+      }
       const now = Date.now()
       const c = config().models
       const current = lastCtx ? modelIdOf(lastCtx) : ""
       const model: Alarm["model"] = params.model === "local" || params.model === "cloud"
         ? params.model
         : current && current === c.local ? "local" : current && current === c.cloud ? "cloud" : undefined
-      const parentRef = String(params.parent || "").trim()
 
-      // —— 子闹钟：挂到一个进行中/待开始的活动上 ——
-      if (parentRef) {
-        const state = readWorld()
-        const found = findParentAlarm(state.alarms || [], parentRef)
-        if (!found.parent) return ok(found.error || "找不到这个活动。")
-        if (found.parent.status !== "active") return ok(`活动《${found.parent.note}》还没开始（${shortStamp(found.parent.at)}），到点开始后再排子闹钟。`)
-        const rawTimes: string[] = []
-        if (Array.isArray(params.times)) for (const t of params.times) rawTimes.push(String(t))
-        if (params.at) rawTimes.push(String(params.at))
-        const invalid: string[] = []
-        const times: number[] = []
-        for (const t of rawTimes) { const v = parseWhen(t); if (Number.isFinite(v)) times.push(v); else invalid.push(t) }
-        if (typeof params.after_minutes === "number") times.push(now + params.after_minutes * 60_000)
-        if (invalid.length) return ok(`这些时间解析不了：${invalid.join("、")}（要带时区 ISO 或 HH:MM）`)
-        if (!times.length) return ok("子闹钟没给时间：用 at、times 或 after_minutes。")
-        const unique = [...new Set(times)].sort((a, b) => a - b)
-        const tooSoon = unique.filter((t) => t < now + 10_000)
-        if (tooSoon.length) return ok("子闹钟时间至少要在 10 秒之后。")
-        const density = checkSubDensity(state.alarms || [], found.parent.id, unique)
-        if (density) return ok(density)
-        // 只数还没执行的：fired 是留档，不该占额度
-        const pending = (state.alarms || []).filter((a) => a.kind === "sub" && a.parentId === found.parent!.id && a.status !== "fired" && a.status !== "closed").length
-        if (pending + unique.length > 24) return ok("这个活动的子闹钟太多了（上限 24 条），先取消一些。")
-        const parent = found.parent
-        const subs: Alarm[] = unique.map((t, i) => ({
-          id: `s-${now}-${i}-${Math.random().toString(36).slice(2, 6)}`,
-          at: new Date(t).toISOString(),
-          note: String(params.note || ""),
-          setAt: new Date(now).toISOString(),
-          model,
-          kind: "sub",
-          parentId: parent.id,
-          status: "pending",
-        }))
-        const saved = withWorldLock(() => {
-          const st = readWorld()
-          st.alarms = [...(st.alarms || []), ...subs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-          return writeWorld(st)
-        })
-        if (!saved) return ok("子闹钟没能写进 world.json。")
-        return ok(`给活动《${parent.note}》排了 ${subs.length} 条子闹钟：\n${subs.map((s) => `- ${isoLocal(new Date(s.at))} ${s.note}`).join("\n")}`)
-      }
 
       // —— 主活动 ——
       const target = typeof params.after_minutes === "number" ? now + params.after_minutes * 60_000 : parseWhen(String(params.at || ""))
@@ -3152,7 +3138,7 @@ export default function (pi: ExtensionAPI) {
       })
       if (!saved) return ok("闹钟没能写进 world.json。")
       const modelText = model === "cloud" ? "在线模型" : model === "local" ? "本地模型" : "当前模型"
-      return ok(`活动定好了：${isoLocal(new Date(target))} —— ${alarm.note}\nid：${alarm.id}（到点用${modelText}跑；子闹钟用 parent 指向这个 id）`)
+      return ok(`活动定好了：${isoLocal(new Date(target))} —— ${alarm.note}\nid：${alarm.id}（到点用${modelText}跑）`)
     },
   })
 
@@ -3369,6 +3355,90 @@ export default function (pi: ExtensionAPI) {
     },
   })
 
+  // —— 心跳：和主日程平行的临时唤醒串 ——
+  addTool(pi, {
+    name: "heartbeat",
+    label: "Heartbeat",
+    description: "起一个固定间隔的心跳串：每隔 N 分钟醒一次，用来盯后台任务、等一个过程、或者保持连续关注。理由写一次，之后每一跳都带着；每跳结束后会自动续下一跳（最多 60 跳）。同时最多 2 条串；不需要了用 heartbeat_stop 停掉。",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "为什么要起这个心跳（只写一次，后面每跳都带着）" },
+        every_minutes: { type: "number", description: "间隔分钟数，1-60" },
+        note: { type: "string", description: "每一跳具体要做什么；不写就用理由" },
+        first_after_minutes: { type: "number", description: "第一跳在几分钟后，默认等于间隔" },
+        model: { type: "string", enum: ["local", "cloud"], description: "到点用哪个模型跑" },
+      },
+      required: ["reason", "every_minutes"],
+    },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不能起心跳。")
+      const reason = String(params?.reason || "").trim()
+      if (!reason) return ok("说一下为什么要起这个心跳。")
+      const every = Math.round(Number(params?.every_minutes) || 0)
+      if (!every || every < 1 || every > 60) return ok("间隔要写 1-60 分钟。")
+      const first = Math.max(1, Math.min(240, Math.round(Number(params?.first_after_minutes) || every)))
+      const now = Date.now()
+      const chainId = `hb-${now}-${Math.random().toString(36).slice(2, 6)}`
+      const c = config().models
+      const current = lastCtx ? modelIdOf(lastCtx) : ""
+      const model: Alarm["model"] = params.model === "local" || params.model === "cloud"
+        ? params.model
+        : current && current === c.local ? "local" : current && current === c.cloud ? "cloud" : undefined
+      const res = withWorldLock(() => {
+        const st = readWorldStrict()
+        if (!st) return { ok: false, msg: "world.json 读不出来，先别起心跳。" }
+        const list = st.alarms || []
+        const chains = new Set(list.filter((a) => a.chainId && a.status !== "fired").map((a) => a.chainId))
+        if (chains.size >= 2) return { ok: false, msg: `同时最多 2 条心跳串，现在有 ${chains.size} 条：${[...chains].join("、")}` }
+        const alarm: Alarm = {
+          id: `s-${now}-${Math.random().toString(36).slice(2, 6)}`,
+          at: new Date(now + first * 60_000).toISOString(),
+          note: (String(params?.note || "").trim() || reason).slice(0, 500),
+          setAt: new Date(now).toISOString(),
+          model,
+          kind: "sub",
+          status: "pending",
+          chainId,
+          reason: reason.slice(0, 200),
+          intervalMinutes: every,
+          seq: 1,
+        }
+        st.alarms = [...list, alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+        return { ok: writeWorld(st), chainId }
+      })
+      if (!res?.ok) return ok("心跳没起成（world.json 被占用或读不出来）。")
+      return ok(`心跳已起：${res.chainId}\n每 ${every} 分钟一跳，第一跳 ${isoLocal(new Date(now + first * 60_000))}。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
+    },
+  })
+
+  addTool(pi, {
+    name: "heartbeat_stop",
+    label: "Stop heartbeat",
+    description: "停掉一条心跳串。已触发过的留档保留，没触发的撤掉。",
+    parameters: {
+      type: "object",
+      properties: { chainId: { type: "string", description: "心跳串 id（hb-…）" } },
+      required: ["chainId"],
+    },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不能停心跳。")
+      const chainId = String(params?.chainId || "").trim()
+      if (!chainId) return ok("给个 chainId。")
+      const res = withWorldLock(() => {
+        const st = readWorldStrict()
+        if (!st) return { ok: false, removed: 0 }
+        const list = st.alarms || []
+        const kept = list.filter((a) => !(a.chainId === chainId && a.status !== "fired"))
+        const removed = list.length - kept.length
+        st.alarms = kept
+        return { ok: writeWorld(st), removed }
+      })
+      if (!res?.ok) return ok("没停成（world.json 被占用）。")
+      return ok(res.removed ? `已停止心跳 ${chainId}（撤掉 ${res.removed} 跳未触发的）。` : `心跳 ${chainId} 本来就没有待触发的了。`)
+    },
+  })
+
   addTool(pi, {
     name: "check_alarm",
     label: "Check alarms",
@@ -3387,11 +3457,28 @@ export default function (pi: ExtensionAPI) {
       for (const m of list.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
         const mState = m.status === "active" ? "进行中" : m.status === "closed" ? "已结束" : "待开始"
         lines.push(`- 活动《${m.note}》（${mState}；${shortStamp(m.at)}；id ${m.id}）${m.paused ? "【已暂停】" : ""}`)
-        const subs = list.filter((a) => a.kind === "sub" && a.parentId === m.id).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-        for (const s of subs) lines.push(`  - 子闹钟 ${shortStamp(s.at)}（${s.status === "fired" ? "已执行" : rel(s.at)}）${s.note}${s.paused ? "【暂停】" : ""}`)
         if (m.skipped?.length) lines.push(`  - 跳过：${m.skipped.map((s) => `${shortStamp(s.scheduled)} ${s.note}`).join("、")}`)
-        if (m.status === "active" && !subs.length) lines.push(`  - （没有子闹钟；要拆步骤就 plan_next({ parent: "${m.id}", ... })）`)
+        if (m.status === "active") lines.push(`  - 想每隔几分钟回来看一眼，就 heartbeat({ reason: "接着做「${m.note.slice(0, 16)}」", every_minutes: 3 })`)
       }
+      // 心跳串（独立于日程）
+      const beatMap = new Map<string, Alarm[]>()
+      for (const b of list.filter((x) => x.kind === "sub" && x.chainId && x.status !== "fired")) {
+        const k = String(b.chainId)
+        if (!beatMap.has(k)) beatMap.set(k, [])
+        beatMap.get(k)!.push(b)
+      }
+      for (const [cid, items] of beatMap) {
+        const next = items.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))[0]
+        lines.push(`- 心跳 ${cid}：${next.reason || next.note}（每 ${next.intervalMinutes || "?"} 分钟，第 ${next.seq || 1} 跳，${rel(next.at)}；停：heartbeat_stop({ chainId: "${cid}" })）`)
+      }
+      // 已经停掉/跑完的串，也报一句，免得它凭空消失
+      const stopped = new Map<string, number>()
+      for (const b of list.filter((x) => x.kind === "sub" && x.chainId && x.status === "fired")) {
+        const k = String(b.chainId)
+        if (beatMap.has(k)) continue
+        stopped.set(k, (stopped.get(k) || 0) + 1)
+      }
+      for (const [cid, n] of stopped) lines.push(`- 已停的心跳 ${cid}（执行过 ${n} 次）`)
       for (const a of list.filter((x) => !x.kind).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
         lines.push(`- ${shortStamp(a.at)}（${rel(a.at)}）${a.note}${a.model ? `（${a.model === "cloud" ? "在线" : "本地"}模型）` : ""}`)
       }
@@ -3413,7 +3500,9 @@ export default function (pi: ExtensionAPI) {
       const res = withWorldLock(() => {
         const state = readWorld()
         const all = state.alarms || []
-        const targets = id ? all.filter((a) => a.id === id) : match ? all.filter((a) => a.note.includes(match)) : all.slice()
+        const picked = id ? all.filter((a) => a.id === id) : match ? all.filter((a) => a.note.includes(match)) : all.slice()
+        // 心跳串有自己的停法（heartbeat_stop）；cancel_alarm 只在 all: true 时才动它
+        const targets = allFlag ? picked : picked.filter((a) => !(a.chainId && !a.parentId))
         if (!targets.length) return { ok: true, removed: 0, mains: 0 }
         const mainIds = new Set(targets.filter((a) => a.kind === "main").map((a) => a.id))
         // 关活动留尾声：标 closed + closedAt，已执行的子闹钟留档一天（和看板/强制关闭保持一致）

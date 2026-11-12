@@ -161,8 +161,8 @@ function scheduleList(limit = 50) {
     .filter((a) => a && Number.isFinite(Date.parse(a.at)))
     // active 主活动会长期保留，at 是过去时间，不放进时间线，避免挤掉未来闹钟
     .filter((a) => !(a.kind === "main" && (a.status === "active" || a.status === "closed")))
-    // 已执行的子闹钟只在活动卡片里留档，不进时间线
-    .filter((a) => a.status !== "fired")
+    // 已执行的留档不进时间线；心跳有自己的一块面板，也不重复展示
+    .filter((a) => a.status !== "fired" && !(a.kind === "sub" && a.chainId))
     .filter((a) => !a.kind || Date.parse(a.at) >= now - 5 * 60_000)
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
     .slice(0, limit)
@@ -588,7 +588,7 @@ const server = http.createServer(async (req, res) => {
       const data = await body(req)
       const op = String(data.op || "")
       const id = String(data.id || "")
-      if (!id || !["pause", "resume", "close", "fire_now"].includes(op)) return json(res, 400, { ok: false, msg: "缺少 id 或操作不支持" })
+      if (!id || !["pause", "resume", "close", "fire_now", "stop_chain"].includes(op)) return json(res, 400, { ok: false, msg: "缺少 id 或操作不支持" })
       const cmd = appendCommand(ROOT, { target: "home", action: "alarm", op, alarmId: id, reason: "lwboard 闹钟操作" })
       const st = await waitAck(ROOT, cmd.id, "home", 8000)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（闹钟由 home 进程执行）" })
