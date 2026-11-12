@@ -636,7 +636,7 @@ async function startBoard() {
     return false
   }
   console.log(`看板已启动：${boardUrl(host, port)}（PID ${child.pid}）`)
-  if (host === "0.0.0.0" || host === "::") console.log("  监听所有网卡，局域网可访问；看板没有登录鉴权，注意网络环境。")
+  if (host === "0.0.0.0" || host === "::") console.log("  监听所有网卡，局域网可访问。")
   return true
 }
 async function boardStatus() {
