@@ -1117,7 +1117,17 @@ function renderSubs(list) {
     ? `<div class="sub-card"><div class="sub-head"><b>旧版一次性闹钟</b></div>${legacy.map((a) => `<div class="sub-item"><span class="t">${fmtClock(a.at)}</span><span class="n">${esc2(a.note)}</span><span>${relTime(a.at)}</span><button data-op="close" data-id="${a.id}">取消</button></div>`).join("")}</div>`
     : ""
   // —— 心跳：和日程平行，按串分组 ——
-  const beatCards = [...chains.entries()].map(([cid, items]) => {
+  // 正在跳的串排在最前，已停的往后放；同组里按时间排序
+  const isLive = (items) => items.some((x) => x.status !== "fired" && x.status !== "cancelled")
+  const chainEntries = [...chains.entries()].sort((a, b) => {
+    const la = isLive(a[1]) ? 1 : 0
+    const lb = isLive(b[1]) ? 1 : 0
+    if (la !== lb) return lb - la
+    const ta = Math.min(...a[1].map((x) => Date.parse(x.at) || 0))
+    const tb = Math.min(...b[1].map((x) => Date.parse(x.at) || 0))
+    return la ? ta - tb : tb - ta
+  })
+  const beatCards = chainEntries.map(([cid, items]) => {
     const live = items.filter((x) => x.status !== "fired" && x.status !== "cancelled").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
     const done = items.filter((x) => x.status === "fired").sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     const next = live[0]
