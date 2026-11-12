@@ -119,6 +119,13 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 .spacer{flex:1}
 .muted{color:var(--muted)}
 .hint{font-size:12px;color:var(--faint);margin-top:8px}
+/* 右栏统一 12px：输入框、说明文字别比标签大一号 */
+.rail{font-size:12px}
+.rail input[type=text],
+.rail input[type=number],
+.rail input[type=search],
+.rail select,
+.rail .muted{font-size:12px}
 /* 心跳与关怀：整块统一 12px，别让 muted / 输入框比标签大一号 */
 .hb-care{font-size:12px}
 .hb-care .muted{font-size:12px}
