@@ -438,6 +438,15 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
       </main>
       <aside class="rail">
         <section>
+        <div class="sec-head"><h2>心跳时长</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
+        <div class="row">
+          <input type="number" id="hb-limit" placeholder="120" style="width:96px" aria-label="单次心跳最长分钟数">
+          <span class="muted">分钟 / 单次</span>
+          <button class="primary" id="hb-limit-save">保存</button>
+        </div>
+        <div class="hint">单条心跳串最长跑多久，到点自动结束（默认 120 分钟，10~1440）。心跳很费 token，别设太长。</div>
+      </section>
+        <section>
         <div class="sec-head"><h2>模型</h2></div>
         <label class="field">本地<select id="m-local"></select></label>
         <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
@@ -452,29 +461,17 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint" id="mode-hint"></div>
       </section>
         <section>
-        <div class="sec-head"><h2>心跳时长</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
+        <div class="sec-head"><h2>主动关怀</h2></div>
+        <label class="check"><input type="checkbox" id="care-random">随机想起</label>
         <div class="row">
-          <input type="number" id="hb-limit" placeholder="120" style="width:96px" aria-label="单次心跳最长分钟数">
-          <span class="muted">分钟 / 单次</span>
-          <button class="primary" id="hb-limit-save">保存</button>
+          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
+          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
         </div>
-        <div class="hint">单条心跳串最长跑多久，到点自动结束（默认 120 分钟，10~1440）。心跳很费 token，别设太长。</div>
-      </section>
-        <section>
-        <div class="sec-head"><h2>看板监听</h2><span class="spacer"></span><span class="sec-note" id="board-addr-note">…</span></div>
-        <div class="row">
-          <input type="text" id="board-host" placeholder="127.0.0.1" style="flex:1;min-width:0" aria-label="监听地址">
-          <input type="number" id="board-port" placeholder="8099" style="width:88px" aria-label="端口">
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="care-save">保存</button>
+          <span class="muted" id="care-hint"></span>
         </div>
-        <div class="row" style="margin-top:8px">
-          <button class="primary" id="board-save">保存并重启</button>
-          <span class="muted" id="board-hint"></span>
-        </div>
-        <div class="hint">0.0.0.0 = 局域网可访问；127.0.0.1 = 仅本机，配合 SSH 隧道最稳。</div>
-      </section>
-        <section>
-        <div class="sec-head"><h2>健康</h2><span class="spacer"></span><span class="sec-note" id="health-note">…</span></div>
-        <div class="health-grid" id="health"></div>
+        <div class="hint">关掉随机想起 = 全天不主动找你，闹钟和晨间唤醒不受影响。</div>
       </section>
         <section>
         <div class="sec-head"><h2>快捷操作</h2></div>
@@ -489,17 +486,20 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint" id="q-hint"></div>
       </section>
         <section>
-        <div class="sec-head"><h2>主动关怀</h2></div>
-        <label class="check"><input type="checkbox" id="care-random">随机想起</label>
+        <div class="sec-head"><h2>健康</h2><span class="spacer"></span><span class="sec-note" id="health-note">…</span></div>
+        <div class="health-grid" id="health"></div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>看板监听</h2><span class="spacer"></span><span class="sec-note" id="board-addr-note">…</span></div>
         <div class="row">
-          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
-          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
+          <input type="text" id="board-host" placeholder="127.0.0.1" style="flex:1;min-width:0" aria-label="监听地址">
+          <input type="number" id="board-port" placeholder="8099" style="width:88px" aria-label="端口">
         </div>
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="care-save">保存</button>
-          <span class="muted" id="care-hint"></span>
+        <div class="row" style="margin-top:8px">
+          <button class="primary" id="board-save">保存并重启</button>
+          <span class="muted" id="board-hint"></span>
         </div>
-        <div class="hint">关掉随机想起 = 全天不主动找你，闹钟和晨间唤醒不受影响。</div>
+        <div class="hint">0.0.0.0 = 局域网可访问；127.0.0.1 = 仅本机，配合 SSH 隧道最稳。</div>
       </section>
       </aside>
     </div>
