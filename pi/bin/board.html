@@ -458,7 +458,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <button class="primary" id="board-save">保存并重启</button>
           <span class="muted" id="board-hint"></span>
         </div>
-        <div class="hint">0.0.0.0 = 局域网可访问（看板没有登录鉴权，别放公网）；127.0.0.1 = 仅本机，配合 SSH 隧道最稳。</div>
+        <div class="hint">0.0.0.0 = 局域网可访问；127.0.0.1 = 仅本机，配合 SSH 隧道最稳。</div>
       </section>
         <section>
         <div class="sec-head"><h2>健康</h2><span class="spacer"></span><span class="sec-note" id="health-note">…</span></div>
@@ -634,11 +634,25 @@ async function getJson(url, opts) {
 }
 const postJson = (url, data) => getJson(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}) })
 
+let checkFeedbackUntil = 0
 function renderUpdate(u, result) {
   const bar = $("update-bar")
   const btn = $("update-btn")
   const cmd = $("update-cmd")
   if (!bar || !btn) return
+  // 刚手动检查过：给个明确回音，别点完没反应
+  if (Date.now() < checkFeedbackUntil) {
+    bar.hidden = false
+    if (cmd) cmd.hidden = true
+    if (!u || u.ok === false) {
+      $("update-text").innerHTML = `⚠ 检查失败：${esc2(u?.error || "网络不通或远端不可达")}`
+    } else {
+      $("update-text").innerHTML = `✓ 已是最新版本${u.current && u.current.version ? `（v${esc2(u.current.version)}）` : ""}`
+    }
+    btn.textContent = "检查更新"
+    btn.classList.remove("update-on")
+    return
+  }
   // 刚更新过：10 分钟内优先显示结果
   if (result && result.at && Date.now() - Date.parse(result.at) < 10 * 60_000) {
     bar.hidden = false
@@ -2055,8 +2069,21 @@ if (updateBtn) updateBtn.onclick = async () => {
   }
   updateBtn.disabled = true
   updateBtn.textContent = "检查中…"
+  let before = ""
+  try { before = (await getJson("/api/overview")).update?.checked || "" } catch { /* ignore */ }
   try { await postJson("/api/update-check") } catch { /* ignore */ }
-  setTimeout(() => { updateBtn.disabled = false; loadOverview() }, 4000)
+  // 等检查真的跑完（checked 变了），最多 12 秒
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 800))
+    try {
+      const d = await getJson("/api/overview")
+      const c = d.update?.checked || ""
+      if (c && c !== before) break
+    } catch { /* ignore */ }
+  }
+  checkFeedbackUntil = Date.now() + 12_000
+  updateBtn.disabled = false
+  try { await loadOverview() } catch { /* ignore */ }
 }
 
 const boardSave = $("board-save")

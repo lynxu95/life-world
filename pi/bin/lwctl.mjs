@@ -374,7 +374,10 @@ function cmdCheckUpdate(args = []) {
   const bi = args.indexOf("--branch")
   const branchArg = bi >= 0 ? String(args[bi + 1] || "").trim() : ""
   const fail = (msg) => {
-    if (json) console.log(JSON.stringify({ ok: false, error: msg }))
+    // 失败也要落盘：看板靠 checked 时间戳判断「这次检查结束了」
+    const payload = { ok: false, error: msg, checked: new Date().toISOString() }
+    try { writeFileSync(join(ROOT, "update-check.json"), JSON.stringify(payload, null, 2)) } catch { /* ignore */ }
+    if (json) console.log(JSON.stringify(payload))
     else if (!quiet) console.error(msg)
     return 2
   }
