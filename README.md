@@ -20,6 +20,10 @@
 - [主动关怀](#主动关怀)
 - [QQ 桥接](#qq-桥接)
 - [定时与家会话](#定时与家会话)
+- [心跳](#心跳)
+- [后台任务](#后台任务)
+- [主动发出去的东西](#主动发出去的东西)
+- [唤醒时补上下文](#唤醒时补上下文)
 - [工具](#工具)
 - [lwctl 运维命令](#lwctl-运维命令)
 - [Web 看板](#web-看板)
@@ -44,7 +48,10 @@
 | 机密抽屉 | 切云端前收起前文、云端禁读，切回本地恢复 |
 | 主动关怀 | 随机想起、安静时段、早晨天气 |
 | QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小；群会话闲置回收 |
-| 定时 | 日程到点唤醒；心跳按固定间隔自我唤醒、自动续跳，忙时顺延 30 秒 |
+| 日程 | `plan_next` 给自己定事，到点唤醒并保持进行中，直到关闭或被下一条顶掉 |
+| 心跳 | `heartbeat` 起一条固定间隔的串（同步在场陪伴用），自动续跳、可随时停，忙时顺延 30 秒 |
+| 后台任务 | `bg_run` 把长命令扔到 detached 进程；`notify: true` 跑完自动叫醒一次；`bg_kill` 可停 |
+| 主动流水 | `reach_out` / `send_media` 都留档；`check_proactive` 回看，私聊每轮自动带上「最近发过什么」 |
 | 辅助感知 | `perceive` 看视频/听音频/看图；主模型能看的图片不走辅助；适配 Qwen-Omni |
 | 控制队列 | `lwctl` / 看板命令追加队列、按 id 回执；并发/同毫秒不再丢命令 |
 | 超限自动换会话 | 上下文超限不切模型：QQ 自动新会话+重发，home/CLI 自动新会话 |
@@ -188,11 +195,13 @@ git fetch origin && git checkout pi-agent-adv && git pull
 
 ## 配置
 
-`~/.local/share/life-world/life-world.json`（完整示例见 `pi/config.example.json`）：
+`~/.local/share/life-world/life-world.json`（完整示例见 `pi/config.example.json`）。
+心跳相关的两项都可在看板「心跳与关怀」里改：`heartbeatEnabled`（总开关，关掉后不再自动醒）、
+`heartbeatMaxMinutes`（单串最长分钟数，默认 20，10~1440）。
 
 ```json
 {
-  "world": { "enabled": true, "running": true, "reviewHour": 23, "fallbackWakeTime": "09:00" },
+  "world": { "enabled": true, "running": true, "reviewHour": 23, "fallbackWakeTime": "09:00", "heartbeatMaxMinutes": 20, "heartbeatEnabled": true },
   "board": { "host": "127.0.0.1", "port": 8099 },
   "bridge": {
     "enabled": true,
@@ -386,15 +395,72 @@ OneBot 只监听 `127.0.0.1` 时用 SSH 隧道；同机部署直接 `ws://127.0.
 ## 定时与家会话
 
 - `plan_next` 开活动时可指定 `model: local|cloud`，到点先切模型再唤醒；
-- **日程 / 心跳**：日程用 `plan_next` 定，到点唤醒并保持 active；心跳用 `heartbeat({ reason, every_minutes })` 起一条固定间隔的串，独立于日程、每跳自动续下一跳（最多 60 跳），同时最多 2 条，`heartbeat_stop` 停；心跳到点若 AI 正忙会顺延 30 秒再试；下一条日程开始时上一项还没关，会强制关闭并提醒；安静时段只管随机想念，日程和心跳照常醒；
+- **日程**：`plan_next` 定，到点唤醒并保持 active；下一条开始时上一项还没关，会强制关闭并提醒；安静时段只管随机想念，日程照常醒；
+- **心跳**：见下方「心跳」一节——它和日程平行，不属于任何日程；
 - **留档**：心跳每一跳触发后标成 `fired` 不删，看板能看到这一串几点醒过；日程关闭后标成 `closed` 保留，显示为「已结束」。两者都在 24 小时后由调度清理；
 - 家会话（`home-rpc.mjs`，`LIFE_WORLD_ROLE=home`）负责：闹钟、每日回顾（默认 23 点）、早上兜底（默认 09:00 后）、桥接守护、每日快照/清理/衰减；
 - `home-rpc.mjs` 的 pi 子进程退出后自动重启（2s 起指数退避，最长 60s；稳定跑满 1 分钟重置）；
 - 家会话每次重启新建会话，连续性靠归档记忆；QQ 私聊不变。
 
+## 心跳
+
+心跳是**同步在场陪伴**用的：对方需要你一直在线的时候（陪他加班、等一段聊天的回音、一起看一场直播），
+每隔 N 分钟在当下醒一次，而不是一天几次的「睁眼」。
+
+```js
+heartbeat({ reason: "陪他把这段路走完", every_minutes: 3, note: "看看他还在不在" })
+heartbeat_stop({ chainId: "hb-…" })
+```
+
+- 独立于日程：活动关了心跳照跳；同时最多 2 条串；
+- 理由只写一次，之后每一跳都带着；每跳结束自动续下一跳，最多 60 跳；
+- 单串总时长受 `world.heartbeatMaxMinutes` 限制（默认 20 分钟，10~1440，可在看板「心跳与关怀」里改）；
+- 到点若 AI 正忙，顺延 30 秒再试，不会被跳过；
+- 触发过的跳标 `fired` 留档；被手动停掉、还没触发的跳标 `cancelled`（看板显示「未执行」），24 小时后清理。
+
+> 等某个具体任务跑完，别用心跳轮询——用 `bg_run({ notify: true })`，跑完会自己叫醒一次。
+
+## 后台任务
+
+生图、转码、下载、长脚本这类命令，别用 `bash` 硬等——那一轮会被钉死。
+
+```js
+bg_run({ command: "python gen.py", label: "画图", notify: true })   // 立刻返回 job id
+bg_status({ id })        // 运行中 / 完成 / 失败（带退出码或终止信号）
+bg_output({ id, tail })  // 读日志尾部，默认 40 行、最多 500 行
+bg_kill({ id })          // 连同进程组一起停
+```
+
+- `notify: true`：任务跑完自动叫醒一次（tick 每 30 秒扫一次），报告退出码或终止信号；
+- 同时最多 3 个后台任务；job 与日志 7 天后清理，单份日志超 20MB 截断到 1MB；
+- 命令和输出落在 `$ROOT/bg/`，**别把密钥写进命令行**。
+
+## 主动发出去的东西
+
+`reach_out` 和 `send_media` 每成功发一次，都会在 `worlds/default/proactive/YYYY-MM-DD.jsonl` 记一笔
+（消息 / 图片 / 语音 / 文件，带私聊或群聊目标）。
+
+- AI 隔很久才回你的时候，用 `check_proactive({ hours: 24 })` 回看「我之前发过什么」；
+- 私聊每轮 prompt 前也会自动附一句「你最近主动给他发过：…」——避免「她定时道晚安，你第二天才回，
+  她却以为是你主动找她」；
+- 这里只记**已经发到 QQ、你本人看得到**的内容；日记、机密抽屉不会进来；流水 7 天清理。
+
+## 唤醒时补上下文
+
+home（后台那个「总脑」）在日程、心跳、想起你、早上这些定时唤醒时，会附一段：
+
+```
+—— 你不在的这段时间，其他窗口 ——
+[QQ私聊 09:23] 对方：图发我看看
+[QQ私聊 09:23] 你：v2 来了…
+```
+
+数据来自所有窗口共享的对话归档（带 `src` 区分来源），只取上次唤醒之后的新内容，发送成功后才推进水位；
+云端唤醒时不喂其他窗口原文（与机密抽屉同口径）。
+
 ## 工具
 
-`plan_next` · `check_alarm` / `check_proactive` · `cancel_alarm` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `web_search`
+`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `web_search`
 
 - `web_search` 走 TinyFish keyless，免 API Key；
 - `delegate` 起独立 `pi -p` 子进程，深度 1 层；
@@ -438,7 +504,8 @@ lwctl board stop                # 停止
 
 页面分「概览 / 记忆」两个标签页：
 
-- **概览**：会话、模型设置、主动关怀、7 天用量、**AI 日程**（`plan_next` 的闹钟，随机想起不显示）。
+- **概览**：会话（含「正在忙 · 多久 · 工具」和「中断」按钮）、**心跳与关怀**（心跳开关、单串时长、随机想起、安静时段）、**模型设置**、快捷操作、健康、看板监听、7 天用量、**AI 日程**时间线，以及 **心跳 / 日程** 两个分区（心跳卡显示理由、间隔、第几跳、下一跳和已执行记录，可单独停止）。
+- 顶栏「检查更新」：发现新版本会变成「更新插件（N）」，点一下就更新并自动重启看板。
 - **记忆**：**记忆星图**（Canvas 3D + 跟随旋转的星云背景 + 中心浓/外侧薄的柔焦雾 + 上层分形云团；中心白色主星是自动注入的 identity 文档——我是谁/心情/用户画像/模型规范，主星之间是白色虚线、轻微呼吸发光；内外圈差速旋转（内快外慢，平均速度不变）；印象是金色大星，金色虚线连真实来源；召回边随机跑神经电流，普通边快、金色/琥珀边慢；点击节点沿边放电；悬停降速并聚焦邻居，普通节点与主星悬停都显示标题，主星选中也显示；支持拖拽/缩放/全屏）、**印象墙**（含「立即整理」，不影响 05:00 的每日整理）、FTS5 记忆检索、日记/某天、日志、手动快照。
 
 **监听**：默认只绑 `127.0.0.1`；改成 `0.0.0.0` 后局域网内可访问。
@@ -453,9 +520,12 @@ lwctl board stop                # 停止
 │   ├── diary/ plan/ room/
 │   ├── 机密抽屉/             # 私密画像 + 抽屉状态/原文
 │   ├── 表情包/ 语音/ outbox/ tmp/
+│   ├── proactive/           # 主动发送流水（消息/图片/语音，7 天清理）
 │   └── world.json           # 闹钟与每日标记
 ├── worlds/backup/           # git 快照（不含 models/node_modules）
 ├── memory-index.db          # FTS5 + 强度 + 激活/联想索引（可重建）
+├── bg/                      # 后台任务 job / 日志（7 天清理）
+├── .wake-context.json       # 唤醒喂上下文的读取水位
 ├── pi-sessions/             # pi 会话文件
 ├── status/                  # 会话心跳
 ├── control/                   # 控制命令队列（commands-YYYY-MM-DD.jsonl）

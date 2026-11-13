@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.6.2] - 2026-11-13
+
+### 文档
+
+- README 补齐此前漏掉的功能：新增「心跳」「后台任务」「主动发出去的东西」「唤醒时补上下文」四节，
+  目录、功能一览、工具清单（`heartbeat` / `bg_*` / `check_proactive`）、配置示例
+  （`heartbeatMaxMinutes` / `heartbeatEnabled`）、数据位置（`proactive/`、`bg/`）和 Web 看板说明同步更新。
+
 ## [1.6.1] - 2026-11-13
 
 ### 变更
