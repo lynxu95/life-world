@@ -15,6 +15,36 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.10.0] - 2026-11-13
+
+### 调整
+
+- **系统提示词瘦身**：把偏「手册」的内容从 system 里挪出去，只在 system 留必须常驻的规则。
+  - `modules/*.md`（开篇、safety、privacy、qq、time-plan、models、化形、profile-mood、`tools-quick`）
+    → `pi/prompt/world.md`，**33.5KB → 14.4KB**
+  - `modules/help/*.md`（tools 详细语法、browser、perceive、skills、gal、stickers、files、hands-eyes、first-meeting）
+    → `~/.local/share/life-world/help.md`（约 21KB），**不进 system**
+  - 世界规则里加一句「详细语法和玩法在 help.md，用到时再 read」；
+    system 里另留一份 `tools-quick`（每个工具一行：叫什么是干嘛的），不会忘了有哪些工具。
+  - 两处生成逻辑同步：`build-prompt.mjs` 和扩展的运行时兜底都会写 `$ROOT/help.md`。
+  - 心跳灌水那种「趣味玩法」示例放进 help.md，不进 system。
+
+## [1.9.0] - 2026-11-13
+
+### 新增 / 调整
+
+- **心跳改成秒级**：
+  - 间隔最短 **10 秒**、最长 60 分钟；`heartbeat({ every_seconds: 10 })`，
+    也接受 `every_minutes`（可写小数，如 1.5）。
+  - 单串最长时长下限从 10 分钟放宽到 **1 分钟**（1~1440，看板「心跳与关怀」可调）。
+  - 数据里新增 `intervalSeconds`，老的 `intervalMinutes` 照旧能读；
+    提示词、`check_alarm`、日志里的间隔都按秒/分自动选用更合适的写法。
+  - **定时器改成按需排程**：原来固定 30 秒一轮，10 秒心跳根本跑不起来；
+    现在按最近一条待触发闹钟排下一轮（2~30 秒），没事才 30 秒。
+- **看板：正在跳的心跳标红并呼吸闪烁**（和「会话在忙」同一套语言）：
+  红色标题 + 呼吸红点 + 卡片呼吸描边；已停/已跑完的串仍是灰的，不受影响。
+  系统开启「减少动态效果」时自动不闪。
+
 ## [1.8.3] - 2026-11-13
 
 ### 调整

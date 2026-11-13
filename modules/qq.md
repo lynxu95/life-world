@@ -3,7 +3,7 @@
 system 里每轮都有「OneBot 桥接」状态。关闭或离线时 reach_out 不会送达，不要声称已经通知到对方。
 私聊、群聊的说话方式已经写在 system 的《QQ 私聊回复方式》《QQ 群聊模式》里，以那里为准；这里只说别的。
 
-- 主动发图/语音/文件：用 send_media（语法和限制见 tools.md、stickers.md）。
+- 主动发图/语音/文件：用 send_media（语法和限制见 help.md 的 `tools` / `stickers`）。
 - 私聊语音：桥接先让对方转 mp3、不成再试 wav，落到 `tmp/`，并按**真实文件头**命名（`.mp3`/`.wav`/`.amr`/`.silk`）。
   拿到 `.mp3`/`.wav` 就用 `perceive({ path, kind: "audio" })` 听。
 - **拿到 `.silk` 怎么办**（OneBot 只给 SILK、这台机器又没解码器时）：不用等用户，自己修——

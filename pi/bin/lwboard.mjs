@@ -548,9 +548,10 @@ const server = http.createServer(async (req, res) => {
         features: FEATURES,
         heartbeatMaxMinutes: (() => {
           const v = Number(c.world && c.world.heartbeatMaxMinutes)
-          return Number.isFinite(v) && v > 0 ? Math.max(10, Math.min(1440, Math.round(v))) : 20
+          return Number.isFinite(v) && v > 0 ? Math.max(1, Math.min(1440, Math.round(v))) : 20
         })(),
         heartbeatEnabled: !(c.world && c.world.heartbeatEnabled === false),
+        worldRunning: !(c.world && (c.world.enabled === false || c.world.running === false)),
         update: readJson(UPDATE_CHECK_FILE, null),
         updateResult: readJson(join(ROOT, "update-result.json"), null),
         board: { host: HOST, port: PORT },
@@ -811,7 +812,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/heartbeat-limit") {
       const data = await body(req)
       const v = Math.round(Number(data.minutes))
-      if (!Number.isFinite(v) || v < 10 || v > 1440) return json(res, 400, { ok: false, msg: "心跳时长要在 10-1440 分钟之间" })
+      if (!Number.isFinite(v) || v < 1 || v > 1440) return json(res, 400, { ok: false, msg: "心跳时长要在 1-1440 分钟之间" })
       let c = {}
       if (existsSync(CONFIG_FILE)) {
         try { c = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }

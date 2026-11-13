@@ -1,6 +1,6 @@
 # life-world 使用指引（pi 版）
 
-> 这份文件是**给人看的操作手册**，插件不会自动读进上下文。角色实际读的行为规则在 `modules/`，首次引导走 `modules/first-meeting.md`；完整功能、配置项和原理见 `README.md`。
+> 这份文件是**给人看的操作手册**，插件不会自动读进上下文。角色实际读的行为规则在 `modules/`，首次引导走 `modules/help/first-meeting.md`；完整功能、配置项和原理见 `README.md`。
 >
 > 当前维护分支是 `pi-agent-adv`；这是 **pi 1.5 扩展**，不是 opencode 插件。工具直接按名字调用，没有 `execute` / `tools.xxx` 那一层。
 

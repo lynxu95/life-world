@@ -280,6 +280,13 @@ input[type=checkbox]{accent-color:var(--accent)}
 .sub-group{font-size:11px;letter-spacing:.14em;color:var(--faint);margin:12px 0 6px;text-transform:uppercase}
 .sub-group:first-child{margin-top:0}
 .sub-card.beat .sub-head b{color:var(--accent)}
+/* 正在跳的心跳：红色呼吸 + 呼吸圆点，和「会话在忙」同一套语言 */
+.sub-card.beat.live{border-color:var(--bad);animation:beatGlow 2.2s ease-in-out infinite}
+.sub-card.beat.live .sub-head b{color:var(--bad)}
+.sub-card.beat.live .sub-state{color:var(--bad);display:inline-flex;align-items:center;gap:5px}
+.sub-card.beat.live .sub-state::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--bad);animation:busyPulse 1.4s ease-in-out infinite}
+@keyframes beatGlow{0%,100%{box-shadow:0 0 0 1px var(--bad-soft),0 0 8px var(--bad-soft)}50%{box-shadow:0 0 0 1px var(--bad),0 0 16px var(--bad-soft)}}
+@media (prefers-reduced-motion:reduce){.sub-card.beat.live{animation:none}.sub-card.beat.live .sub-state::before{animation:none}}
 .sub-card.ended .sub-head b{color:var(--muted);font-weight:500}
 .sub-card.ended .sub-state{color:var(--faint)}
 .sub-head{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
@@ -462,10 +469,10 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="sec-head"><h2>心跳与关怀</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
         <label class="check"><input type="checkbox" id="hb-enabled" checked>启用心跳</label>
         <div class="row" style="margin-top:8px">
-          <input type="number" id="hb-limit" placeholder="20" style="width:96px" aria-label="单次心跳最长分钟数">
+          <input type="number" id="hb-limit" placeholder="20" min="1" max="1440" step="1" style="width:96px" aria-label="单次心跳最长分钟数">
           <span class="muted">分钟 / 单次</span>
         </div>
-        <div class="hint">日程是一天几次的睁眼，心跳则是真正的醒来<br>———— 连续不断的自我触发。用在对方需要她同步在场陪伴时；等任务完成请用 bg 的完成通知。单串默认最长 20 分钟（10~1440），很费 token，量力而行。</div>
+        <div class="hint">日程是一天几次的睁眼，心跳则是真正的醒来<br>———— 连续不断的自我触发。用在对方需要她同步在场陪伴时；等任务完成请用 bg 的完成通知。单串默认最长 20 分钟（1~1440）；间隔最短 10 秒。很费 token，量力而行。</div>
         <label class="check" style="margin-top:14px"><input type="checkbox" id="care-random">随机想起</label>
         <div class="row">
           <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
@@ -734,6 +741,7 @@ function renderUpdate(u, result) {
 
 let hbLimitTouched = false
 let HB_ENABLED = true
+let WORLD_RUNNING = true
 function renderHeartbeatLimit(minutes, enabled) {
   HB_ENABLED = enabled !== false
   const v = Number(minutes) || 20
@@ -790,6 +798,7 @@ async function loadOverview() {
       group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
     renderUpdate(d.update, d.updateResult)
+    WORLD_RUNNING = d.worldRunning !== false
     renderHeartbeatLimit(d.heartbeatMaxMinutes, d.heartbeatEnabled)
     renderBoardAddr(d.board)
     renderUsage(d.usage)
@@ -1089,7 +1098,9 @@ function relTime(iso) {
   const t = Date.parse(iso)
   if (!Number.isFinite(t)) return "时间异常"
   const ms = t - Date.now()
-  return ms <= 0 ? "已到点" : fmtDuration(ms)
+  if (ms <= 0) return "已到点"
+  // 10 秒级的心跳用分钟显示会变成「1 分钟」，不到 1 分钟就写秒
+  return ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} 秒` : fmtDuration(ms)
 }
 function renderSubs(list) {
   const el = $("subs")
@@ -1146,7 +1157,8 @@ function renderSubs(list) {
     const sample = next || done[0] || cancelledItems[0]
     const reason = (sample && sample.reason) || "心跳"
     const numOr = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d }
-    const every = numOr(sample && sample.intervalMinutes, "?")
+    const everySec = numOr(sample && sample.intervalSeconds, 0) || numOr(sample && sample.intervalMinutes, 0) * 60 || 120
+    const every = everySec ? (everySec < 60 ? `${Math.round(everySec)} 秒` : `${Math.round((everySec / 60) * 10) / 10} 分钟`) : "?"
     const seq = next ? numOr(next.seq, 1) : (sample ? numOr(sample.seq, 0) : 0)
     const state = !HB_ENABLED ? "已关闭" : (live.length ? "跳着" : "已停")
     // 执行过和「起过但没等」的跳按时间混排，后者标成「未执行」
@@ -1160,8 +1172,10 @@ function renderSubs(list) {
       .join("")
     const actions = live.length ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
     const ended = !live.length
-    return `<div class="sub-card beat${ended ? " ended" : ""}"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
-      <div class="sub-meta">每 ${esc2(every)} 分钟 · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""} · 已执行 ${done.length} 次</div>
+    // 还在跳（没停、没跑完、总开关开着）的串标成 live：红色呼吸
+    const liveCls = !ended && HB_ENABLED && WORLD_RUNNING ? " live" : ""
+    return `<div class="sub-card beat${ended ? " ended" : liveCls}"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
+      <div class="sub-meta">每 ${esc2(every)} · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""} · 已执行 ${done.length} 次</div>
       ${history}
       ${actions}</div>`
   }).join("")

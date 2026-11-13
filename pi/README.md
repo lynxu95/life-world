@@ -67,13 +67,14 @@ cd life-world
 0. 先打印环境检查（系统 / Node 版本 / tmux / ffmpeg），缺什么会给出对应平台的安装提示；
 1. 建 `~/.local/share/life-world/{worlds/default,pi-sessions}`；
 2. 把 `data/kaomoji.json` 复制成 `~/.local/share/life-world/pi-kaomoji.json`；
-3. 用 `build-prompt.mjs` 把仓库 `modules/*.md` 拼成 `pi/prompt/world.md`；
+3. 用 `build-prompt.mjs` 生成两份：`modules/*.md` → `pi/prompt/world.md`（进 system，只放必须常驻的）；
+   `modules/help/*.md` → `~/.local/share/life-world/help.md`（不进 system，AI 需要时自己 read）；
 4. 把扩展软链到 pi 的自动发现目录：
    - 全局：`~/.pi/agent/extensions/life-world/index.ts`
    - 项目级：`<仓库>/.pi/extensions/life-world/index.ts`
 5. 把 `browser-*`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwboard.mjs`、三份 `start-{linux,macos,wsl}.sh` 复制到 `~/.local/share/life-world/bin/`，并放一份扩展在 `~/.local/share/life-world/ext/`（桥接脚本默认从那里找）。
 
-**扩展会自己在每轮开始前确保世界规则在 system 里**（`prompt/world.md` 缺失时用 `modules/` 现拼），所以不需要 `--append-system-prompt`，也不需要改 `APPEND_SYSTEM.md`。
+**扩展会自己在每轮开始前确保世界规则在 system 里**（`prompt/world.md` 缺失时用 `modules/` 现拼，同时把 `modules/help/` 写成 `$ROOT/help.md`），所以不需要 `--append-system-prompt`，也不需要改 `APPEND_SYSTEM.md`。
 
 装完直接：
 
@@ -332,7 +333,7 @@ pi/
 ├── bin/rpc-adapter.mjs      pi RPC 报文契约（升级只改这里）
 ├── bin/qq-bridge.mjs        OneBot WS ↔ pi RPC 桥接
 ├── bin/home-rpc.mjs         家会话 RPC 常驻（定时器）
-├── build-prompt.mjs         从 ../modules/*.md 生成 prompt/world.md
+├── build-prompt.mjs         从 ../modules/*.md 生成 prompt/world.md；从 ../modules/help/*.md 生成 $ROOT/help.md
 ├── install.sh               安装/生成提示词
 ├── config.example.json      配置示例
 └── prompt/world.md          生成物（install.sh 产出，不提交也行）

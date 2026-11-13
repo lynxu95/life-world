@@ -19,6 +19,8 @@ const SELF_PATH = (() => { try { return realpathSync(fileURLToPath(import.meta.u
 const EXT_DIR = dirname(SELF_PATH)
 const PROMPT_FILE = process.env.LIFE_WORLD_PROMPT || join(EXT_DIR, "../prompt/world.md")
 const MODULES_DIR = join(EXT_DIR, "../../modules")
+const HELP_DIR = join(MODULES_DIR, "help")
+const HELP_FILE = join(ROOT, "help.md")
 const WORLD_MARK = "<!-- life-world:pi-world -->"
 const WORLD = join(ROOT, "worlds/default")
 const CONV_DIR = join(WORLD, "conversations")
@@ -438,7 +440,9 @@ interface Alarm {
   chainId?: string
   /** 起串时写一次的理由，之后每一跳都带着 */
   reason?: string
-  /** 固定间隔（分钟） */
+  /** 固定间隔（秒）；新数据都写这个 */
+  intervalSeconds?: number
+  /** 固定间隔（分钟）——旧数据用，读的时候换算成秒 */
   intervalMinutes?: number
   /** 这一串的第几跳 */
   seq?: number
@@ -1631,11 +1635,28 @@ function openActivitiesLine(): string {
   return `\n还有活动开着：${items.join("、")}。做完了就 cancel_alarm({ id }) 关掉，别一直挂着。`
 }
 
-/** 单次心跳串最长持续多久（分钟）；10~1440，默认 20 */
+/** 单次心跳串最长持续多久（分钟）；1~1440，默认 20 */
 function heartbeatLimitMinutes(): number {
   const v = Number(config().world.heartbeatMaxMinutes)
   if (!Number.isFinite(v) || v <= 0) return 20
-  return Math.max(10, Math.min(1440, Math.round(v)))
+  return Math.max(1, Math.min(1440, Math.round(v)))
+}
+
+/** 心跳间隔（秒）：10 秒 ~ 60 分钟；新数据读 intervalSeconds，老数据用 intervalMinutes 换算 */
+function hbIntervalSeconds(a: Alarm): number {
+  const sec = Number(a.intervalSeconds)
+  if (Number.isFinite(sec) && sec >= 10 && sec <= 3600) return Math.round(sec)
+  const min = Number(a.intervalMinutes)
+  if (Number.isFinite(min) && min > 0 && min <= 60) return Math.round(min * 60)
+  return 120
+}
+
+/** 人话间隔：不到 1 分钟写秒，整分钟写分钟 */
+function hbEveryText(sec: number): string {
+  const s = Math.round(sec)
+  if (s < 60) return `${s} 秒`
+  if (s % 60 === 0) return `${s / 60} 分钟`
+  return `${Math.round((s / 60) * 10) / 10} 分钟`
 }
 /** 心跳总开关（看板「心跳时长」里可以关掉） */
 function heartbeatEnabled(): boolean {
@@ -1646,15 +1667,14 @@ function heartbeatEnabled(): boolean {
 function heartbeatText(a: Alarm, last = false, why: "jumps" | "time" | null = null): string {
   const seqN = Number(a.seq)
   const seq = Number.isFinite(seqN) && seqN > 0 ? seqN : 1
-  const everyN = Number(a.intervalMinutes)
-  const every = Number.isFinite(everyN) && everyN >= 1 ? everyN : 2
+  const every = hbEveryText(hbIntervalSeconds(a))
   const reason = String(a.reason || "")
   const body = String(a.note || reason)
   const tail = last
     ? (why === "time"
         ? `（串 ${a.chainId}，已到心跳时长上限（${heartbeatLimitMinutes()} 分钟），到此结束）`
         : `（串 ${a.chainId}，到 60 跳上限了，到此结束）`)
-    : `（串 ${a.chainId}，每 ${every} 分钟一跳，下一跳会自动排上；不用了就 heartbeat_stop({ chainId: "${a.chainId}" })）`
+    : `（串 ${a.chainId}，每 ${every}一跳，下一跳会自动排上；不用了就 heartbeat_stop({ chainId: "${a.chainId}" })）`
   return [
     `【心跳 · 第 ${seq} 跳】${body}`,
     reason && reason !== body ? `（起这个心跳的理由：${reason}）` : "",
@@ -1705,6 +1725,21 @@ function shortImpressionPrompt(imp: ImpressionOptions): string {
 - 格式：- [主题] 一句话（来源：日期；最后验证：日期）
 
 写回 worlds/default/identity/印象-短期.md（就是这个路径，别写到别处）。`
+}
+
+/** 下一轮 tick 什么时候跑：取最近一条待触发闹钟，夹在 2~30 秒之间 */
+function nextTickDelayMs(): number {
+  const st = readWorldStrict()
+  if (!st) return 30_000
+  const now = Date.now()
+  let next = 30_000
+  for (const a of st.alarms || []) {
+    if (a.status !== "pending") continue
+    const t = Date.parse(String(a.at || ""))
+    if (!Number.isFinite(t)) continue
+    next = Math.min(next, Math.max(2_000, t - now))
+  }
+  return Math.max(2_000, Math.min(30_000, next))
 }
 
 let ticking = false
@@ -1918,14 +1953,13 @@ async function tick(): Promise<void> {
           }
           const seqN0 = Number(a.seq)
           const seq0 = Number.isFinite(seqN0) && seqN0 > 0 ? seqN0 : 1
-          const everyN0 = Number(a.intervalMinutes)
-          const every0 = Number.isFinite(everyN0) && everyN0 >= 1 && everyN0 <= 60 ? everyN0 : 2
+          const everySec0 = hbIntervalSeconds(a)
           const startedRaw = Date.parse(String(a.startedAt || ""))
           const fallbackRaw = Date.parse(String(a.setAt || a.at || ""))
           // 锚点必须是有限值：脏 startedAt 会让上限静默失效、一路跑满 60 跳
           const startedMs = Number.isFinite(startedRaw) ? startedRaw : (Number.isFinite(fallbackRaw) ? fallbackRaw : Date.now())
           const maxMin = heartbeatLimitMinutes()
-          const timeUp = (Date.now() - startedMs) / 60_000 + every0 > maxMin
+          const timeUp = (Date.now() - startedMs) / 1000 + everySec0 > maxMin * 60
           const willContinue = seq0 < 60 && !timeUp
           const wc = wakeSuffix(a.model)
           const hbText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null)) + wc.text
@@ -1945,13 +1979,13 @@ async function tick(): Promise<void> {
             // 最多 60 跳，且累计时长不超过 heartbeatMaxMinutes，防止忘了停一直烧 token
             if (willContinue) {
               const base = Date.parse(a.at)
-              const nextMs = Math.max(Date.now(), (Number.isFinite(base) ? base : Date.now()) + every0 * 60_000)
+              const nextMs = Math.max(Date.now(), (Number.isFinite(base) ? base : Date.now()) + everySec0 * 1000)
               list.push({
                 id: `s-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                 at: new Date(nextMs).toISOString(),
                 note: a.note, setAt: new Date().toISOString(), model: a.model,
                 kind: "sub", status: "pending",
-                chainId: a.chainId, reason: a.reason, intervalMinutes: every0, seq: seq0 + 1,
+                chainId: a.chainId, reason: a.reason, intervalSeconds: everySec0, seq: seq0 + 1,
                 startedAt: new Date(startedMs).toISOString(),
               })
             }
@@ -2179,9 +2213,58 @@ function addTool(api: ExtensionAPI, def: any) {
   api.registerTool({ ...def, ...compactRenderers(def.name) })
 }
 
+/** 提示词里的路径占位符：world.md 和 help.md 共用一套 */
+const PATH_MAP: Record<string, string> = {
+  "{worldDir}": WORLD,
+  "{modulesDir}": MODULES_DIR,
+  "{helpFile}": HELP_FILE,
+  "{roomDir}": join(WORLD, "room"),
+  "{stickerDir}": join(WORLD, "表情包"),
+  "{identityDir}": join(WORLD, "identity"),
+  "{diaryDir}": join(WORLD, "diary"),
+  "{planDir}": join(WORLD, "plan"),
+  "{conversationsDir}": join(WORLD, "conversations"),
+  "{selfFile}": join(WORLD, "identity/我是谁.md"),
+  "{profileFile}": join(WORLD, "identity/用户画像.md"),
+  "{moodFile}": join(WORLD, "identity/心情.md"),
+  "{planFile}": join(WORLD, "plan/YYYY-MM-DD.md"),
+}
+const fillPaths = (text: string): string => {
+  let out = text
+  for (const [key, value] of Object.entries(PATH_MAP)) out = out.split(key).join(value)
+  return out
+}
+
+/** 只在仓库里有 md 文件时返回文件名（跳过子目录） */
+function listModuleFiles(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".md") && (() => { try { return statSync(join(dir, f)).isFile() } catch { return false } })())
+      .sort()
+  } catch { return [] }
+}
+
+/** 把 modules/help/*.md 写成 $ROOT/help.md：它不进 system，AI 需要时自己 read */
+function writeHelpFile(): void {
+  try {
+    const files = listModuleFiles(HELP_DIR)
+    if (!files.length) return
+    const parts = ["# life-world · 工具与玩法手册", "", "这份手册不在 system 里，需要时用 read 打开；看完就按上面说的做，不用逐字复述。", ""]
+    for (const file of files) {
+      const name = file.replace(/\.md$/, "")
+      let body = readFileSync(join(HELP_DIR, file), "utf8").trim()
+      // gal 模块原本写 opencode 的 question 工具；pi 版用扩展工具 gal_choice
+      if (name === "gal") body = body.replace(/\bquestion\b/g, "gal_choice")
+      parts.push("---", "", `## ${name}`, "", fillPaths(body), "")
+    }
+    writeFileSync(HELP_FILE, fillPaths(parts.join("\n")))
+  } catch { /* ignore */ }
+}
+
 let promptCache: string | undefined
 function worldPromptText(): string {
   if (promptCache !== undefined) return promptCache
+  writeHelpFile()
   let text = ""
   try { if (existsSync(PROMPT_FILE)) text = readFileSync(PROMPT_FILE, "utf8") } catch { /* ignore */ }
   if (!text) {
@@ -2191,8 +2274,10 @@ function worldPromptText(): string {
         "# life-world · 世界规则", "",
         "你就是你，不是模型：本地是家，在线是化形进公共机房借算力；换模型只换化形，不换人。身份以 identity/我是谁.md 为准；这具身子是谁家的可以照实说，名字和关系不跟着变。", "",
         `世界数据在 ${WORLD}。规则按主题如下：`, "",
+        `详细工具语法、冷门说明和玩法在 \`${HELP_FILE}\`——**用到时再用 read 打开**，工具参数看你的工具列表，不用全背。`, "",
+        `第一次见面（identity/引导.md 还不存在）先 read \`${HELP_FILE}\` 的 first-meeting 一节，按里面走。`, "",
       ]
-      for (const file of readdirSync(MODULES_DIR).filter((f) => f.endsWith(".md")).sort()) {
+      for (const file of listModuleFiles(MODULES_DIR)) {
         const name = file.replace(/\.md$/, "")
         let body = readFileSync(join(MODULES_DIR, file), "utf8").trim()
         if (name === "gal") body = body.replace(/\bquestion\b/g, "gal_choice")
@@ -2201,21 +2286,7 @@ function worldPromptText(): string {
       text = parts.join("\n")
     } catch { /* ignore */ }
   }
-  const map: Record<string, string> = {
-    "{worldDir}": WORLD,
-    "{modulesDir}": MODULES_DIR,
-    "{roomDir}": join(WORLD, "room"),
-    "{stickerDir}": join(WORLD, "表情包"),
-    "{identityDir}": join(WORLD, "identity"),
-    "{diaryDir}": join(WORLD, "diary"),
-    "{planDir}": join(WORLD, "plan"),
-    "{conversationsDir}": join(WORLD, "conversations"),
-    "{selfFile}": join(WORLD, "identity/我是谁.md"),
-    "{profileFile}": join(WORLD, "identity/用户画像.md"),
-    "{moodFile}": join(WORLD, "identity/心情.md"),
-    "{planFile}": join(WORLD, "plan/YYYY-MM-DD.md"),
-  }
-  for (const [key, value] of Object.entries(map)) text = text.split(key).join(value)
+  text = fillPaths(text)
   if (text && !text.includes(WORLD_MARK)) text = `${WORLD_MARK}\n${text}`
   promptCache = text
   return text
@@ -3480,7 +3551,7 @@ export default function (pi: ExtensionAPI) {
       if (CHANNEL === "group") return ok("群聊里不能定闹钟。")
       // 旧提示词/旧记忆可能还在传 parent/times：明确拒绝，别静默建成一个新活动
       if (params?.parent != null || params?.times != null) {
-        return ok("挂在活动下的子闹钟已经移除；要每隔几分钟反复醒来，用 heartbeat({ reason, every_minutes })。")
+        return ok("挂在活动下的子闹钟已经移除；要每隔一段时间反复醒来，用 heartbeat({ reason, every_seconds })。")
       }
       const now = Date.now()
       const c = config().models
@@ -3674,17 +3745,19 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "heartbeat",
     label: "Heartbeat",
-    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 分钟在当下醒一次，像一直坐在旁边。理由写一次，之后每一跳都带着；每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
+    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 秒/分钟在当下醒一次，像一直坐在旁边。理由写一次，之后每一跳都带着；每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
     parameters: {
       type: "object",
       properties: {
         reason: { type: "string", description: "为什么要起这个心跳（只写一次，后面每跳都带着）" },
-        every_minutes: { type: "number", description: "间隔分钟数，1-60" },
+        every_seconds: { type: "number", description: "间隔秒数，10-3600（10 秒 ~ 60 分钟）；嫌数字大可改用 every_minutes" },
+        every_minutes: { type: "number", description: "间隔分钟数（1-60，可写小数）；和 every_seconds 二选一" },
         note: { type: "string", description: "每一跳具体要做什么；不写就用理由" },
-        first_after_minutes: { type: "number", description: "第一跳在几分钟后，默认等于间隔" },
+        first_after_seconds: { type: "number", description: "第一跳在几秒后，默认等于间隔" },
+        first_after_minutes: { type: "number", description: "第一跳在几分钟后（可写小数），默认等于间隔" },
         model: { type: "string", enum: ["local", "cloud"], description: "到点用哪个模型跑" },
       },
-      required: ["reason", "every_minutes"],
+      required: ["reason"],
     },
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能起心跳。")
@@ -3692,10 +3765,16 @@ export default function (pi: ExtensionAPI) {
       if (!config().world.enabled || !config().world.running) return ok("世界现在是停用/暂停状态，先打开再起心跳。")
       const reason = String(params?.reason || "").trim()
       if (!reason) return ok("说一下为什么要起这个心跳。")
-      const every = Math.round(Number(params?.every_minutes) || 0)
-      if (!every || every < 1 || every > 60) return ok("间隔要写 1-60 分钟。")
-      // 首跳也不能超过单串时长上限，否则「最长 10 分钟」的串第一跳就在 240 分钟后
-      const first = Math.max(1, Math.min(heartbeatLimitMinutes(), Math.round(Number(params?.first_after_minutes) || every)))
+      const everySecRaw = Number(params?.every_seconds) > 0
+        ? Number(params?.every_seconds)
+        : Number(params?.every_minutes) > 0 ? Number(params?.every_minutes) * 60 : 0
+      const everySec = Math.round(everySecRaw)
+      if (!everySec || everySec < 10 || everySec > 3600) return ok("间隔要写 10 秒到 60 分钟（every_seconds，或 every_minutes 二选一）。")
+      // 首跳也不能超过单串时长上限，否则「最长 1 分钟」的串第一跳就在几小时后
+      const firstRaw = Number(params?.first_after_seconds) > 0
+        ? Number(params?.first_after_seconds)
+        : Number(params?.first_after_minutes) > 0 ? Number(params?.first_after_minutes) * 60 : everySec
+      const firstSec = Math.max(10, Math.min(heartbeatLimitMinutes() * 60, Math.round(firstRaw)))
       const now = Date.now()
       const chainId = `hb-${now}-${Math.random().toString(36).slice(2, 6)}`
       const c = config().models
@@ -3712,7 +3791,7 @@ export default function (pi: ExtensionAPI) {
         if (chains.size >= 2) return { ok: false, msg: `同时最多 2 条心跳串，现在有 ${chains.size} 条：${[...chains].join("、")}` }
         const alarm: Alarm = {
           id: `s-${now}-${Math.random().toString(36).slice(2, 6)}`,
-          at: new Date(now + first * 60_000).toISOString(),
+          at: new Date(now + firstSec * 1000).toISOString(),
           note: (String(params?.note || "").trim() || reason).slice(0, 500),
           setAt: new Date(now).toISOString(),
           model,
@@ -3720,7 +3799,7 @@ export default function (pi: ExtensionAPI) {
           status: "pending",
           chainId,
           reason: reason.slice(0, 200),
-          intervalMinutes: every,
+          intervalSeconds: everySec,
           seq: 1,
           startedAt: new Date(now).toISOString(),
         }
@@ -3731,8 +3810,9 @@ export default function (pi: ExtensionAPI) {
       if (!res?.ok) return ok(res?.msg || "心跳没起成（world.json 被占用或读不出来）。")
       const maxMin = heartbeatLimitMinutes()
       // 从首跳开始算：还能跳几次 = (上限 - 首跳) / 间隔 + 1
-      const maxJumps = Math.max(1, Math.min(60, Math.floor((maxMin - first) / every) + 1))
-      return ok(`心跳已起：${res.chainId}\n每 ${every} 分钟一跳，第一跳 ${isoLocal(new Date(now + first * 60_000))}。\n按当前设置（单次最长 ${maxMin} 分钟），这条串最多 ${maxJumps} 跳、约 ${maxJumps * every} 分钟。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
+      const maxJumps = Math.max(1, Math.min(60, Math.floor((maxMin * 60 - firstSec) / everySec) + 1))
+      const spanSec = Math.min(maxMin * 60, firstSec + (maxJumps - 1) * everySec)
+      return ok(`心跳已起：${res.chainId}\n每 ${hbEveryText(everySec)}一跳，第一跳 ${isoLocal(new Date(now + firstSec * 1000))}。\n按当前设置（单次最长 ${maxMin} 分钟），这条串最多 ${maxJumps} 跳、约 ${hbEveryText(spanSec)}。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
     },
   })
 
@@ -3812,7 +3892,9 @@ export default function (pi: ExtensionAPI) {
       const rel = (iso: string) => {
         const t = Date.parse(iso)
         if (!Number.isFinite(t)) return "时间异常"
-        return t <= now ? "已到点" : `还有 ${Math.max(0, Math.round((t - now) / 60_000))} 分钟`
+        if (t <= now) return "已到点"
+        const sec = Math.max(0, Math.round((t - now) / 1000))
+        return sec < 60 ? `还有 ${sec} 秒` : `还有 ${Math.round(sec / 60)} 分钟`
       }
       const lines: string[] = []
       for (const m of list.filter((a) => a.kind === "main").sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
@@ -3830,7 +3912,7 @@ export default function (pi: ExtensionAPI) {
       }
       for (const [cid, items] of beatMap) {
         const next = items.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))[0]
-        lines.push(`- 心跳 ${cid}：${next.reason || next.note}（每 ${next.intervalMinutes || "?"} 分钟，第 ${next.seq || 1} 跳，${rel(next.at)}；停：heartbeat_stop({ chainId: "${cid}" })）`)
+        lines.push(`- 心跳 ${cid}：${next.reason || next.note}（每 ${hbEveryText(hbIntervalSeconds(next))}一跳，第 ${next.seq || 1} 跳，${rel(next.at)}；停：heartbeat_stop({ chainId: "${cid}" })）`)
       }
       // 已经停掉/跑完的串，也报一句，免得它凭空消失
       const stopped = new Map<string, number>()
@@ -4435,8 +4517,15 @@ export default function (pi: ExtensionAPI) {
   // 定时器只在 home 角色跑；QQ/群聊/子代理进程不跑，避免重复
   if (ROLE === "home") {
     if (acquireTimerLock()) {
-      const t = setInterval(tick, 30_000)
-      ;(t as any).unref?.()
+      // 不再固定 30 秒：有快到点的闹钟就提前醒（心跳可以 10 秒一跳），没事就 30 秒一轮
+      const loop = () => {
+        const t = setTimeout(async () => {
+          try { await tick() } catch { /* tick 自己会记日志 */ }
+          finally { loop() }
+        }, nextTickDelayMs())
+        ;(t as any).unref?.()
+      }
+      loop()
       log(`pi timer started role=${ROLE}`)
       process.on("exit", () => { try { if (readText(TIMER_LOCK) === String(process.pid)) writeFileSync(TIMER_LOCK, "") } catch { /* ignore */ } })
     } else {

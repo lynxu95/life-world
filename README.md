@@ -89,7 +89,7 @@ cd life-world
 ./pi/install.sh --global     # 所有 pi 会话加载；只想在仓库目录用改成 --project
 ```
 
-安装脚本会：检查 pi 版本（低于 1.5.0 会警告）、建世界目录、复制颜文字库、生成世界规则、软链扩展，并把 `browser-*`、`rpc-adapter.mjs`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwctl`、`lwboard` 等放进 `~/.local/share/life-world/bin/`。
+安装脚本会：检查 pi 版本（低于 1.5.0 会警告）和运行环境、建世界目录、复制颜文字库、生成世界规则（`pi/prompt/world.md`）与按需手册（`~/.local/share/life-world/help.md`）、软链扩展，并把 `browser-*`、`rpc-adapter.mjs`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwctl`、`lwboard` 等放进 `~/.local/share/life-world/bin/`。
 
 ### 3. 配模型
 
@@ -213,7 +213,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 
 `~/.local/share/life-world/life-world.json`（完整示例见 `pi/config.example.json`）。
 心跳相关的两项都可在看板「心跳与关怀」里改：`heartbeatEnabled`（总开关，关掉后不再自动醒）、
-`heartbeatMaxMinutes`（单串最长分钟数，默认 20，10~1440）。
+`heartbeatMaxMinutes`（单串最长分钟数，默认 20，1~1440）。
 
 ```json
 {
@@ -436,7 +436,7 @@ heartbeat_stop({ chainId: "hb-…" })
 
 - 独立于日程：活动关了心跳照跳；同时最多 2 条串；
 - 理由只写一次，之后每一跳都带着；每跳结束自动续下一跳，最多 60 跳；
-- 单串总时长受 `world.heartbeatMaxMinutes` 限制（默认 20 分钟，10~1440，可在看板「心跳与关怀」里改）；
+- 单串总时长受 `world.heartbeatMaxMinutes` 限制（默认 20 分钟，1~1440，可在看板「心跳与关怀」里改）；间隔 `every_seconds` 最短 10 秒、最长 60 分钟（`every_minutes` 可写小数）；
 - 到点若 AI 正忙，顺延 30 秒再试，不会被跳过；
 - 触发过的跳标 `fired` 留档；被手动停掉、还没触发的跳标 `cancelled`（看板显示「未执行」），24 小时后清理。
 

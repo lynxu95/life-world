@@ -144,7 +144,7 @@ ensure_world() {
 
 build_prompt() {
   if command -v node >/dev/null 2>&1; then
-    echo "== 生成静态世界提示词 =="
+    echo "== 生成提示词（世界规则 + 按需手册）=="
     LIFE_WORLD_ROOT="$ROOT" node "$SRC/build-prompt.mjs"
   else
     echo "== 跳过 build-prompt（没有 node；扩展会在运行时从 modules 现拼）=="
