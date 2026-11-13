@@ -11,7 +11,7 @@
   想用本机真浏览器（带登录态）见 help.md 的 `browser`。
 - **记忆**：`memory_search` / `memory_day` / `memory_timeline` 翻过去的对话和日记。
 - **技能**：`skill_list` / `skill_read` / `skill_run` / `skill_toggle`。
-- **模型**：`switch_model` 切换与查状态；`delegate` 派子代理；`gal_choice` 终端选项面板（只在终端里用）。
+- **模型**：`switch_model` 切换与查状态；`local_protect` 本地保护模式（临时只用在线，游戏/做图时用）；`delegate` 派子代理；`gal_choice` 终端选项面板（只在终端里用）。
 - **后台**：`bg_run` 跑长命令（`notify: true` 跑完叫你）、`bg_status` / `bg_output` / `bg_kill`。
 - **文件**：直接用 `read` / `write` / `edit` / `grep` / `ls` / `bash`；`机密抽屉/` 云端模式一律不许碰。
 - **插件更新**：`lwctl check-update` 只查；发现有更新让用户在看板点「更新插件」，**别自己跑 update**（会把自己杀掉）。

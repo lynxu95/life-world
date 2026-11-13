@@ -55,6 +55,17 @@ function runUpdateCheck() {
   child.on("error", () => { clearTimeout(timer); updateBusy = false })
   return true
 }
+/** 和扩展保持同一套 fail-closed：文件存在但读不出来/结构不对，按「开着」处理 */
+function readLocalLockStrict() {
+  const file = join(ROOT, "local-lock.json")
+  if (!existsSync(file)) return { enabled: false }
+  try {
+    const v = JSON.parse(readFileSync(file, "utf8"))
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true }
+    return { enabled: typeof v.enabled === "boolean" ? v.enabled : true }
+  } catch { return { enabled: true } }
+}
+
 function writeAtomic(file, text) {
   const tmp = `${file}.${process.pid}.tmp`
   writeFileSync(tmp, text, { mode: 0o600 })
@@ -551,6 +562,7 @@ const server = http.createServer(async (req, res) => {
           return Number.isFinite(v) && v > 0 ? Math.max(1, Math.min(1440, Math.round(v))) : 20
         })(),
         heartbeatEnabled: !(c.world && c.world.heartbeatEnabled === false),
+        localLock: readLocalLockStrict(),
         worldRunning: !(c.world && (c.world.enabled === false || c.world.running === false)),
         update: readJson(UPDATE_CHECK_FILE, null),
         updateResult: readJson(join(ROOT, "update-result.json"), null),
@@ -687,6 +699,9 @@ const server = http.createServer(async (req, res) => {
       const m = c.models || {}
       const resolved = value === "local" ? m.local : value === "cloud" ? m.cloud : value
       if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
+      if (resolved === m.local && readLocalLockStrict().enabled === true) {
+        return json(res, 400, { ok: false, msg: "本地保护模式开着：只能用在线模型，先关掉它" })
+      }
       const cmd = appendCommand(ROOT, { target, action: "model", model: value, reason: "lwboard 手动切换" })
       // 全部切换只下发，不逐个等回执；会话 5 秒内自己轮询生效
       if (target === "all") return json(res, 200, { ok: true, msg: "已下发全部切换" })
@@ -808,6 +823,20 @@ const server = http.createServer(async (req, res) => {
       child.on("error", (e) => console.error("[lwboard] spawn lwctl update failed:", String(e)))
       child.unref()
       return json(res, 200, { ok: true, msg: "正在更新，看板会短暂断开，十几秒后刷新本页" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/local-lock") {
+      const data = await body(req)
+      const enabled = data.enabled === true
+      const cfg = readJson(CONFIG_FILE, {})
+      const cloud = String((cfg.models && cfg.models.cloud) || "")
+      if (enabled && !cloud) return json(res, 400, { ok: false, msg: "没配在线模型（models.cloud），开了也切不过去" })
+      const doc = { enabled, at: new Date().toISOString(), by: "board", reason: String(data.reason || "").slice(0, 200) }
+      writeAtomic(join(ROOT, "local-lock.json"), JSON.stringify(doc, null, 2))
+      // 开锁时顺手把所有会话推到在线，别等下一轮才切换
+      if (enabled && cloud) {
+        try { appendCommand(ROOT, { target: "all", action: "model", model: "cloud", reason: "本地保护模式" }) } catch { /* 命令下发失败不影响锁 */ }
+      }
+      return json(res, 200, { ok: true, enabled, msg: enabled ? "已开：正在把会话切到在线" : "已关" })
     }
     if (req.method === "POST" && url.pathname === "/api/heartbeat-limit") {
       const data = await body(req)

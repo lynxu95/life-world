@@ -11,9 +11,9 @@
 
 把 life-world 从 opencode 插件搬到 pi 的原生扩展点：
 
-- **工具**：`plan_next` / `check_alarm` / `check_proactive` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `perceive` / `delegate` / `gal_choice` / `switch_model` / `web_search` / `bg_run` / `bg_status` / `bg_output` / `bg_kill`
+- **工具**：`plan_next` / `check_alarm` / `check_proactive` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `perceive` / `delegate` / `gal_choice` / `switch_model` / `local_protect` / `web_search` / `bg_run` / `bg_status` / `bg_output` / `bg_kill`
 - **后台任务**：`bg_run` 把生图、转码、长脚本扔到 detached 进程，立刻返回 job id；`bg_status` / `bg_output` 查状态和输出，`bg_kill` 停掉。同时最多 3 个，日志 7 天清理、超 20MB 截断
-- **模型热切换**：`switch_model` 让角色自己决定本地 / 在线；模型无响应立即切、工具连续失败两次切云端，另有脚本探活兜底
+- **模型热切换**：`switch_model` 让角色自己决定本地 / 在线；模型无响应立即切、工具连续失败两次切云端，另有脚本探活兜底；`local_protect` 可临时锁在在线
 - **机密抽屉**：切云端前把之前的对话与机密文件收进 `worlds/default/机密抽屉/`，`用户画像-私密.md` 不预加载、本地需要时自己读，云端禁止打开该目录；没配本地模型则整个抽屉不启用
 - **闹钟带模型**：`plan_next` 可指定到点用 `local` / `cloud`，定时器触发前先切过去
 - **联网搜索**：`web_search` 走 TinyFish keyless，免 API Key

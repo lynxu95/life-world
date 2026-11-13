@@ -69,7 +69,8 @@ perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })
 - `life-world.json` 的 `models.local` / `models.cloud` 是热切换的两个目标，写 `provider/model`。
 - provider 和 API Key 在 `~/.pi/agent/models.json`（在线模型也可以用 `/login` 内置 provider）。
 - 看板「模型」面板可以直接改本地 / 在线 / 分身 / 辅助感知；改完保存。
-- 角色可以自己 `switch_model({ target: "local"|"cloud", reason })`；脚本会在模型无响应时自动兜底。
+- 角色可以自己 `switch_model({ target: "local"|"cloud", reason })`；脚本会在模型无响应时自动兜底（本地保护开启时不会往本地掉）。
+- 要打游戏 / 跑占显存的东西时开看板「模型设置 → 本地保护」，或让角色 `local_protect({ enabled: true })`：锁定期间只能用在线，闹钟标签不变、执行时改道。
 - 辅助感知：`multimodal.model`（推荐 `dashscope/qwen3.8-omni-flash`），留空即停用；只补主模型缺的能力（视频 / 音频，或主模型不支持图片时的图片）。
 
 ```json

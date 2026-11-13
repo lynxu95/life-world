@@ -135,6 +135,7 @@ const CONTROL_FILE = join(ROOT, "control.json")
 const CONTROL_DIR = join(ROOT, "control")
 const ACK_DIR = join(ROOT, "control-acks")
 const MODEL_MODE_FILE = join(ROOT, "model-mode.json")
+const LOCAL_LOCK_FILE = join(ROOT, "local-lock.json")
 const safeRoleKey = (rk: string) => rk.replace(/[^A-Za-z0-9_.-]/g, "_")
 const controlAckFile = (id: string, rk: string) => join(ACK_DIR, `${id}-${safeRoleKey(rk)}.json`)
 const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.json")
@@ -647,6 +648,8 @@ const WAKE_STATE = join(ROOT, ".wake-context.json")
 function wakeContextAllowed(prefer?: string): boolean {
   const o = config().models
   if (!o.local) return true // 纯云端部署：本来就没有可切换的本地，抽屉也不启用
+  // 本地保护：锁定时这一轮最后一定在云端跑，跨窗口原文一律不喂
+  if (localLockOn()) return false
   const cur = lastCtx ? modelIdOf(lastCtx) : ""
   const actual = prefer === "cloud" ? "cloud" : prefer === "local" ? "local" : (cur === o.local ? "local" : "cloud")
   return actual === "local"
@@ -1512,7 +1515,15 @@ function mediaTypeOf(path: string, kind?: string): "image" | "voice" | "file" {
 function delegate(task: string, model?: string): Promise<string> {
   return new Promise((resolvePromise) => {
     if (DEPTH >= 1) { resolvePromise("子代理不能再开子代理。"); return }
-    const m = model || config().subagent.model || "deepseek-flash"
+    let m = model || config().subagent.model || "deepseek-flash"
+    // 本地保护模式：子代理也不许跑本地，默认分身在本地就强制换在线
+    if (localLockOn()) {
+      const c = config().models
+      if (c.local && m === c.local) {
+        if (!c.cloud) { resolvePromise("本地保护模式开着，但没配在线模型，子代理跑不了。"); return }
+        m = c.cloud
+      }
+    }
     const system = "你是一个被主 agent 调用的子代理。只完成给定的任务，输出可直接使用的结果；不要闲聊，不要调用 reach_out，不要开新的子代理。"
     const args = ["-p", "--model", m, "--no-session", "--no-skills", "--no-extensions", "--no-context-files", "--system-prompt", system, task]
     const child = spawn(process.env.PI_BIN || "pi", args, { env: { ...process.env, LIFE_WORLD_DEPTH: String(DEPTH + 1), LIFE_WORLD_ROLE: "subagent" }, stdio: ["ignore", "pipe", "pipe"] })
@@ -1693,10 +1704,14 @@ function skippedLine(skipped?: Array<{ scheduled: string; note: string }>, max =
 async function switchForAlarm(alarm: Alarm): Promise<void> {
   if (!alarm.model) return
   const c = config().models
-  const target = alarm.model === "local" ? c.local : alarm.model === "cloud" ? c.cloud : ""
+  // 本地保护模式：闹钟上写的是 local 也照旧留档，但这一跳改走在在线模型上
+  const locked = localLockOn()
+  const want = alarm.model === "local" ? (locked ? "cloud" : "local") : alarm.model === "cloud" ? "cloud" : ""
+  const target = want === "local" ? c.local : want === "cloud" ? c.cloud : ""
   if (!target || !lastCtx) return
   if (modelIdOf(lastCtx) === target) return
-  const result = await switchTo(lastCtx, target, `闹钟任务：${alarm.note.slice(0, 20)}`)
+  const why = locked && alarm.model === "local" ? "（本地保护模式，改用在线）" : ""
+  const result = await switchTo(lastCtx, target, `闹钟任务：${alarm.note.slice(0, 20)}${why}`)
   log(`alarm model · ${result}`)
 }
 
@@ -1899,11 +1914,11 @@ async function tick(): Promise<void> {
       if (!saved) continue
       const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
       const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
-      const wc = wakeSuffix(a.model)
-      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n等某个任务跑完就用 bg_run({ command, notify: true })，跑完会叫醒你；需要同步陪着他时才用 heartbeat。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}` + wc.text
-      const sentOk = a.model
-        ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
-        : sendTime(text)
+      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n等某个任务跑完就用 bg_run({ command, notify: true })，跑完会叫醒你；需要同步陪着他时才用 heartbeat。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
+      // 先切模型、再按实际模型取跨窗口上下文：切不过去时不会把本地原文发给云端
+      if (a.model) await switchForAlarm(a).catch((e) => log(`alarm switch failed ${String(e)}`))
+      const wc = wakeSuffix(currentModelPref())
+      const sentOk = sendTime(text + wc.text)
       if (!sentOk) {
         // 发不出去就把 active 回滚成 pending，否则下轮过滤会跳过它、这条活动永远醒不来
         log("alarm send failed, rollback to pending")
@@ -1961,11 +1976,10 @@ async function tick(): Promise<void> {
           const maxMin = heartbeatLimitMinutes()
           const timeUp = (Date.now() - startedMs) / 1000 + everySec0 > maxMin * 60
           const willContinue = seq0 < 60 && !timeUp
-          const wc = wakeSuffix(a.model)
-          const hbText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null)) + wc.text
-          const hbSent = a.model
-            ? await switchForAlarm(a).then(() => sendTime(hbText)).catch((e) => { log(`heartbeat switch failed ${String(e)}`); return sendTime(hbText) })
-            : sendTime(hbText)
+          const baseText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null))
+          if (a.model) await switchForAlarm(a).catch((e) => log(`heartbeat switch failed ${String(e)}`))
+          const wc = wakeSuffix(currentModelPref())
+          const hbSent = sendTime(baseText + wc.text)
           if (!hbSent) { log("heartbeat send failed, retry next tick"); continue }
           if (wc.nextAt) commitWakeContext(wc.nextAt)
           withWorldLock(() => {
@@ -2054,7 +2068,7 @@ async function tick(): Promise<void> {
       if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "短期印象整理")
         log(`short impression · switch model · ${r}`)
-        if (r.startsWith("切不过去")) log("short impression · 本地不可用，按当前模型继续")
+        if (!r.startsWith("已切到")) log(`short impression · 没切成本地，按当前模型继续（${r}）`)
       }
       // 整份重写是破坏性的：先留一份 .prev，模型写空/写一半还能回滚
       try { if (existsSync(SHORT_IMPRESSION_FILE)) copyFileSync(SHORT_IMPRESSION_FILE, `${SHORT_IMPRESSION_FILE}.prev`) } catch { /* ignore */ }
@@ -2072,7 +2086,7 @@ async function tick(): Promise<void> {
       if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "每日印象整理")
         log(`impression · switch model · ${r}`)
-        if (r.startsWith("切不过去")) log("impression · 本地不可用，按当前模型继续")
+        if (!r.startsWith("已切到")) log(`impression · 没切成本地，按当前模型继续（${r}）`)
       }
       if (sendTime(impressionPrompt(impCfg))) updateWorld((s) => { s.lastImpression = today })
       else log("impression · send failed, will retry")
@@ -2592,6 +2606,11 @@ async function modelUp(id: string, ctx?: any): Promise<boolean> {
 }
 
 async function switchTo(ctx: any, target: string, reason: string): Promise<string> {
+  // 本地保护模式：只能用在线，本地一律拒绝（闹钟标签不动，执行时才改道）
+  if (localLockOn()) {
+    const lk = config().models
+    if (lk.local && target === lk.local) return "本地保护模式开着：只能用在线模型；要切回本地先 local_protect({ enabled: false })"
+  }
   // 群聊强制云端：任何路径都不许把群会话切到别的模型
   if (CHANNEL === "group") {
     const g = config().models
@@ -2632,9 +2651,19 @@ async function switchTo(ctx: any, target: string, reason: string): Promise<strin
 async function ensureModelAlive(ctx: any): Promise<void> {
   if (CHANNEL === "group") return
   const o = config().models
-  if (!o.autoFailover || !o.local || !o.cloud) return
+  if (!o.local || !o.cloud) return
   const cur = modelIdOf(ctx)
   if (!cur || (cur !== o.local && cur !== o.cloud)) return
+  // 本地保护：不管 autoFailover 开没开，锁着就必须待在在线；
+  // 在线挂了也不往本地掉（宁可等它恢复），否则等于自己断电
+  if (localLockOn()) {
+    if (cur === o.local) {
+      const r = await switchTo(ctx, o.cloud, "本地保护模式")
+      log(`local-protect · ${r}`)
+    }
+    return
+  }
+  if (!o.autoFailover) return
   if (failingOver) return
   if (Date.now() - lastSwitch.at < o.cooldownMs) return
   failingOver = true
@@ -2691,6 +2720,41 @@ function modelKind(id: string): "local" | "cloud" | "other" {
   if (o.local && id === o.local) return "local"
   if (o.cloud && id === o.cloud) return "cloud"
   return "other"
+}
+
+/** 当前实际模型落在哪一档：wakeSuffix 用它判断能不能喂其他窗口原文 */
+function currentModelPref(): "local" | "cloud" | undefined {
+  const o = config().models
+  if (!o.local) return undefined
+  const cur = lastCtx ? modelIdOf(lastCtx) : ""
+  if (!cur) return undefined
+  return cur === o.local ? "local" : "cloud"
+}
+
+/** 本地保护模式：开着的时候只能用在线模型；闹钟上的 local 标签不动，执行时改走在线 */
+interface LocalLockState { enabled: boolean; at?: string; by?: string; reason?: string }
+function readLocalLock(): LocalLockState {
+  // 文件存在但读不出来时按「开着」处理：宁可锁死也不要在游戏/渲染时被切回本地
+  if (!existsSync(LOCAL_LOCK_FILE)) return { enabled: false }
+  try {
+    const v = JSON.parse(readFileSync(LOCAL_LOCK_FILE, "utf8")) as LocalLockState
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true }
+    return {
+      enabled: typeof v.enabled === "boolean" ? v.enabled : true,
+      at: typeof v.at === "string" ? v.at : undefined,
+      by: typeof v.by === "string" ? v.by : undefined,
+      reason: typeof v.reason === "string" ? v.reason : undefined,
+    }
+  } catch { return { enabled: true } }
+}
+function localLockOn(): boolean { return readLocalLock().enabled }
+function writeLocalLock(enabled: boolean, reason = "", by = ROLE): void {
+  atomicWrite(LOCAL_LOCK_FILE, JSON.stringify({
+    enabled,
+    at: new Date().toISOString(),
+    by,
+    reason: String(reason || "").slice(0, 200),
+  }, null, 2))
 }
 
 let lastModeText = ""
@@ -3048,6 +3112,11 @@ async function mediaDataUrl(path: string, kind: MediaKind, outDir: string): Prom
 async function auxPerceiveModel(): Promise<{ id: string; url: string; headers: Record<string, string> } | null> {
   const mm = config().multimodal
   if (!mm.enabled || !mm.model) return null
+  // 本地保护模式：辅助感知也别打本地模型（会抢显存）
+  if (localLockOn()) {
+    const local = config().models.local
+    if (local && mm.model === local) return null
+  }
   const ref = parseModelRef(mm.model)
   if (!ref) return null
   let model: any = null
@@ -3192,7 +3261,7 @@ export default function (pi: ExtensionAPI) {
       const imp = config().memory.impression
       if (o.local && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "手动印象整理")
-        if (r.startsWith("切不过去")) { writeAck(c.id, { ok: false, msg: `本地模型没切过去：${r}` }); return }
+        if (!r.startsWith("已切到")) { writeAck(c.id, { ok: false, msg: `本地模型没切过去：${r}` }); return }
       }
       const scope = String(c.scope || "long")
       const wc = wakeSuffix()
@@ -3281,6 +3350,12 @@ export default function (pi: ExtensionAPI) {
     const o = config().models
     if (!o.local) return
     const id = `${event?.model?.provider}/${event?.model?.id}`
+    // 本地保护：手动/别处切到本地也立刻扳回在线，防止断电式的自我断线
+    if (localLockOn() && id === o.local && o.cloud) {
+      const r = await switchTo(ctx, o.cloud, "本地保护模式")
+      log(`local-protect revert · ${r}`)
+      return
+    }
     if (id === o.local) closeDrawer(ctx)
     else openDrawer(ctx)
   })
@@ -4078,6 +4153,46 @@ export default function (pi: ExtensionAPI) {
     },
   })
 
+  // —— 本地保护模式：临时锁在在线模型 ——
+  if (CHANNEL !== "group") addTool(pi, {
+    name: "local_protect",
+    label: "Local protect",
+    description: "本地保护模式：开着的时候只能用在线模型。适合要打游戏、跑占显存的软件，或者做图先把本地让出来的时候——开了之后自己不会被切回本地、不会断线。闹钟上的 local 标签不改，执行时自动改走在线。不传 enabled 就是查状态。",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: { type: "boolean", description: "true 打开 / false 关闭；省略则查状态" },
+        reason: { type: "string", description: "为什么开（写一句，看板会显示）" },
+      },
+    },
+    async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+      const o = config().models
+      const cur = modelIdOf(ctx) || ""
+      const kind = modelKind(cur)
+      if (params?.enabled === undefined) {
+        const l = readLocalLock()
+        const when = l.at && Number.isFinite(Date.parse(l.at)) ? `${isoLocal(new Date(l.at))} 开启` : ""
+        return ok(`本地保护模式：${l.enabled ? `开（${when}${l.reason ? `，${l.reason}` : ""}）` : "关"}\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
+      }
+      const on = params.enabled === true
+      if (on) {
+        if (!o.cloud) return ok("开不了：life-world.json 里没配 models.cloud（在线模型）。")
+        // 先切成功再落锁：切不过去就别把门锁上，否则会卡在本地又切不走
+        if (o.local && cur === o.local) {
+          const r = await switchTo(ctx, o.cloud, "开启本地保护模式")
+          if (!r.startsWith("已切到")) return ok(`没开成：${r}`)
+        }
+        try { writeLocalLock(true, String(params.reason || ""), roleKey) }
+        catch (e) { return ok(`已切到在线，但锁没写上：${String(e)}。请重试或检查 ${ROOT} 的写权限。`) }
+        writeStatus(); writeModelMode()
+        return ok("本地保护模式已开：现在只能用在线模型，闹钟里写着 local 的也会改走在线（标签不变）。")
+      }
+      writeLocalLock(false, String(params.reason || ""), roleKey)
+      writeStatus()
+      return ok("本地保护模式已关：可以切回本地了。")
+    },
+  })
+
   // 群聊强制云端，不给切换工具（避免群成员把 home/私聊一起切走）
   if (CHANNEL !== "group") addTool(pi, {
     name: "switch_model",
@@ -4104,7 +4219,7 @@ export default function (pi: ExtensionAPI) {
           : "（没有活跃会话）"
       }
       if (!raw || raw === "status") {
-        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${o.autoFailover ? "开" : "关"}`)
+        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${o.autoFailover ? "开" : "关"}\n本地保护：${localLockOn() ? "开（只能用在线）" : "关"}`)
       }
       if (!o.local && !o.cloud) return ok("还没配 models.local / models.cloud，先在 life-world.json 里配好。")
       const target = raw === "local" ? o.local : raw === "cloud" ? o.cloud : raw
@@ -4326,6 +4441,9 @@ export default function (pi: ExtensionAPI) {
             if (r.error) return ok(r.error)
             mediaUrl = r.url || ""
             warning = r.warning || ""
+          }
+          if (localLockOn() && config().multimodal.model && config().models.local && config().multimodal.model === config().models.local) {
+            return ok("本地保护模式开着：辅助感知配的是本地模型。要用它先 local_protect({ enabled: false })，或把 multimodal.model 换成在线模型。")
           }
           const aux = await auxPerceiveModel()
           if (!aux) return ok("辅助感知模型没配好（multimodal.model 或 provider 的 baseUrl 缺失）。")

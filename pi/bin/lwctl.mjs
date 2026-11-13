@@ -303,9 +303,22 @@ function cmdTail(which, n) {
   return true
 }
 const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`
+/** 和扩展里的默认值保持一致：配置只写了一半时，别一边认为有 cloud、一边认为没有 */
+const DEFAULT_CLOUD = "deepseek/deepseek-flash"
 function cmdRestart(target) {
   const c = models()
-  const model = process.env.LIFE_WORLD_MODEL || c.local || ""
+  const cloud = String(c.cloud || DEFAULT_CLOUD)
+  let model = process.env.LIFE_WORLD_MODEL || c.local || ""
+  // 本地保护模式：常驻窗口直接用在线模型启动，别先起来再切。
+  // 锁文件存在但读不出来时按「开着」处理（和扩展一样 fail-closed）。
+  try {
+    if (existsSync(join(ROOT, "local-lock.json"))) {
+      let locked = true
+      try { locked = JSON.parse(readFileSync(join(ROOT, "local-lock.json"), "utf8")).enabled !== false } catch { /* 坏文件按开着 */ }
+      if (locked) model = cloud  // 锁定期间一律在线，连 shell 里导出的本地模型也不认
+      else model = process.env.LIFE_WORLD_MODEL || c.local || ""
+    }
+  } catch { /* 读不了就照旧 */ }
   if (model && !/^[A-Za-z0-9._:/@-]+$/.test(model)) {
     console.error(`模型名不合法，拒绝执行：${model}`)
     return false

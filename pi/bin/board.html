@@ -497,6 +497,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         </div>
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
         <div class="hint">辅助感知只补主模型缺的能力（视频/音频，或主模型不支持图片时）；留空即停用，推荐 qwen3.8-omni-flash。</div>
+        <label class="check" style="margin-top:10px"><input type="checkbox" id="lp-enabled">本地保护（只用在线）</label>
+        <div class="hint" id="lp-hint">开着的时候不会切回本地，写着 local 的闹钟执行时也改走在线。</div>
         <div class="hint" id="mode-hint"></div>
       </section>
         <section>
@@ -763,6 +765,30 @@ function renderBoardAddr(b) {
 }
 let boardTouched = false
 
+function renderLocalLock(l, cloudModel) {
+  const on = !!(l && l.enabled)
+  const box = $("lp-enabled")
+  if (box) {
+    box.disabled = !cloudModel && !on
+    box.title = !cloudModel && !on ? "没配在线模型，开了也切不过去" : ""
+  }
+  if (box && document.activeElement !== box) box.checked = on
+  const hint = $("lp-hint")
+  if (!hint) return
+  if (on) {
+    const at = l.at && Number.isFinite(Date.parse(l.at)) ? new Date(l.at).toLocaleString("zh-CN", { hour12: false }) : ""
+    hint.textContent = `已开启${at ? ` · ${at}` : ""}${l.reason ? ` · ${l.reason}` : ""}——只能用在线模型`
+  } else {
+    hint.textContent = cloudModel ? "关着：可以自由在本地 / 在线之间切换。" : "没配在线模型（models.cloud），这个开关用不了。"
+  }
+}
+$("lp-enabled")?.addEventListener("change", async () => {
+  const enabled = $("lp-enabled").checked
+  const r = await postJson("/api/local-lock", { enabled, reason: "看板手动" }).catch(() => null)
+  if (r && r.ok) renderLocalLock({ enabled, at: new Date().toISOString(), reason: "看板手动" }, LAST_MODEL_INFO.cloud)
+  else { $("lp-enabled").checked = !enabled; $("lp-hint").textContent = "保存失败，稍后再试" }
+})
+
 async function loadOverview() {
   try {
     const d = await getJson("/api/overview")
@@ -785,6 +811,7 @@ async function loadOverview() {
       fillSelect($("m-vision"), (d.multimodal && d.multimodal.model) || "", d.available || [], "（不启用）")
     }
     if (Array.isArray(d.available)) mLoaded = true
+    renderLocalLock(d.localLock, (d.models && d.models.cloud) || "deepseek/deepseek-flash")
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
       $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`

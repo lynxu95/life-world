@@ -44,7 +44,7 @@
 | Hebbian 联想 | 共同召回自动连边，检索时一跳扩散带出关联记忆 |
 | 印象整理 | 每天把近期对话/日记归纳成 `identity/印象.md`，本地/云端都注入 |
 | 记忆星图 | 看板 3D 星图：全屏、星云背景随旋转、印象连线回真实来源 |
-| 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换 |
+| 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换；`local_protect` 本地保护模式（临时只用在线） |
 | 机密抽屉 | 切云端前收起前文、云端禁读，切回本地恢复 |
 | 主动关怀 | 随机想起、安静时段、早晨天气 |
 | QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小；群会话闲置回收 |
@@ -299,7 +299,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 
 - 角色自己切：`switch_model({ target: "local"|"cloud"|"provider/model", reason })`；
 - 人能切：`lwctl` 交互菜单 / `lwctl set qq cloud` / 看板按钮；
-- 脚本兜底：模型无响应立即切另一个；工具连续失败两次从本地切云端；每轮探活（`autoFailover`）；
+- 脚本兜底：模型无响应立即切另一个；工具连续失败两次从本地切云端；每轮探活（`autoFailover`）；开启本地保护时不往本地掉；
 - 切换记录写进会话，恢复会话时保留；
 - 规范文件 `worlds/default/identity/模型使用规范.md`（建议 ≤500 字）会注入 system，说明什么时候切、切换礼仪。
 
@@ -482,7 +482,7 @@ home（后台那个「总脑」）在日程、心跳、想起你、早上这些�
 
 ## 工具
 
-`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `web_search`
+`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `local_protect` · `web_search`
 
 - `web_search` 走 TinyFish keyless，免 API Key；
 - `delegate` 起独立 `pi -p` 子进程，深度 1 层；

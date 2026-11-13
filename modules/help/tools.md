@@ -32,6 +32,7 @@
 ## 模型
 - 切换：`switch_model({ target: "local|cloud", reason: "为什么切" })`
 - 查状态：`switch_model()`，或 `switch_model({ target: "status" })`
+- 本地保护：`local_protect({ enabled: true|false, reason: "打游戏" })`（不传参数查状态）
 - 子代理：`delegate({ task: "完整任务、输入和验收标准", model: "provider/model（可选）" })`
 - gal 选项：`gal_choice({ question: "镜头停在哪，一句", options: ["…", "…"] })`
 
