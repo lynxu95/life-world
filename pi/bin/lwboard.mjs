@@ -404,7 +404,8 @@ function memoryGraph(limit = 400) {
     ...parseImpressions(SHORT_IMPRESSION_FILE).items.map((it) => ({ ...it, short: true })),
   ].map((it, i) => {
     const dayMatch = String(it.meta || "").match(/最后验证：\s*(\d{4}-\d{2}-\d{2})/)
-    return { id: `imp-${i}`, kind: "impression", short: it.short, t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: it.short ? 0.9 : 1.2 }
+    // 短期印象是独立的一种星（kind: short），不和长期印象混在一圈
+    return { id: it.short ? `simp-${i}` : `imp-${i}`, kind: it.short ? "short" : "impression", short: it.short, t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: it.short ? 0.9 : 1.2 }
   })
   // 印象的来源节点：按来源日期从全量消息里取，不用「全站 top5」硬凑
   const impTargets = new Map()

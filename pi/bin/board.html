@@ -357,10 +357,12 @@ input[type=checkbox]{accent-color:var(--accent)}
 /* —— 印象 —— */
 .imp-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
 .imp-tag{display:inline-block;font-size:10px;padding:0 4px;margin-right:5px;border-radius:4px;background:var(--accent-soft);color:var(--accent)}
-.imp-group{font-size:11px;letter-spacing:.12em;color:var(--faint);margin:12px 0 6px;text-transform:uppercase}
+.imp-group{grid-column:1/-1;font-size:11px;letter-spacing:.12em;color:var(--faint);margin:14px 0 2px;text-transform:uppercase;display:flex;align-items:center;gap:8px}
+.imp-group::after{content:"";flex:1;height:1px;background:var(--line)}
 .imp-group:first-child{margin-top:0}
 .imp-card{border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 12px;
   background:var(--panel-2);min-width:0;border-left:2px solid var(--accent-2)}
+.imp-card.short{border-left-color:#b8860b}
 .imp-card .subj{font-family:var(--mono);font-size:11px;color:var(--accent)}
 .imp-card .body{margin-top:6px;line-height:1.62;font-size:13px}
 .imp-card .meta{font-size:10.5px;color:var(--faint);margin-top:8px;line-height:1.5}
@@ -1470,12 +1472,14 @@ buildClouds()
 
 function nodeColor(n) {
   if (n.kind === "identity") return "#e8fbff"
-  if (n.kind === "impression") return n.short ? "#b8860b" : "#fbbf24"
+  if (n.kind === "short") return "#c4b5fd"
+  if (n.kind === "impression") return "#fbbf24"
   if (n.kind === "diary") return "#f59e0b"
   return n.role === "user" ? "#4fc3f7" : "#2dd4bf"
 }
 function nodeVisible(n) {
   if (n.kind === "identity") return BRAIN.filters.doc
+  if (n.kind === "short") return BRAIN.filters.imp
   if (n.kind === "impression") return BRAIN.filters.imp
   if (n.kind === "diary") return BRAIN.filters.diary
   return BRAIN.filters.mem
@@ -1491,7 +1495,7 @@ function layoutBrain() {
     const h = hashStr(node.id)
     const theta = ((h % 1000) / 1000) * Math.PI * 2
     const phi = (((h >> 10) % 1000) / 1000) * Math.PI
-    const r = node.kind === "impression" ? 2.2 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : 9 + ((h >> 20) % 5)
+    const r = node.kind === "impression" ? 2.2 : node.kind === "short" ? 12 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : 9 + ((h >> 20) % 5)
     pos.set(node.id, { x: Math.cos(theta) * Math.sin(phi) * r, y: Math.cos(phi) * r, z: Math.sin(theta) * Math.sin(phi) * r })
   })
   // 印象固定在中心一圈，避免互相挤叠
@@ -1499,6 +1503,12 @@ function layoutBrain() {
   imps.forEach((node, i) => {
     const a = (i / Math.max(1, imps.length)) * Math.PI * 2 - Math.PI / 2
     pos.set(node.id, { x: Math.cos(a) * 6.8, y: i % 2 === 0 ? 2.2 : -2.2, z: Math.sin(a) * 6.8 })
+  })
+  // 短期印象单独一圈（外侧）：最近 24 小时闪着的念头
+  const shorts = nodes.filter((node) => node.kind === "short")
+  shorts.forEach((node, i) => {
+    const a = (i / Math.max(1, shorts.length)) * Math.PI * 2 - Math.PI / 4
+    pos.set(node.id, { x: Math.cos(a) * 10.4, y: i % 2 === 0 ? 3.4 : -3.4, z: Math.sin(a) * 10.4 })
   })
   // 自动注入的人格文档放在最内圈：星图中心最亮的几颗星
   const docs = nodes.filter((node) => node.kind === "identity")
@@ -1530,7 +1540,7 @@ function layoutBrain() {
       disp[b].x -= dx; disp[b].y -= dy; disp[b].z -= dz
     }
     for (let i = 0; i < arr.length; i++) {
-      if (nodes[i].kind === "impression" || nodes[i].kind === "identity") continue
+      if (nodes[i].kind === "impression" || nodes[i].kind === "short" || nodes[i].kind === "identity") continue
       arr[i].x = arr[i].x * 0.98 + disp[i].x
       arr[i].y = arr[i].y * 0.98 + disp[i].y
       arr[i].z = arr[i].z * 0.98 + disp[i].z
@@ -1620,7 +1630,7 @@ function drawPulses(ctx, idx, proj) {
     const special = q.kind !== "recall"
     const tailP = Math.max(0, q.p - (special ? 0.12 : 0.08))
     const tailX = pa.x + (pb.x - pa.x) * tailP, tailY = pa.y + (pb.y - pa.y) * tailP
-    const color = q.kind === "impression" ? "251,191,36" : q.kind === "diary" ? "245,158,11" : "94,234,212"
+    const color = q.kind === "short" ? "196,181,253" : q.kind === "impression" ? "251,191,36" : q.kind === "diary" ? "245,158,11" : "94,234,212"
     ctx.save()
     ctx.globalCompositeOperation = "lighter"
     ctx.strokeStyle = `rgba(${color},.85)`
@@ -1787,7 +1797,7 @@ function drawBrain(t) {
   }
   drawPulses(ctx, idx, proj)
   const order = BRAIN.nodes.map((node, i) => i).filter((i) => nodeVisible(BRAIN.nodes[i])).sort((a, b) => {
-    const rank = (n) => n.kind === "identity" ? 3 : n.kind === "impression" ? 2 : n.kind === "diary" ? 1 : 0
+    const rank = (n) => n.kind === "identity" ? 3 : (n.kind === "impression" || n.kind === "short") ? 2 : n.kind === "diary" ? 1 : 0
     return (rank(BRAIN.nodes[a]) - rank(BRAIN.nodes[b])) || (proj[b].z - proj[a].z)
   })
   let labels = 0
@@ -1797,10 +1807,32 @@ function drawBrain(t) {
     const queryDim = query && !hit
     const focusDim = focus && !focus.has(node.id)
     const dimAlpha = queryDim ? 0.18 : focusDim ? 1 - 0.82 * focusMix : 1
-    const base = node.kind === "identity" ? 8.5 : node.kind === "impression" ? 7 : node.kind === "diary" ? 4 : 1.8 + Math.min(3, (node.score || 0) * 2)
+    const base = node.kind === "identity" ? 8.5 : node.kind === "impression" ? 7 : node.kind === "short" ? 5.5 : node.kind === "diary" ? 4 : 1.8 + Math.min(3, (node.score || 0) * 2)
     const r = Math.max(1.2, base * p.s)
     ctx.globalAlpha = dimAlpha
-    if (node.kind === "impression") {
+    if (node.kind === "short") {
+      // 短期印象：淡紫四角星，缓慢呼吸——最近 24 小时闪着的念头
+      const breathe = reduceMotion ? 1 : 1 + 0.12 * Math.sin(t * 0.0022 + i)
+      const gr = r * 3.2 * breathe
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, gr)
+      g.addColorStop(0, "rgba(245,242,255,.95)")
+      g.addColorStop(0.38, "rgba(196,181,253,.5)")
+      g.addColorStop(1, "rgba(167,139,250,0)")
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, gr, 0, Math.PI * 2); ctx.fill()
+      const spin = reduceMotion ? 0 : t * 0.0004
+      ctx.beginPath()
+      for (let k = 0; k < 4; k++) {
+        const ang = k * Math.PI / 2 + spin
+        const outer = r * 2.0, inner = r * 0.5
+        ctx.moveTo(p.x + Math.cos(ang - 0.26) * inner, p.y + Math.sin(ang - 0.26) * inner)
+        ctx.lineTo(p.x + Math.cos(ang) * outer, p.y + Math.sin(ang) * outer)
+        ctx.lineTo(p.x + Math.cos(ang + 0.26) * inner, p.y + Math.sin(ang + 0.26) * inner)
+        ctx.closePath()
+      }
+      ctx.fillStyle = "#ece7ff"; ctx.fill()
+      ctx.strokeStyle = "rgba(196,181,253,.85)"; ctx.lineWidth = 0.8; ctx.stroke()
+      ctx.fillStyle = "#f7f4ff"; ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.5, 0, Math.PI * 2); ctx.fill()
+    } else if (node.kind === "impression") {
       const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 2.8)
       g.addColorStop(0, "rgba(255,238,180,.95)")
       g.addColorStop(0.42, "rgba(251,191,36,.55)")
@@ -1845,11 +1877,11 @@ function drawBrain(t) {
       ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.5
       ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke()
     }
-    const showLabel = BRAIN.hover === node.id || node.kind === "impression" || hit || BRAIN.selected === node.id || (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
+    const showLabel = BRAIN.hover === node.id || node.kind === "impression" || node.kind === "short" || hit || BRAIN.selected === node.id || (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
     if (showLabel && !queryDim) {
       labels++
-      const text = node.kind === "identity" ? node.subject : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
-      ctx.font = node.kind === "identity" ? "600 11px system-ui,sans-serif" : node.kind === "impression" ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
+      const text = node.kind === "identity" ? node.subject : node.kind === "short" ? `短·${node.subject}` : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
+      ctx.font = (node.kind === "identity" || node.kind === "impression" || node.kind === "short") ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
       let lx = p.x, ly = p.y - r - 6
       if (node.kind === "identity") {
         const dx = p.x - w / 2, dy = p.y - h / 2
@@ -1857,6 +1889,8 @@ function drawBrain(t) {
         lx = p.x + (dx / len) * (r * 1.9 + 8)
         ly = p.y + (dy / len) * (r * 1.9 + 8)
         ctx.textAlign = dx < 0 ? "right" : "left"
+      } else if (node.kind === "short") {
+        lx = p.x; ly = p.y - r - 10; ctx.textAlign = "center"
       } else if (node.kind === "impression") {
         const dx = p.x - w / 2, dy = p.y - h / 2
         const len = Math.hypot(dx, dy) || 1
@@ -1876,7 +1910,7 @@ function drawBrain(t) {
         ctx.strokeStyle = "rgba(190,235,255,.28)"; ctx.lineWidth = 1; ctx.stroke()
       }
       ctx.lineWidth = 3; ctx.strokeStyle = "rgba(5,6,11,.85)"; ctx.strokeText(text, lx, ly)
-      ctx.fillStyle = node.kind === "identity" ? "#dff8ff" : node.kind === "impression" ? "#fde68a" : node.kind === "diary" ? "#fbbf24" : "#cbd5e1"
+      ctx.fillStyle = node.kind === "identity" ? "#dff8ff" : node.kind === "short" ? "#ddd6fe" : node.kind === "impression" ? "#fde68a" : node.kind === "diary" ? "#fbbf24" : "#cbd5e1"
       ctx.fillText(text, lx, ly)
     }
     ctx.globalAlpha = 1
@@ -1912,6 +1946,8 @@ function showBrainDetail(n) {
   const el = $("brain-detail")
   if (n.kind === "identity") {
     el.innerHTML = `<h4>注入文档 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>文件：${esc2(n.file || "")}</span><span>更新：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span></div>`
+  } else if (n.kind === "short") {
+    el.innerHTML = `<h4>短期印象 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>最近 24 小时 · 每天 05:00 重写</span><span>${esc2(n.meta || "")}</span></div>`
   } else if (n.kind === "impression") {
     el.innerHTML = `<h4>印象 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>${esc2(n.meta || "")}</span></div>`
   } else if (n.kind === "diary") {
@@ -2088,10 +2124,10 @@ if (typeof ResizeObserver !== "undefined") {
 window.addEventListener("resize", resizeBrain)
 requestAnimationFrame(brainLoop)
 
-function impCard(it) {
+function impCard(it, short = false) {
   const conf = /置信度：\s*(高|中|低)/.exec(it.meta || "")
   const cls = conf ? (conf[1] === "高" ? "conf-high" : conf[1] === "中" ? "conf-mid" : "conf-low") : "conf-low"
-  const card = document.createElement("div"); card.className = "imp-card"
+  const card = document.createElement("div"); card.className = short ? "imp-card short" : "imp-card"
   card.innerHTML = `<div class="subj">[${esc2(it.subject)}]</div><div class="body">${esc2(it.text)}</div>
     <div class="meta">${conf ? `<span class="conf ${cls}">${esc2(conf[1])}</span>` : ""}${esc2(it.meta || "")}</div>`
   return card
@@ -2105,7 +2141,7 @@ async function loadImpressions() {
     if (!longItems.length && !shortItems.length) { el.innerHTML = '<div class="muted">还没有印象；等 05:00 或点「整理长期 / 整理短期」。</div>'; return }
     if (shortItems.length) {
       el.insertAdjacentHTML("beforeend", '<div class="imp-group">短期 · 24 小时内</div>')
-      for (const it of shortItems) el.append(impCard(it))
+      for (const it of shortItems) el.append(impCard(it, true))
     }
     if (longItems.length) {
       el.insertAdjacentHTML("beforeend", '<div class="imp-group">长期</div>')
