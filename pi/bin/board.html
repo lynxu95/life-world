@@ -280,13 +280,14 @@ input[type=checkbox]{accent-color:var(--accent)}
 .sub-group{font-size:11px;letter-spacing:.14em;color:var(--faint);margin:12px 0 6px;text-transform:uppercase}
 .sub-group:first-child{margin-top:0}
 .sub-card.beat .sub-head b{color:var(--accent)}
-/* 正在跳的心跳：红色呼吸 + 呼吸圆点，和「会话在忙」同一套语言 */
+/* 正在跳的心跳：卡片、♥ 标题、状态圆点一起按同一拍呼吸 */
 .sub-card.beat.live{border-color:var(--bad);animation:beatGlow 2.2s ease-in-out infinite}
-.sub-card.beat.live .sub-head b{color:var(--bad)}
+.sub-card.beat.live .sub-head b{color:var(--bad);animation:beatBreathe 2.2s ease-in-out infinite}
 .sub-card.beat.live .sub-state{color:var(--bad);display:inline-flex;align-items:center;gap:5px}
-.sub-card.beat.live .sub-state::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--bad);animation:busyPulse 1.4s ease-in-out infinite}
+.sub-card.beat.live .sub-state::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--bad);animation:beatBreathe 2.2s ease-in-out infinite}
 @keyframes beatGlow{0%,100%{box-shadow:0 0 0 1px var(--bad-soft),0 0 8px var(--bad-soft)}50%{box-shadow:0 0 0 1px var(--bad),0 0 16px var(--bad-soft)}}
-@media (prefers-reduced-motion:reduce){.sub-card.beat.live{animation:none}.sub-card.beat.live .sub-state::before{animation:none}}
+@keyframes beatBreathe{0%,100%{opacity:.62}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.sub-card.beat.live,.sub-card.beat.live .sub-head b,.sub-card.beat.live .sub-state::before{animation:none}}
 .sub-card.ended .sub-head b{color:var(--muted);font-weight:500}
 .sub-card.ended .sub-state{color:var(--faint)}
 .sub-head{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
