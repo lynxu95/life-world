@@ -807,7 +807,12 @@ function armAfterglow(round) {
     if (afterglow.seq !== afterglow.userSeq || pi.running) return
     try {
       startTyping()
-      const texts = await pi.promptWithRecovery("【余波】对方还没回你，已经过了一会儿。\n不要假装他说话了，也不要重新打招呼。\n如果上一轮还有没说完的、想补一句解释、或者想问一句怎么不说话——现在补一句；一两句就够。\n如果觉得这会儿不该说、没什么要补的，就只回 [SILENT]。\n直接写正文，不要调用 reach_out。")
+      const texts = await pi.promptWithRecovery([
+        "【余波】对方还没回你，已经过了一会儿。",
+        "不要假装他说话了，也不要重新打招呼。",
+        "有真要补的就说一两句；没有就只回 [SILENT]。",
+        "直接写正文，不要调用 reach_out。",
+      ].join("\n"))
       stopTyping()
       // 生成期间对方回来了：这句余波就作废，别再追着发
       if (afterglow.seq !== afterglow.userSeq) { log("afterglow cancelled · user returned"); return }
