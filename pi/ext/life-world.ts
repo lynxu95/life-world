@@ -3708,13 +3708,9 @@ export default function (pi: ExtensionAPI) {
       const limit = Math.max(1, Math.min(100, Number(params?.limit) || 20))
       const list = readProactive(hours, limit)
       if (!list.length) return ok(`最近 ${hours} 小时没有主动发过东西。`)
-      // 云端模式不念正文：本地发过的私密内容不该进云端上下文
-      const o = config().models
-      const cloudNow = !!(o.local && lastCtx && modelIdOf(lastCtx) !== o.local)
-      if (cloudNow) {
-        const kinds = list.map((r) => (r.kind === "reach" ? "消息" : r.kind === "image" ? "图片" : r.kind === "voice" ? "语音" : r.kind === "file" ? "文件" : r.kind))
-        return ok(`最近 ${hours} 小时主动发过 ${list.length} 条：${kinds.join("、")}。（云端模式不读正文；要看内容请切回本地模型。）`)
-      }
+      // proactive 记录的都是「已经发到 QQ、对方看得到」的内容，云端读到不算新增泄露；
+      // 真正敏感的东西（日记 / 机密抽屉 / 内部思考）本来就不会进这里。
+
       const label = (k: string) => (k === "reach" ? "消息" : k === "image" ? "图片" : k === "voice" ? "语音" : k === "file" ? "文件" : k)
       const lines = list.map((r) => {
         const d = new Date(r.t)

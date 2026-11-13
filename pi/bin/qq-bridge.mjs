@@ -851,14 +851,10 @@ function recentProactiveNote(hours = 12, max = 5) {
     const lines = items.slice(-max).map((r) => {
       const d = new Date(r.t)
       const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
-      // 云端模型不念正文：本地发过的私密内容不该进云端上下文
-      const cfg = readJson(CONFIG_FILE, {})
-      const cloudMode = !!(cfg?.models?.cloud && MODEL === cfg.models.cloud)
-      const body = cloudMode
-        ? `[${label(r.kind)}]`
-        : (r.kind === "reach"
-          ? String(r.text || "").slice(0, 60).replace(/\s+/g, " ")
-          : `[${label(r.kind)}] ${String(r.name || "").slice(0, 40)}${r.text ? `：${String(r.text).slice(0, 40).replace(/\s+/g, " ")}` : ""}`)
+      // 只做展示清洗；这些内容已经发到 QQ，对方看得到，云端读到不算新增泄露
+      const body = r.kind === "reach"
+        ? String(r.text || "").slice(0, 60).replace(/\s+/g, " ")
+        : `[${label(r.kind)}] ${String(r.name || "").slice(0, 40)}${r.text ? `：${String(r.text).slice(0, 40).replace(/\s+/g, " ")}` : ""}`
       return `  ${hm} ${body}`
     })
     return `（你最近主动给他发过：\n${lines.join("\n")}\n）\n`
