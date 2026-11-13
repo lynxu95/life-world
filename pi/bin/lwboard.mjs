@@ -484,7 +484,8 @@ function memoryGraph(limit = 400) {
   // 印象 → 真正的来源日期消息；没有来源就不断线
   for (const im of impressions) {
     for (const t of impTargets.get(im.id) || []) {
-      if (ids.has(t.id)) links.push({ source: im.id, target: t.id, w: 0.55, kind: "impression" })
+      // 短期印象的边单独一种（short）：看板据此走紫色、介于普通与印象之间的脉冲
+      if (ids.has(t.id)) links.push({ source: im.id, target: t.id, w: 0.55, kind: im.kind === "short" ? "short" : "impression" })
     }
   }
   for (const l of identityLinks) links.push(l)

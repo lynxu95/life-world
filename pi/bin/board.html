@@ -1585,19 +1585,30 @@ function resizeBrain() {
 }
 
 let lastPulseAt = 0
+// 脉冲速度：普通召回最快，短期印象居中，长期印象/日记最慢
+function pulseSpeed(kind) {
+  if (kind === "recall") return 0.026 + Math.random() * 0.016
+  if (kind === "short") return 0.019 + Math.random() * 0.010
+  return 0.012 + Math.random() * 0.01
+}
 function maybeSpawnPulse(t) {
   if (reduceMotion) return
   if (t - lastPulseAt < 480) return
   lastPulseAt = t
   if (PULSES.length > 24 || !BRAIN.links.length) return
   const roll = Math.random()
-  const kind = roll < 0.78 ? "recall" : roll < 0.94 ? "impression" : "diary"
+  const kind = roll < 0.74 ? "recall" : roll < 0.87 ? "impression" : roll < 0.95 ? "short" : "diary"
   const vis = new Set(BRAIN.nodes.filter(nodeVisible).map((n) => n.id))
-  const pool = BRAIN.links.filter((l) => l.kind === kind && vis.has(l.source) && vis.has(l.target))
+  let pool = BRAIN.links.filter((l) => l.kind === kind && vis.has(l.source) && vis.has(l.target))
+  // 抽到的那类边恰好没有（比如还没生成短期印象），退回普通边，别让这一拍空转
+  let k = kind
+  if (!pool.length) {
+    k = "recall"
+    pool = BRAIN.links.filter((l) => l.kind === k && vis.has(l.source) && vis.has(l.target))
+  }
   if (!pool.length) return
   const l = pool[Math.floor(Math.random() * pool.length)]
-  const speed = kind === "recall" ? 0.026 + Math.random() * 0.016 : 0.012 + Math.random() * 0.01
-  PULSES.push({ source: l.source, target: l.target, p: 0, speed, kind: l.kind })
+  PULSES.push({ source: l.source, target: l.target, p: 0, speed: pulseSpeed(k), kind: l.kind })
 }
 function burstFrom(id) {
   if (reduceMotion) return
@@ -1605,7 +1616,7 @@ function burstFrom(id) {
   const links = BRAIN.links.filter((l) => (l.source === id || l.target === id) && l.kind !== "identity" && vis.has(l.source) && vis.has(l.target)).slice(0, 14)
   for (const l of links) {
     const forward = l.source === id
-    const speed = l.kind === "recall" ? 0.026 + Math.random() * 0.016 : 0.012 + Math.random() * 0.01
+    const speed = pulseSpeed(l.kind)
     PULSES.push({
       source: forward ? l.source : l.target,
       target: forward ? l.target : l.source,
@@ -1782,6 +1793,9 @@ function drawBrain(t) {
     if (l.kind === "impression") {
       color = `rgba(251,191,36,${(0.24 + (1 - depth) * 0.26) * strength})`
       width = 0.9
+    } else if (l.kind === "short") {
+      color = `rgba(196,181,253,${(0.22 + (1 - depth) * 0.22) * strength})`
+      width = 0.7
     } else if (l.kind === "diary") {
       color = `rgba(245,158,11,${(0.1 + (1 - depth) * 0.15) * strength})`
       width = 0.5
@@ -1791,7 +1805,7 @@ function drawBrain(t) {
     }
     ctx.strokeStyle = color
     ctx.lineWidth = width * (0.7 + 0.3 * strength)
-    if (l.kind === "impression") ctx.setLineDash([3, 4])
+    if (l.kind === "impression" || l.kind === "short") ctx.setLineDash([3, 4])
     ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y)
     ctx.stroke()
     ctx.setLineDash([])
