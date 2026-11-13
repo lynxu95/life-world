@@ -15,6 +15,15 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.7.2] - 2026-11-13
+
+### 修复
+
+- 印象整理任务改用**绝对路径**（`${IMPRESSION_FILE}` / `${SHORT_IMPRESSION_FILE}`）。
+  之前提示词只写 `identity/印象-短期.md`，模型在 ROOT 下执行时会写到
+  `$ROOT/identity/` 而不是 `$ROOT/worlds/default/identity/`，导致短期印象「生成了但没落盘」。
+- `modules/profile-mood.md` 的两处路径也改成完整路径。
+
 ## [1.7.1] - 2026-11-13
 
 ### 新增
