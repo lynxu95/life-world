@@ -636,6 +636,19 @@ async function stopBoard(quiet = false) {
 }
 async function startBoard() {
   const { host, port } = boardSettings()
+  // pid 文件可能丢了（手动删除 / 旧版本没写）：端口上如果有旧看板，先按端口找到并停掉，
+  // 否则新进程会撞 EADDRINUSE，update 时看起来「重启了」其实还是旧代码
+  const stale = readPid(BOARD_PID)
+  if (!stale || !pidAlive(stale)) {
+    const answer = await httpPid(port, host)
+    if (answer > 0 && pidAlive(answer) && pidIsBoard(answer)) {
+      console.log(`发现没有 pid 记录的看板（PID ${answer}），先停掉`)
+      try { process.kill(answer, "SIGTERM") } catch { /* ignore */ }
+      for (let i = 0; i < 25 && pidAlive(answer); i++) await new Promise((r) => setTimeout(r, 200))
+      if (pidAlive(answer)) { try { process.kill(answer, "SIGKILL") } catch { /* ignore */ } }
+      try { unlinkSync(BOARD_PID) } catch { /* ignore */ }
+    }
+  }
   const running = readPid(BOARD_PID)
   if (running && pidAlive(running)) {
     const answer = await httpPid(port, host)
