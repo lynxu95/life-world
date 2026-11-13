@@ -33,9 +33,10 @@
 | 项 | 要求 |
 |---|---|
 | pi | **1.5.0+** |
-| Node | **22.19+**（桥接用全局 WebSocket；build-prompt 用 Node） |
+| Node | **22.19+**（桥接用全局 WebSocket；记忆索引用 `node:sqlite`，要 ≥ 22.13） |
 | OneBot | 任意 OneBot v11 正向 WS 服务端（SnowLuma / NapCat 等；只在跑 QQ 桥接时需要） |
-| 系统 | Linux（tmux 可选；TUI 不是必须） |
+| 系统 | **Linux / macOS / WSL**（原生 Windows 走 WSL；TUI 不是必须） |
+| 常驻 | `tmux`（QQ 桥接和家会话跑在里面；`lwctl start` 一键拉起） |
 | 可选 | `imagemagick` / `ffmpeg`（超 8MB 的 QQ 图片自动缩） |
 
 ## 安装
@@ -61,15 +62,16 @@ cd life-world
 ./pi/install.sh --project   # 项目级：只在 life-world 目录生效
 ```
 
-它做五件事：
+它做这几件事：
 
+0. 先打印环境检查（系统 / Node 版本 / tmux / ffmpeg），缺什么会给出对应平台的安装提示；
 1. 建 `~/.local/share/life-world/{worlds/default,pi-sessions}`；
 2. 把 `data/kaomoji.json` 复制成 `~/.local/share/life-world/pi-kaomoji.json`；
 3. 用 `build-prompt.mjs` 把仓库 `modules/*.md` 拼成 `pi/prompt/world.md`；
 4. 把扩展软链到 pi 的自动发现目录：
    - 全局：`~/.pi/agent/extensions/life-world/index.ts`
    - 项目级：`<仓库>/.pi/extensions/life-world/index.ts`
-5. 把 `browser-*`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs` 复制到 `~/.local/share/life-world/bin/`，并放一份扩展在 `~/.local/share/life-world/ext/`（桥接脚本默认从那里找）。
+5. 把 `browser-*`、`pi-qq-bridge.mjs`、`pi-home-rpc.mjs`、`lwboard.mjs`、三份 `start-{linux,macos,wsl}.sh` 复制到 `~/.local/share/life-world/bin/`，并放一份扩展在 `~/.local/share/life-world/ext/`（桥接脚本默认从那里找）。
 
 **扩展会自己在每轮开始前确保世界规则在 system 里**（`prompt/world.md` 缺失时用 `modules/` 现拼），所以不需要 `--append-system-prompt`，也不需要改 `APPEND_SYSTEM.md`。
 
@@ -209,6 +211,8 @@ lwctl backup --reset               # 彻底删掉快照目录（手动清理用�
 lwctl backups                      # 看最近快照
 lwctl tail [qq|home|debug] [行数]   # 看日志
 lwctl restart [qq|home|all]        # 重启常驻窗口
+lwctl start                        # 起全部常驻（按平台挑 start-*.sh）
+lwctl stop                         # 停全部常驻
 lwctl update [--no-restart] [--project] [--branch <分支>]
                                    # 拉代码 + 重装脚本/提示词；数据/配置不动，默认重启
 lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次数

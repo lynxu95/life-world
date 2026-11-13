@@ -66,9 +66,10 @@
 | 项 | 说明 |
 |---|---|
 | pi | **1.5.0+** |
-| Node | **22.19+**（pi 安装器自带；桥接/索引/看板都用它） |
-| 系统 | Linux（tmux 可选，常驻推荐） |
-| 可选 | `imagemagick` 或 `ffmpeg`（超大 QQ 图片自动缩）；OneBot v11 服务端（跑 QQ 桥接才需要） |
+| Node | **22.19+**（pi 安装器自带；桥接/索引/看板都用它。记忆索引用 `node:sqlite`，至少要 22.13） |
+| 系统 | **Linux / macOS / WSL**（原生 Windows 走 WSL，没有原版方案） |
+| 常驻 | `tmux`（QQ 桥接和家会话跑在里面；`lwctl start` 一键拉起，不注册开机项） |
+| 可选 | `imagemagick` 或 `ffmpeg`（超大 QQ 图片自动缩）；OneBot v11 服务端（跑 QQ 桥接才需要）；Chrome（浏览器工具，没有也能用，只是少了真浏览器） |
 
 ### 1. 装 pi
 
@@ -113,11 +114,26 @@ cd life-world
 
 ### 4. 常驻
 
+一条命令起全部（看板 + tmux 里的 QQ 桥接和家会话）：
+
 ```bash
-tmux new-session -d -s life-world -n qq   'TZ=Asia/Shanghai LIFE_WORLD_MODEL=basalt/abliterated-iq3_xxs node ~/life-world/pi/bin/qq-bridge.mjs'
-tmux new-window  -t life-world -n home   'TZ=Asia/Shanghai LIFE_WORLD_MODEL=basalt/abliterated-iq3_xxs node ~/life-world/pi/bin/home-rpc.mjs'
-lwctl board                              # Web 看板
+~/.local/share/life-world/bin/lwctl start   # 按当前平台自动挑启动脚本
+~/.local/share/life-world/bin/lwctl stop    # 停掉看板和 tmux 里的 qq / home
 ```
+
+`start` 不会起重复实例，但会**重启**已经开着的 qq / home 窗口（QQ 桥接会短暂断连一下）。
+
+也可以用平台脚本，路径在 `~/.local/share/life-world/bin/`：
+
+```bash
+bash ~/.local/share/life-world/bin/start-linux.sh    # Linux
+bash ~/.local/share/life-world/bin/start-macos.sh    # macOS（Homebrew 的 node/tmux 会自动补进 PATH）
+bash ~/.local/share/life-world/bin/start-wsl.sh      # WSL（额外提示桥接到 Windows 侧 OneBot 的地址）
+# 三个脚本都支持 --stop
+```
+
+**不注册任何开机项**：重启之后自己跑一下这条就行。想让它开机自动跑，
+接你自己的 cron / systemd / 登录项都可以，脚本本身不碰系统配置。
 
 ### 首次启动
 
@@ -484,6 +500,8 @@ lwctl backup --gc           # 压缩快照仓库
 lwctl backup --reset        # 删除快照目录（手动清理）
 lwctl tail [qq|home|debug]  # 看日志
 lwctl restart [qq|home|all] # 重启常驻窗口
+lwctl start                 # 起全部常驻（看板 + tmux 里的 qq / home，按平台挑脚本）
+lwctl stop                  # 停全部常驻
 lwctl update [--no-restart] [--project] [--branch <分支>]
                             # 拉代码 + 重装脚本/提示词；数据/配置不动，默认重启
 lwctl usage [天数]           # token/费用/云端本地/切换次数
@@ -564,4 +582,4 @@ lwctl board stop                # 停止
 - 群会话不跨桥接重启保留（靠归档记忆续上）；
 - 家会话每次启动是新会话（归档记忆负责连续）；
 - 备份不做自动清理，用 `lwctl backup --gc/--reset` 手动处理；
-- 所有功能面向 Linux；macOS 未做完整验证。
+- 主开发和日常使用都在 Linux；macOS / WSL 的安装与启动脚本已适配（未长期实测），**长期运行**（心跳、桥接、看板）仍以 Linux 为主，别的平台遇到问题按普通 bug 报。

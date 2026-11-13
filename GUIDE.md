@@ -174,6 +174,8 @@ lwctl tail qq|home|debug     # 看日志
 lwctl backup [--private]     # 世界快照
 lwctl usage [天数]            # token / 费用 / 切换次数
 lwctl restart [qq|home|all]  # 重启常驻窗口
+lwctl start                  # 起全部常驻（看板 + tmux 里的 qq / home，按平台挑脚本）
+lwctl stop                   # 停全部常驻
 lwctl update [--no-restart]  # 拉代码 + 重装脚本/提示词；数据/配置不动
 ```
 
@@ -187,6 +189,7 @@ lwctl update [--no-restart]  # 拉代码 + 重装脚本/提示词；数据/配�
 | 上下文超限 | 会自动换新会话（QQ 桥接；home/CLI 轮次结束后） |
 | 看板打不开 | `lwctl board status`；端口是否被占；`board.host` 是否只绑了本机 |
 | 升级后行为没变 | `./pi/install.sh --global` 后重启对应窗口（`lwctl restart all`） |
+| 重启机器后不说话 | 重启不会自动拉起，手动跑一次 `lwctl start`（或对应平台的 `start-*.sh`） |
 
 ---
 

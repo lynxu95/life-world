@@ -316,8 +316,10 @@ function cmdRestart(target) {
     : `${shq(join(process.env.HOME || "", ".local/bin"))}:${shq(join(process.env.HOME || "", ".pi/agent/bin"))}:`
   const results = []
   const run = (name, script) => {
-    const cmd = `cd ${shq(ROOT)} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${shq(model)} node ${shq(join(ROOT, "bin", script))} 2>&1 | tee -a ${shq(join(ROOT, `${name}.console.log`))}`
-    const has = spawnSync("tmux", ["has-session", "-t", "life-world"], { encoding: "utf8" })
+    // 用当前 node 的绝对路径：tmux 窗口里的 PATH 不一定是调用方的
+    const cmd = `cd ${shq(ROOT)} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${shq(model)} ${shq(process.execPath)} ${shq(join(ROOT, "bin", script))} 2>&1 | tee -a ${shq(join(ROOT, `${name}.console.log`))}`
+    // tmux 的 target 支持前缀匹配：用 =名字 精确匹配，别把 life-world-xxx 当成 life-world
+    const has = spawnSync("tmux", ["has-session", "-t", "=life-world"], { encoding: "utf8" })
     let r
     if (has.status !== 0) {
       r = spawnSync("tmux", ["new-session", "-d", "-s", "life-world", "-n", name, cmd], { encoding: "utf8" })
@@ -592,9 +594,22 @@ function httpPid(port, host) {
   })
 }
 function boardUrl(host, port) { return `http://${host}:${port}` }
+/** pidfile 可能是陈旧的、PID 也可能被复用：kill 前确认它还是 lwboard */
+function pidIsBoard(pid) {
+  // PATH 里先找 ps（NixOS 之类没有 /bin/ps），再退回常见绝对路径
+  for (const bin of ["ps", "/bin/ps", "/usr/bin/ps"]) {
+    try {
+      const r = spawnSync(bin, ["-p", String(pid), "-o", "command="], { encoding: "utf8" })
+      if (r.error || r.status !== 0) continue
+      // 必须是 node 在跑 lwboard.mjs，别把命令行里恰好提到它的进程当成看板
+      return /(^|\/)node(js)?\s.*lwboard\.mjs/.test(String(r.stdout || ""))
+    } catch { /* 试下一个 */ }
+  }
+  return false
+}
 async function stopBoard(quiet = false) {
   const pid = readPid(BOARD_PID)
-  if (!pid || !pidAlive(pid)) {
+  if (!pid || !pidAlive(pid) || !pidIsBoard(pid)) {
     try { unlinkSync(BOARD_PID) } catch { /* ignore */ }
     if (!quiet) console.log("看板没在运行。")
     return false
@@ -647,6 +662,7 @@ async function boardStatus() {
   const { host, port } = boardSettings()
   const pid = readPid(BOARD_PID)
   const alive = !!pid && pidAlive(pid)
+  if (pid && alive && !pidIsBoard(pid)) console.log(`  · PID ${pid} 已被别的进程占用（不是看板），PID 文件是陈旧的`)
   console.log(`看板：${alive ? "运行中" : "未运行"}`)
   console.log(`  地址：${boardUrl(host, port)}`)
   if (pid) console.log(`  PID：${pid}${alive ? "" : "（已失效）"}`)
@@ -725,6 +741,24 @@ if (!cmd && stdin.isTTY) {
   await cmdBoard(arg[0] || "start", arg.slice(1))
 } else if (cmd === "restart") {
   process.exit(cmdRestart(arg[0] || "all") ? 0 : 1)
+} else if (cmd === "start" || cmd === "stop") {
+  // 起/停全部常驻：看板 + tmux 里的 qq / home。交给对应平台的脚本，它自己补 PATH 和 node
+  const isWsl = (() => { try { return /microsoft/i.test(readFileSync("/proc/version", "utf8")) } catch { return false } })()
+  const plat = process.platform === "darwin" ? "macos"
+    : process.platform === "linux" ? (isWsl ? "wsl" : "linux")
+    : ""
+  if (!plat) {
+    console.error(`✗ 不支持的平台：${process.platform}。原生 Windows 请走 WSL`)
+    process.exit(1)
+  }
+  const script = join(ROOT, "bin", `start-${plat}.sh`)
+  if (!existsSync(script)) {
+    console.error(`✗ 缺少 ${script}；先跑一次 pi/install.sh 把脚本装进 ${ROOT}/bin/`)
+    process.exit(1)
+  }
+  const r = spawnSync("/bin/bash", [script, ...(cmd === "stop" ? ["--stop"] : [])], { stdio: "inherit", env: process.env })
+  if (r.error) { console.error(`✗ 启动脚本运行失败：${String(r.error.message || r.error)}`); process.exit(1) }
+  process.exit(r.status ?? 1)
 } else if (cmd === "update" || cmd === "upgrade") {
   process.exit(cmdUpdate(arg) ? 0 : 1)
 } else if (cmd === "check-update" || cmd === "check") {
@@ -743,6 +777,8 @@ if (!cmd && stdin.isTTY) {
   lwctl backups                      看最近快照
   lwctl tail [qq|home|debug] [行数]  看日志
   lwctl restart [qq|home|all]        重启常驻窗口
+  lwctl start                        起全部常驻（看板 + tmux 里的 qq / home，按平台挑脚本）
+  lwctl stop                         停全部常驻
   lwctl check-update [--json] [--quiet] [--branch <分支>]
                                       只检查有没有新版本，不改任何文件
                                       --json 输出机器可读结果；--quiet 只给退出码（0 有更新 / 1 最新 / 2 出错）

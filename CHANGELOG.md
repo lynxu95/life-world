@@ -15,6 +15,27 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.8.0] - 2026-11-13
+
+### 新增
+
+- **三平台启动脚本**：`start-linux.sh` / `start-macos.sh` / `start-wsl.sh`
+  - 一条命令起全部常驻：看板 + tmux 里的 QQ 桥接与家会话；`--stop` 停止
+  - 三个平台各自的差异只在这里处理：node/tmux 的查找路径（macOS 补 Homebrew）、
+    缺 tmux 的提示、WSL 额外提示桥接到 Windows 侧 OneBot 的地址
+  - `lwctl start` / `lwctl stop` 按当前平台自动挑对应脚本
+  - **不注册任何开机项**：重启后手动跑一下，想自动跑由用户自己接 cron / systemd / 登录项
+- **安装时环境检查**：`install.sh` 打印系统、Node 版本（低于 22.13 提示记忆索引不可用）、tmux、ffmpeg / imagemagick
+
+### 变更
+
+- **浏览器脚本改成跨平台探测**（`browser-open.sh` / `browser-close.sh`）：
+  macOS 直接开 `.app`、Linux 探测 `google-chrome`/`chromium` + X11、WSL 拉 Windows 的 Chrome 并给出端口转发命令；
+  探测不到就明说「这台机器没有可用的调试口方案」并退出——浏览器不是主功能。
+  `modules/browser.md` 写明这是**示例**：AI 可以先探测、再按本机情况改脚本（改前备份 `.orig`），实在没有就跳过。
+- README / pi/README / GUIDE：系统支持改写为 **Linux / macOS / WSL**（原生 Windows 走 WSL），
+  常驻一节改用 `lwctl start` / `lwctl stop` 和三个平台的 `start-*.sh`。
+
 ## [1.7.5] - 2026-11-13
 
 ### 调整

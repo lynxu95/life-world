@@ -31,10 +31,54 @@ check_pi() {
   major="$(echo "$ver" | cut -d. -f1)"
   minor="$(echo "$ver" | cut -d. -f2)"
   if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 5 ]; }; then
-    echo "⚠ 当前 pi $ver，低于 1.5.0；life-world 依赖 1.5 的扩展 API 和 rpc 协议，请先 pi update"
+    echo "⚠ 当前 pi ${ver}，低于 1.5.0；life-world 依赖 1.5 的扩展 API 和 rpc 协议，请先 pi update"
   else
     echo "  ✓ pi $ver"
   fi
+}
+
+check_deps() {
+  echo "== 环境检查 =="
+  local os
+  case "$(uname -s)" in
+    Darwin) os="macOS" ;;
+    Linux)
+      if grep -qi microsoft /proc/version 2>/dev/null; then os="WSL"; else os="Linux"; fi ;;
+    *) os="$(uname -s)" ;;
+  esac
+  echo "  系统：$os"
+
+  if command -v node >/dev/null 2>&1; then
+    local nv nmajor nminor
+    nv="$(node -v 2>/dev/null | sed 's/^v//' || true)"
+    nmajor="$(echo "$nv" | cut -d. -f1)"
+    nminor="$(echo "$nv" | cut -d. -f2)"
+    if [ "${nmajor:-0}" -gt 22 ] || { [ "${nmajor:-0}" -eq 22 ] && [ "${nminor:-0}" -ge 13 ]; }; then
+      echo "  ✓ Node ${nv}（记忆索引可用）"
+    else
+      echo "  ⚠ Node ${nv:-?} 低于 22.13：记忆索引/星图用不了；pi 整体建议 22.19+，升一下更稳"
+    fi
+  else
+    echo "  ⚠ 没装 node：QQ 桥接、家会话、看板都起不来（终端里的扩展本体还能跑）"
+  fi
+
+  if command -v tmux >/dev/null 2>&1; then
+    echo "  ✓ tmux（常驻窗口用得上）"
+  else
+    if [ "$os" = "macOS" ]; then
+      echo "  · 没装 tmux：常驻窗口起不来，brew install tmux"
+    else
+      echo "  · 没装 tmux：常驻窗口起不来，apt install tmux"
+    fi
+  fi
+
+  if command -v ffmpeg >/dev/null 2>&1 || command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    echo "  ✓ 图片/音频处理工具"
+  else
+    echo "  · 没装 ffmpeg / imagemagick：超过 8MB 的图片不会自动缩，其它不受影响"
+  fi
+
+  echo "  · 启动常驻：装好后跑 ${ROOT}/bin/lwctl start（或对应平台的 bin/start-*.sh）"
 }
 
 ensure_world() {
@@ -66,15 +110,15 @@ ensure_world() {
   cp "$SRC"/bin/lwboard.mjs "$ROOT/bin/lwboard.mjs" 2>/dev/null || true
   cp "$SRC"/bin/board.html "$ROOT/bin/board.html" 2>/dev/null || true
   cp "$SRC"/bin/nebula.jpg "$ROOT/bin/nebula.jpg" 2>/dev/null || true
+  # 三平台的启动脚本（不注册开机项，自己决定什么时候跑）
+  cp "$SRC"/bin/start-*.sh "$ROOT/bin/" 2>/dev/null || true
+  chmod +x "$ROOT/bin"/start-*.sh 2>/dev/null || true
   chmod +x "$ROOT/bin/lwctl" 2>/dev/null || true
   # 桥接/家会话默认从 ../ext 找扩展；装到 bin/ 后要有一份对应位置
   mkdir -p "$ROOT/ext"
   ln -sfn "$SRC/ext/life-world.ts" "$ROOT/ext/life-world.ts"
   chmod +x "$ROOT/bin"/*.sh "$ROOT/bin"/*.mjs 2>/dev/null || true
   echo "  ✓ 配套脚本 → $ROOT/bin/（pi-qq-bridge.mjs / pi-home-rpc.mjs）"
-  if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1 && ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "  · 提示：没装 imagemagick / ffmpeg，超过 8MB 的图片不会自动缩"
-  fi
 }
 
 build_prompt() {
@@ -101,6 +145,7 @@ link_extension() { # $1 = target dir
 case "$MODE" in
   --global)
     check_pi
+    check_deps
     ensure_world
     build_prompt
     echo "== 全局扩展 =="
@@ -119,6 +164,7 @@ EOF
     ;;
   --project)
     check_pi
+    check_deps
     ensure_world
     build_prompt
     PROJECT="${LIFE_WORLD_PROJECT:-$(cd "$SRC/.." && pwd)}"
@@ -132,7 +178,7 @@ EOF
     ;;
   --uninstall)
     rm -f "$AGENT_DIR/extensions/life-world/index.ts"
-    echo "已移除全局扩展（世界数据保留在 $ROOT）"
+    echo "已移除全局扩展（世界数据保留在 ${ROOT}）"
     ;;
   --project-uninstall)
     PROJECT="${LIFE_WORLD_PROJECT:-$(cd "$SRC/.." && pwd)}"
