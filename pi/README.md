@@ -296,10 +296,10 @@ pi -p --model deepseek-flash --no-skills --no-prompt-templates \
 
 ### SnowLuma / NapCat 只监听 127.0.0.1 时
 
-从其他机器/容器连不上时，用 SSH 隧道（以宿主机 `192.168.0.10` 为例）：
+从其他机器/容器连不上时，用 SSH 隧道（示例用文档保留地址 `192.0.2.10`，换成你自己的宿主机）：
 
 ```bash
-sshpass -f /path/to/pw ssh -N -L 127.0.0.1:3001:127.0.0.1:3001 user@192.168.0.10
+sshpass -f /path/to/pw ssh -N -L 127.0.0.1:3001:127.0.0.1:3001 user@192.0.2.10
 ```
 
 桥接仍连 `ws://127.0.0.1:3001`。也可以把 OneBot 的 WS host 改成 `0.0.0.0` 后重启服务，但那是动线上服务，自己权衡。

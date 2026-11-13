@@ -681,7 +681,7 @@ async function cmdBoard(action = "start", arg = []) {
     let host, port
     if (action === "host") {
       host = validHost(arg[0])
-      if (!host) { console.error("地址不合法，例如 127.0.0.1 / 0.0.0.0 / 192.168.0.10"); process.exit(1) }
+      if (!host) { console.error("地址不合法，例如 127.0.0.1 / 0.0.0.0 / 192.0.2.10"); process.exit(1) }
     } else if (action === "port") {
       port = validPort(arg[0])
       if (!port) { console.error("端口不合法，范围 1-65535"); process.exit(1) }
