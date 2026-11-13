@@ -7,9 +7,9 @@
 
 ## 印象
 
-- **长期印象** `~/.local/share/life-world/worlds/default/identity/印象.md`：条数与字数按配置（默认 5 条、每条 300 字）。写**当前结论**，不是时间线；
+- **长期印象** `worlds/default/identity/印象.md`：条数与字数按配置（默认 5 条、每条 300 字）。写**当前结论**，不是时间线；
   新证据改变判断就重写这一条，别追加「X 日新证据」。
-- **短期印象** `~/.local/share/life-world/worlds/default/identity/印象-短期.md`：条数与字数按配置（默认 3 条、每条 150 字），写最近 24 小时心里挂着的事；
+- **短期印象** `worlds/default/identity/印象-短期.md`：条数与字数按配置（默认 3 条、每条 150 字），写最近 24 小时心里挂着的事；
   每天 05:00 整份重写，看板上也可以「整理短期」立即重来。
 - 每条都带「来源：日期」，这是回查入口：**想看某条印象是从哪来的**，用
   `memory_day({ date: "来源日期" })` 看当天原文，或 `memory_search({ query, from, to })` 找相关片段。

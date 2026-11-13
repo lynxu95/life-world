@@ -15,6 +15,15 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.7.3] - 2026-11-13
+
+### 修复
+
+- 印象整理改用**相对 ROOT 的路径** `worlds/default/identity/…`：
+  - 不写绝对路径（用户改 `LIFE_WORLD_ROOT` 后会失效）；
+  - 也不写 `identity/…`（常驻进程的 cwd 就是 ROOT，会写到 `$ROOT/identity/` 而不是 worlds 下）。
+  长期、短期两套提示词与模块说明同步。
+
 ## [1.7.2] - 2026-11-13
 
 ### 修复

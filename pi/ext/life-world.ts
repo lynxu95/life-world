@@ -1688,21 +1688,21 @@ function impressionPrompt(imp: ImpressionOptions): string {
 - 格式：- [对象/主题] 一句判断（来源：日期；置信度：高/中/低；最后验证：日期）
 - 「来源」保留具体日期，之后可以用 memory_day({ date }) 回查原始对话。
 
-可以先扫一眼 ${SHORT_IMPRESSION_FILE}（最近 24 小时挂心的事），再读 ${IMPRESSION_FILE}（没有就新建），把新结论合并进去；重复的更新「最后验证」和置信度，矛盾的以新证据为准并改写。
+可以先扫一眼 worlds/default/identity/印象-短期.md（最近 24 小时挂心的事），再读 worlds/default/identity/印象.md（没有就新建），把新结论合并进去；重复的更新「最后验证」和置信度，矛盾的以新证据为准并改写。
 腾位与过期（按「最后验证」距今算）：满 ${imp.staleDays} 天可替换；超过 ${imp.expireDays} 天直接删；不到 ${imp.staleDays} 天除非被推翻否则别删。总数不超过 ${imp.maxItems} 条。
-只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 ${IMPRESSION_FILE}。`
+只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 worlds/default/identity/印象.md。`
 }
 
 function shortImpressionPrompt(imp: ImpressionOptions): string {
   return `【后台任务·印象整理·短期】回看最近 24 小时的对话、日记、房间笔记，重写 ${imp.shortCount} 条「短期印象」。
 
-- **整份重写**：${SHORT_IMPRESSION_FILE} 的旧内容全部丢掉，只写这次生成的 ${imp.shortCount} 条，不要保留、不要追加。
+- **整份重写**：worlds/default/identity/印象-短期.md 的旧内容全部丢掉，只写这次生成的 ${imp.shortCount} 条，不要保留、不要追加。
 - 每条一句话，${imp.shortMaxChars} 字以内，写这一天里你心里挂着的事：正在进行的、还没了结的、情绪底色、想接着做但没做完的。
 - 每条带（来源：日期；最后验证：日期），之后可以用 memory_day({ date }) 回查原始对话。
 - 不写私密细节，不复述聊天记录。
 - 格式：- [主题] 一句话（来源：日期；最后验证：日期）
 
-写回 ${SHORT_IMPRESSION_FILE}（就是上面这个绝对路径，别写到别处）。`
+写回 worlds/default/identity/印象-短期.md（就是这个路径，别写到别处）。`
 }
 
 let ticking = false
