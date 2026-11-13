@@ -268,7 +268,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 **长期** `identity/印象.md`：最多 `impression.maxItems`（默认 5）条，每条 `itemMaxChars`（默认 300）字。
 写的是「当前结论」——新证据改变判断就**重写这一条**，不追加「X 日新证据…」。
 
-**短期** `identity/印象-短期.md`：`shortCount`（默认 3）条，每条 `shortMaxChars`（默认 150）字。
+**短期** `identity/印象-短期.md`：`shortCount`（默认 5）条，每条 `shortMaxChars`（默认 150）字。
 写最近 24 小时心里挂着的事（正在进行的、没了结的、情绪底色）。每天 `shortHour`（默认 05:00）
 **整份重写**，旧内容丢弃；重写前自动留一份 `.prev`，写空/写一半可回滚。
 

@@ -328,7 +328,7 @@ interface ImpressionOptions {
   expireDays: number
   /** 长期印象每条的字数上限（默认 300） */
   itemMaxChars: number
-  /** 短期印象条数（默认 3） */
+  /** 短期印象条数（默认 5） */
   shortCount: number
   /** 短期印象每条软上限（默认 150） */
   shortMaxChars: number
@@ -382,7 +382,7 @@ function config(): Config {
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
       association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50, bootstrap: true },
-      impression: { enabled: true, hour: 5, days: 3, maxItems: 5, staleDays: 3, expireDays: 7, itemMaxChars: 300, shortCount: 3, shortMaxChars: 150, shortHour: 5 },
+      impression: { enabled: true, hour: 5, days: 3, maxItems: 5, staleDays: 3, expireDays: 7, itemMaxChars: 300, shortCount: 5, shortMaxChars: 150, shortHour: 5 },
     },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
@@ -3318,7 +3318,9 @@ export default function (pi: ExtensionAPI) {
           if (!short.trim()) {
             try { short = readText(`${SHORT_IMPRESSION_FILE}.prev`) } catch { /* ignore */ }
           }
-          short = clip(short, 900)
+          // 上限跟着配置走：条数 ×（每条 + 来源/最后验证的元信息），给到 1300 起步、4000 封顶
+          const impCfg = config().memory.impression
+          short = clip(short, Math.max(1300, Math.min(4000, impCfg.shortCount * (impCfg.shortMaxChars + 60))))
           if (short && !prompt.includes(SHORT_IMPRESSION_MARK)) prompt = `${prompt}\n\n${SHORT_IMPRESSION_MARK}\n${short}`
         } catch { /* 没有短期文件就跳过 */ }
       }

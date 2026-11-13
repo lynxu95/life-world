@@ -126,7 +126,7 @@
       "staleDays": 3,
       "expireDays": 7,
       "itemMaxChars": 300,
-      "shortCount": 3,
+      "shortCount": 5,
       "shortMaxChars": 150,
       "shortHour": 5
     }

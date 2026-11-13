@@ -583,6 +583,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <label class="bf"><input type="checkbox" id="f-diary" checked>日记</label>
             <label class="bf"><input type="checkbox" id="f-imp" checked>印象</label>
             <label class="bf"><input type="checkbox" id="f-doc" checked>文档</label>
+            <label class="bf"><input type="checkbox" id="f-edge" checked>连线</label>
             <input id="brain-q" placeholder="在星图里搜索（按摘要）…">
             <button id="brain-refresh">刷新</button>
             <button id="star-full">全屏</button>
@@ -1344,7 +1345,7 @@ $("backup").onclick = async () => {
 }
 
 // ———————— 记忆星图（Canvas 3D + 星云） ————————
-const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true }, dirty: true, dpr: 0 }
+const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true }, showEdges: true, dirty: true, dpr: 0 }
 const PULSES = []
 const POINTERS = new Map()
 const brainCanvas = document.createElement("canvas")
@@ -1495,7 +1496,7 @@ function layoutBrain() {
     const h = hashStr(node.id)
     const theta = ((h % 1000) / 1000) * Math.PI * 2
     const phi = (((h >> 10) % 1000) / 1000) * Math.PI
-    const r = node.kind === "impression" ? 2.2 : node.kind === "short" ? 12 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : 9 + ((h >> 20) % 5)
+    const r = node.kind === "impression" ? 2.2 : node.kind === "short" ? 18 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : 9 + ((h >> 20) % 7)
     pos.set(node.id, { x: Math.cos(theta) * Math.sin(phi) * r, y: Math.cos(phi) * r, z: Math.sin(theta) * Math.sin(phi) * r })
   })
   // 印象固定在中心一圈，避免互相挤叠
@@ -1504,11 +1505,12 @@ function layoutBrain() {
     const a = (i / Math.max(1, imps.length)) * Math.PI * 2 - Math.PI / 2
     pos.set(node.id, { x: Math.cos(a) * 6.8, y: i % 2 === 0 ? 2.2 : -2.2, z: Math.sin(a) * 6.8 })
   })
-  // 短期印象单独一圈（外侧）：最近 24 小时闪着的念头
+  // 短期印象单独一圈（最外圈）：最近 24 小时闪着的念头。
+  // 放得离长期印象远一点（6.8 → 17.2），否则两圈标签会叠在一起；顺带填上外圈的空。
   const shorts = nodes.filter((node) => node.kind === "short")
   shorts.forEach((node, i) => {
     const a = (i / Math.max(1, shorts.length)) * Math.PI * 2 - Math.PI / 4
-    pos.set(node.id, { x: Math.cos(a) * 10.4, y: i % 2 === 0 ? 3.4 : -3.4, z: Math.sin(a) * 10.4 })
+    pos.set(node.id, { x: Math.cos(a) * 17.2, y: i % 2 === 0 ? 4.8 : -4.8, z: Math.sin(a) * 17.2 })
   })
   // 自动注入的人格文档放在最内圈：星图中心最亮的几颗星
   const docs = nodes.filter((node) => node.kind === "identity")
@@ -1679,7 +1681,7 @@ function drawIdentityLinks(ctx, idx, proj, focus, focusMix, t) {
 function drawBrain(t) {
   const el = $("graph"), w = el.clientWidth, h = el.clientHeight
   if (!w || !h) return
-  maybeSpawnPulse(t)
+  if (BRAIN.showEdges) maybeSpawnPulse(t)
   const ctx = bctx
   ctx.clearRect(0, 0, w, h)
   if (bgReady) {
@@ -1764,7 +1766,7 @@ function drawBrain(t) {
   if (!hover && BRAIN.focusMix < 0.01) { BRAIN.focusMix = 0; BRAIN.focusIds = null }
   const focusMix = BRAIN.focusMix
   const focus = BRAIN.focusIds && focusMix > 0.01 ? BRAIN.focusIds : null
-  for (const l of BRAIN.links) {
+  for (const l of BRAIN.showEdges ? BRAIN.links : []) {
     if (l.kind === "identity") continue
     const a = idx.get(l.source), b = idx.get(l.target)
     if (a === undefined || b === undefined) continue
@@ -1795,7 +1797,7 @@ function drawBrain(t) {
     ctx.setLineDash([])
     ctx.globalAlpha = 1
   }
-  drawPulses(ctx, idx, proj)
+  if (BRAIN.showEdges) drawPulses(ctx, idx, proj)
   const order = BRAIN.nodes.map((node, i) => i).filter((i) => nodeVisible(BRAIN.nodes[i])).sort((a, b) => {
     const rank = (n) => n.kind === "identity" ? 3 : (n.kind === "impression" || n.kind === "short") ? 2 : n.kind === "diary" ? 1 : 0
     return (rank(BRAIN.nodes[a]) - rank(BRAIN.nodes[b])) || (proj[b].z - proj[a].z)
@@ -1915,7 +1917,7 @@ function drawBrain(t) {
     }
     ctx.globalAlpha = 1
   }
-  drawIdentityLinks(ctx, idx, proj, focus, focusMix, t)
+  if (BRAIN.showEdges) drawIdentityLinks(ctx, idx, proj, focus, focusMix, t)
   BRAIN.proj = proj
 }
 
@@ -2093,6 +2095,16 @@ function toggleFilter() {
   BRAIN.dirty = true
 }
 for (const id of ["f-mem", "f-diary", "f-imp", "f-doc"]) $(id).addEventListener("change", toggleFilter)
+// 连线开关：只影响绘制，不动数据；偏好存本地，刷新后保持
+const EDGE_KEY = "lw:showEdges"
+try { const saved = localStorage.getItem(EDGE_KEY); if (saved === "0") { $("f-edge").checked = false; BRAIN.showEdges = false } } catch { /* 隐私模式忽略 */ }
+$("f-edge").addEventListener("change", () => {
+  BRAIN.showEdges = $("f-edge").checked
+  // 关掉连线时清空在途光点，免得重新打开时一堆半路光点突然冒出来
+  if (!BRAIN.showEdges) PULSES.length = 0
+  try { localStorage.setItem(EDGE_KEY, BRAIN.showEdges ? "1" : "0") } catch { /* 忽略 */ }
+  BRAIN.dirty = true
+})
 
 async function loadBrain() {
   const seq = ++brainLoadSeq
