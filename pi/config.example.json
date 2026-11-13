@@ -122,7 +122,13 @@
       "enabled": true,
       "hour": 5,
       "days": 3,
-      "maxItems": 5
+      "maxItems": 5,
+      "staleDays": 3,
+      "expireDays": 7,
+      "itemMaxChars": 300,
+      "shortCount": 3,
+      "shortMaxChars": 150,
+      "shortHour": 5
     }
   }
 }

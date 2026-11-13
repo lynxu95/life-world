@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, extname, join, resolve, sep } from "node:path"
 import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -29,7 +29,9 @@ const SELF_FILE = join(IDENTITY_DIR, "我是谁.md")
 const PROFILE_FILE = join(IDENTITY_DIR, "用户画像.md")
 const MOOD_FILE = join(IDENTITY_DIR, "心情.md")
 const IMPRESSION_FILE = join(IDENTITY_DIR, "印象.md")
+const SHORT_IMPRESSION_FILE = join(IDENTITY_DIR, "印象-短期.md")
 const IMPRESSION_MARK = "## 我的印象"
+const SHORT_IMPRESSION_MARK = "## 短期印象"
 const ROOM_DIR = join(WORLD, "room")
 const STICKER_DIR = join(WORLD, "表情包")
 const VOICE_DIR = join(WORLD, "语音")
@@ -324,6 +326,14 @@ interface ImpressionOptions {
   staleDays: number
   /** 最后验证超过这么多天：视为过期，直接删并补位 */
   expireDays: number
+  /** 长期印象每条的字数上限（默认 300） */
+  itemMaxChars: number
+  /** 短期印象条数（默认 3） */
+  shortCount: number
+  /** 短期印象每条软上限（默认 150） */
+  shortMaxChars: number
+  /** 短期印象每天重建的时刻（默认 5 点） */
+  shortHour: number
 }
 
 /** 遗忘曲线：命中加强、随时间衰减（只降权，不删） */
@@ -372,7 +382,7 @@ function config(): Config {
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
       association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50, bootstrap: true },
-      impression: { enabled: true, hour: 5, days: 3, maxItems: 5, staleDays: 3, expireDays: 7 },
+      impression: { enabled: true, hour: 5, days: 3, maxItems: 5, staleDays: 3, expireDays: 7, itemMaxChars: 300, shortCount: 3, shortMaxChars: 150, shortHour: 5 },
     },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
@@ -435,7 +445,7 @@ interface Alarm {
   /** 忙时跳过的子闹钟，下次这个活动醒来时提醒 AI review */
   skipped?: Array<{ at: string; scheduled: string; note: string }>
 }
-interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastControlPrune?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastControlPrune?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string; lastShortImpression?: string }
 function readWorld(): WorldState {
   const s = readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] })
   // 合法 JSON 但 elements 坏掉（null / 字符串）会让 tick 每轮抛异常，先滤掉
@@ -496,7 +506,7 @@ function withWorldLock<T>(fn: () => T): T | undefined {
 }
 
 // ———————— 控制队列（lwctl / lwboard → 各会话） ————————
-interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; reason?: string; op?: string; alarmId?: string }
+interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short" }
 function controlCommandsFile(day = dayOf()): string { return join(CONTROL_DIR, `commands-${day}.jsonl`) }
 
 /** 追加一条命令；id 唯一，不再用毫秒时间戳当序号 */
@@ -1669,7 +1679,30 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
 }
 
 function impressionPrompt(imp: ImpressionOptions): string {
-  return `【后台任务·印象整理】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条对重要对象或主题的「印象」。\n每条写成：- [对象/主题] 一句印象（来源：日期；置信度：高/中/低；最后验证：日期）\n先读 identity/印象.md（没有就新建），把新印象合并进去：重复的更新「最后验证」和置信度，矛盾的以新证据为准并注明。\n腾位与过期（按「最后验证」距今算，只决定删不删，不改置信度）：\n- 满 ${imp.staleDays} 天但不到 ${imp.expireDays} 天：算「可替换」，有新印象要进来时优先删它腾位。\n- 超过 ${imp.expireDays} 天：算「过期印象」，直接删掉，用新印象补位。\n- 不到 ${imp.staleDays} 天：除非已被新证据推翻，否则别删。\n总数不超过 ${imp.maxItems} 条。只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
+  return `【后台任务·印象整理·长期】用 memory_timeline / memory_search 回看最近 ${imp.days} 天（对话、日记、房间笔记），整理最多 ${imp.maxItems} 条「长期印象」。
+
+每条写成一个**当前结论**，不是时间线：
+- 每条不超过 ${imp.itemMaxChars} 字，超了就压缩，不要靠罗列来凑。
+- **不要**写「X 日新证据：…」这种追加；新证据改变判断时，直接重写这一条，只留最新结论。
+- 一条可以覆盖多个相关事实，但要归纳成一句话。
+- 格式：- [对象/主题] 一句判断（来源：日期；置信度：高/中/低；最后验证：日期）
+- 「来源」保留具体日期，之后可以用 memory_day({ date }) 回查原始对话。
+
+可以先扫一眼 identity/印象-短期.md（最近 24 小时挂心的事），再读 identity/印象.md（没有就新建），把新结论合并进去；重复的更新「最后验证」和置信度，矛盾的以新证据为准并改写。
+腾位与过期（按「最后验证」距今算）：满 ${imp.staleDays} 天可替换；超过 ${imp.expireDays} 天直接删；不到 ${imp.staleDays} 天除非被推翻否则别删。总数不超过 ${imp.maxItems} 条。
+只写能站得住的判断，不要复述聊天记录，不要写私密细节。写回 identity/印象.md。`
+}
+
+function shortImpressionPrompt(imp: ImpressionOptions): string {
+  return `【后台任务·印象整理·短期】回看最近 24 小时的对话、日记、房间笔记，重写 ${imp.shortCount} 条「短期印象」。
+
+- **整份重写**：identity/印象-短期.md 的旧内容全部丢掉，只写这次生成的 ${imp.shortCount} 条，不要保留、不要追加。
+- 每条一句话，${imp.shortMaxChars} 字以内，写这一天里你心里挂着的事：正在进行的、还没了结的、情绪底色、想接着做但没做完的。
+- 每条带（来源：日期；最后验证：日期），之后可以用 memory_day({ date }) 回查原始对话。
+- 不写私密细节，不复述聊天记录。
+- 格式：- [主题] 一句话（来源：日期；最后验证：日期）
+
+写回 identity/印象-短期.md。`
 }
 
 let ticking = false
@@ -1979,6 +2012,25 @@ async function tick(): Promise<void> {
     maybeRandomCare()
     // 印象整理：每天一次，固定 hour（默认 05:00）后；配了本地模型先切本地再跑
     const impCfg = c.memory.impression
+    // 短期印象：每天 shortHour 点整份重写（先于长期，让长期能参考新短期）
+    if (impCfg.enabled && state.lastShortImpression !== today && hour >= impCfg.shortHour) {
+      const o = c.models
+      if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
+        const r = await switchTo(lastCtx, o.local, "短期印象整理")
+        log(`short impression · switch model · ${r}`)
+        if (r.startsWith("切不过去")) log("short impression · 本地不可用，按当前模型继续")
+      }
+      // 整份重写是破坏性的：先留一份 .prev，模型写空/写一半还能回滚
+      try { if (existsSync(SHORT_IMPRESSION_FILE)) copyFileSync(SHORT_IMPRESSION_FILE, `${SHORT_IMPRESSION_FILE}.prev`) } catch { /* ignore */ }
+      const wc0 = wakeSuffix()
+      if (sendTime(shortImpressionPrompt(impCfg) + wc0.text)) {
+        if (wc0.nextAt) commitWakeContext(wc0.nextAt)
+        updateWorld((s) => { s.lastShortImpression = today })
+        return
+      }
+      // 发不出去：记一笔继续往下走，别把长期整理和早上兜底一起饿死
+      log("short impression send failed, fall through")
+    }
     if (impCfg.enabled && state.lastImpression !== today && hour >= impCfg.hour) {
       const o = c.models
       if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
@@ -3069,8 +3121,11 @@ export default function (pi: ExtensionAPI) {
         const r = await switchTo(lastCtx, o.local, "手动印象整理")
         if (r.startsWith("切不过去")) { writeAck(c.id, { ok: false, msg: `本地模型没切过去：${r}` }); return }
       }
-      const sent = sendTime(impressionPrompt(imp))
-      writeAck(c.id, { ok: sent, msg: sent ? "印象整理已触发" : "任务没能送进会话" })
+      const scope = String(c.scope || "long")
+      const wc = wakeSuffix()
+      const sent = sendTime((scope === "short" ? shortImpressionPrompt(imp) : impressionPrompt(imp)) + wc.text)
+      if (sent && wc.nextAt) commitWakeContext(wc.nextAt)
+      writeAck(c.id, { ok: sent, msg: sent ? (scope === "short" ? "短期印象已触发重写" : "长期印象已触发整理") : "任务没能送进会话" })
       writeStatus()
       return
     }
@@ -3244,10 +3299,29 @@ export default function (pi: ExtensionAPI) {
     // 化形表：模型 → 外观/称呼（控制在 800 字内）
     const forms = readText(FORMS_FILE)
     if (forms && !prompt.includes(FORMS_MARK)) prompt = `${prompt}\n\n${FORMS_MARK}\n${forms.slice(0, 800)}`
-    // 印象：本地和云端都注入（只放判断，不含私密细节）
-    {
-      const imp = readText(IMPRESSION_FILE)
-      if (imp && !prompt.includes(IMPRESSION_MARK)) prompt = `${prompt}\n\n${IMPRESSION_MARK}\n${imp}`
+    // 印象只给私聊/家会话：群聊里不能出现私密判断（群规则明确禁止提画像、日记、私聊内容）
+    if (CHANNEL !== "group") {
+      const clip = (text: string, max: number) => {
+        const t = String(text || "").trim()
+        return t.length > max ? `${t.slice(0, max)}\n（过长已截断）` : t
+      }
+      // 长期印象：本地和云端都注入（只放判断，不含私密细节）
+      {
+        const imp = clip(readText(IMPRESSION_FILE), 2200)
+        if (imp && !prompt.includes(IMPRESSION_MARK)) prompt = `${prompt}\n\n${IMPRESSION_MARK}\n${imp}`
+      }
+      // 短期印象：只在 24 小时内的才注入（它按天重写，过期的不带）；写空了回退到 .prev
+      {
+        try {
+          const fresh = Date.now() - statSync(SHORT_IMPRESSION_FILE).mtimeMs < 24 * 3600_000
+          let short = fresh ? readText(SHORT_IMPRESSION_FILE) : ""
+          if (!short.trim()) {
+            try { short = readText(`${SHORT_IMPRESSION_FILE}.prev`) } catch { /* ignore */ }
+          }
+          short = clip(short, 900)
+          if (short && !prompt.includes(SHORT_IMPRESSION_MARK)) prompt = `${prompt}\n\n${SHORT_IMPRESSION_MARK}\n${short}`
+        } catch { /* 没有短期文件就跳过 */ }
+      }
     }
     // 私密资料：不预加载内容，只告诉它在哪；云端模式明确别碰
     if (o.local && !prompt.includes(PRIVATE_HINT_MARK)) {

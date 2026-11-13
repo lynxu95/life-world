@@ -356,6 +356,9 @@ input[type=checkbox]{accent-color:var(--accent)}
 
 /* —— 印象 —— */
 .imp-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+.imp-tag{display:inline-block;font-size:10px;padding:0 4px;margin-right:5px;border-radius:4px;background:var(--accent-soft);color:var(--accent)}
+.imp-group{font-size:11px;letter-spacing:.12em;color:var(--faint);margin:12px 0 6px;text-transform:uppercase}
+.imp-group:first-child{margin-top:0}
 .imp-card{border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 12px;
   background:var(--panel-2);min-width:0;border-left:2px solid var(--accent-2)}
 .imp-card .subj{font-family:var(--mono);font-size:11px;color:var(--accent)}
@@ -493,7 +496,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <button type="button" class="qb" id="q-cloud">全部切在线</button>
           <button type="button" class="qb" id="q-restart-home">重启 home</button>
           <button type="button" class="qb" id="q-restart-qq">重启 qq</button>
-          <button type="button" class="qb" id="q-impression">立即整理</button>
+          <button type="button" class="qb" id="q-impression">整理长期</button>
           <button type="button" class="qb" id="q-backup">打快照</button>
         </div>
         <div class="hint" id="q-hint"></div>
@@ -596,7 +599,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <h2>印象墙</h2>
           <span class="spacer"></span>
           <span class="muted" id="imp-hint"></span>
-          <button id="imp-run" class="primary">立即整理</button>
+          <button id="imp-run-long" class="primary">整理长期</button>
+          <button id="imp-run-short" class="ghost">整理短期</button>
         </div>
         <div class="imp-grid" id="imp-list"></div>
       </section>
@@ -1001,9 +1005,12 @@ function renderNow(d) {
 async function loadNowImps() {
   try {
     const d = await getJson("/api/impressions")
-    const items = (d.items || []).slice(0, 3)
+    // 先放最近 24 小时的短期印象，不够再补长期
+    const shortItems = ((d.short && d.short.items) || []).map((x) => ({ ...x, _short: true }))
+    const longItems = (d.items || []).map((x) => ({ ...x, _short: false }))
+    const items = [...shortItems, ...longItems].slice(0, 3)
     $("now-imps").innerHTML = items.length
-      ? items.map((x) => `<div class="now-imp"><b>${esc2(x.subject)}</b> ${esc2(String(x.text || "").slice(0, 90))}</div>`).join("")
+      ? items.map((x) => `<div class="now-imp">${x._short ? '<span class="imp-tag">短期</span>' : ""}<b>${esc2(x.subject)}</b> ${esc2(String(x.text || "").slice(0, 90))}</div>`).join("")
       : '<div class="muted">还没有印象</div>'
   } catch { /* ignore */ }
 }
@@ -1463,7 +1470,7 @@ buildClouds()
 
 function nodeColor(n) {
   if (n.kind === "identity") return "#e8fbff"
-  if (n.kind === "impression") return "#fbbf24"
+  if (n.kind === "impression") return n.short ? "#b8860b" : "#fbbf24"
   if (n.kind === "diary") return "#f59e0b"
   return n.role === "user" ? "#4fc3f7" : "#2dd4bf"
 }
@@ -2081,29 +2088,46 @@ if (typeof ResizeObserver !== "undefined") {
 window.addEventListener("resize", resizeBrain)
 requestAnimationFrame(brainLoop)
 
+function impCard(it) {
+  const conf = /置信度：\s*(高|中|低)/.exec(it.meta || "")
+  const cls = conf ? (conf[1] === "高" ? "conf-high" : conf[1] === "中" ? "conf-mid" : "conf-low") : "conf-low"
+  const card = document.createElement("div"); card.className = "imp-card"
+  card.innerHTML = `<div class="subj">[${esc2(it.subject)}]</div><div class="body">${esc2(it.text)}</div>
+    <div class="meta">${conf ? `<span class="conf ${cls}">${esc2(conf[1])}</span>` : ""}${esc2(it.meta || "")}</div>`
+  return card
+}
 async function loadImpressions() {
   try {
     const d = await getJson("/api/impressions")
     const el = $("imp-list"); el.innerHTML = ""
-    if (!d.items || !d.items.length) { el.innerHTML = '<div class="muted">还没有印象；等 05:00 或点「立即整理」。</div>'; return }
-    for (const it of d.items) {
-      const conf = /置信度：\s*(高|中|低)/.exec(it.meta || "")
-      const cls = conf ? (conf[1] === "高" ? "conf-high" : conf[1] === "中" ? "conf-mid" : "conf-low") : "conf-low"
-      const card = document.createElement("div"); card.className = "imp-card"
-      card.innerHTML = `<div class="subj">[${esc2(it.subject)}]</div><div class="body">${esc2(it.text)}</div>
-        <div class="meta">${conf ? `<span class="conf ${cls}">${esc2(conf[1])}</span>` : ""}${esc2(it.meta || "")}</div>`
-      el.append(card)
+    const longItems = d.items || []
+    const shortItems = (d.short && d.short.items) || []
+    if (!longItems.length && !shortItems.length) { el.innerHTML = '<div class="muted">还没有印象；等 05:00 或点「整理长期 / 整理短期」。</div>'; return }
+    if (shortItems.length) {
+      el.insertAdjacentHTML("beforeend", '<div class="imp-group">短期 · 24 小时内</div>')
+      for (const it of shortItems) el.append(impCard(it))
+    }
+    if (longItems.length) {
+      el.insertAdjacentHTML("beforeend", '<div class="imp-group">长期</div>')
+      for (const it of longItems) el.append(impCard(it))
     }
   } catch (e) { $("imp-list").textContent = "加载失败：" + e.message }
 }
-$("imp-run").onclick = async () => {
-  const b = $("imp-run"); b.disabled = true; b.textContent = "已下发…"
-  try {
-    const r = await getJson("/api/impressions/run", { method: "POST" })
-    $("imp-hint").textContent = r.ok ? "已触发，几分钟后刷新" : (r.msg || "失败")
-  } catch (e) { $("imp-hint").textContent = "失败：" + e.message }
-  setTimeout(() => { b.disabled = false; b.textContent = "立即整理"; loadImpressions(); loadBrain() }, 4000)
+function bindImpRun(id, scope) {
+  const b = $(id)
+  if (!b) return
+  b.onclick = async () => {
+    const old = b.textContent
+    b.disabled = true; b.textContent = "已下发…"
+    try {
+      const r = await getJson("/api/impressions/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope }) })
+      $("imp-hint").textContent = r.ok ? `${scope === "short" ? "短期" : "长期"}整理已触发，几分钟后刷新` : (r.msg || "失败")
+    } catch (e) { $("imp-hint").textContent = "失败：" + e.message }
+    setTimeout(() => { b.disabled = false; b.textContent = old; loadImpressions(); loadBrain() }, 4000)
+  }
 }
+bindImpRun("imp-run-long", "long")
+bindImpRun("imp-run-short", "short")
 
 const TAB_IDS = ["overview", "schedule", "memory"]
 function setTab(name, remember = true) {

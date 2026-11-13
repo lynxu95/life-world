@@ -245,8 +245,8 @@ function body(req) {
   })
 }
 
-function parseImpressions() {
-  const file = join(WORLD, "identity", "印象.md")
+function parseImpressions(target = join(WORLD, "identity", "印象.md")) {
+  const file = target
   if (!existsSync(file)) return { raw: "", items: [] }
   const raw = readFileSync(file, "utf8")
   const items = []
@@ -256,8 +256,8 @@ function parseImpressions() {
     const body = m[2]
     items.push({
       subject: m[1].trim(),
-      text: body.replace(/（[^）]*）\s*$/, "").trim(),
-      meta: (body.match(/（([^）]*)）\s*$/) || [])[1] || "",
+      text: body.replace(/[（(][^）)]*[）)]\s*$/, "").trim(),
+      meta: (body.match(/[（(]([^）)]*)[）)]\s*$/) || [])[1] || "",
     })
   }
   return { raw, items }
@@ -398,9 +398,13 @@ function memoryGraph(limit = 400) {
       diaries.push({ id: `diary-${f.replace(/\.md$/, "")}`, kind: "diary", t: `${f.replace(/\.md$/, "")}T20:00:00`, day: f.replace(/\.md$/, ""), role: "diary", content: title.slice(0, 120), subject: f.replace(/\.md$/, ""), activation: 0, degree: 0, hits: 0, score: 0.6 })
     }
   }
-  const impressions = parseImpressions().items.map((it, i) => {
+  const SHORT_IMPRESSION_FILE = join(WORLD, "identity", "印象-短期.md")
+  const impressions = [
+    ...parseImpressions().items.map((it) => ({ ...it, short: false })),
+    ...parseImpressions(SHORT_IMPRESSION_FILE).items.map((it) => ({ ...it, short: true })),
+  ].map((it, i) => {
     const dayMatch = String(it.meta || "").match(/最后验证：\s*(\d{4}-\d{2}-\d{2})/)
-    return { id: `imp-${i}`, kind: "impression", t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: 1.2 }
+    return { id: `imp-${i}`, kind: "impression", short: it.short, t: dayMatch ? `${dayMatch[1]}T09:00:00` : new Date().toISOString(), role: "impression", content: it.text, subject: it.subject, meta: it.meta, activation: 0, degree: 0, hits: 0, score: it.short ? 0.9 : 1.2 }
   })
   // 印象的来源节点：按来源日期从全量消息里取，不用「全站 top5」硬凑
   const impTargets = new Map()
@@ -423,6 +427,8 @@ function memoryGraph(limit = 400) {
     { file: "用户画像.md", label: "用户画像" },
     { file: "模型使用规范.md", label: "模型规范" },
     { file: "化形表.md", label: "化形" },
+    { file: "印象.md", label: "长期印象" },
+    { file: "印象-短期.md", label: "短期印象" },
   ]
   const identityNodes = []
   for (const doc of IDENTITY_DOCS) {
@@ -636,7 +642,7 @@ const server = http.createServer(async (req, res) => {
       const id = String(url.searchParams.get("id") || "")
       if (!id) return json(res, 400, { error: "missing id" })
       if (id.startsWith("doc-")) {
-        const allowed = new Set(["我是谁.md", "心情.md", "用户画像.md", "模型使用规范.md", "化形表.md"])
+        const allowed = new Set(["我是谁.md", "心情.md", "用户画像.md", "模型使用规范.md", "化形表.md", "印象.md", "印象-短期.md"])
         const file = id.slice(4)
         if (!allowed.has(file)) return json(res, 404, { error: "not found" })
         const path = join(WORLD, "identity", file)
@@ -737,10 +743,12 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, care: cfg.care })
     }
     if (req.method === "GET" && url.pathname === "/api/impressions") {
-      return json(res, 200, parseImpressions())
+      return json(res, 200, { ...parseImpressions(), short: parseImpressions(join(WORLD, "identity", "印象-短期.md")) })
     }
     if (req.method === "POST" && url.pathname === "/api/impressions/run") {
-      const cmd = appendCommand(ROOT, { target: "home", action: "impression", reason: "看板手动整理" })
+      const data = await body(req)
+      const scope = data && data.scope === "short" ? "short" : "long"
+      const cmd = appendCommand(ROOT, { target: "home", action: "impression", scope, reason: `看板手动整理${scope === "short" ? "短期印象" : "长期印象"}` })
       const st = await waitAck(ROOT, cmd.id, "home", 15000)
       return json(res, 200, st ? { ok: !!st.ok, msg: st.msg } : { ok: false, msg: "超时：家会话没响应（可能没在跑）" })
     }
