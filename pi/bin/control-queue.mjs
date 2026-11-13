@@ -5,7 +5,7 @@
  *   control/commands-YYYY-MM-DD.jsonl   追加写，一行一条命令
  *   control-acks/<id>-<roleKey>.json    目标进程回执
  *
- * 命令字段：{ id, at, target, action, model, reason, op, alarmId }
+ * 命令字段：{ id, at, target, action, model, reason, op, alarmId, text, wakeHint }
  * - id 唯一（时间戳 + 随机），不再用 Date.now() 当序号
  * - 按天分文件，消费方扫前后一天；超过 60 秒的命令只推水位不执行
  */

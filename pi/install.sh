@@ -127,6 +127,11 @@ ensure_world() {
     echo "✗ 缺少 media-sniff.mjs —— QQ 桥接起不来，安装中止" >&2
     exit 1
   fi
+  cp "$SRC"/bin/window-note.mjs "$ROOT/bin/window-note.mjs" 2>/dev/null || true
+  if [ ! -f "$ROOT/bin/window-note.mjs" ]; then
+    echo "✗ 缺少 window-note.mjs —— QQ 桥接起不来，安装中止" >&2
+    exit 1
+  fi
   cp "$SRC"/bin/control-queue.mjs "$ROOT/bin/control-queue.mjs" 2>/dev/null || true
   cp "$SRC"/bin/lwboard.mjs "$ROOT/bin/lwboard.mjs" 2>/dev/null || true
   cp "$SRC"/bin/board.html "$ROOT/bin/board.html" 2>/dev/null || true

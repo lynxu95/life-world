@@ -126,6 +126,10 @@ const bgSpan = (ms: number): string => {
 const shqPath = (v: string): string => `'${String(v).replace(/'/g, `'\\''`)}'`
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const BRIDGE_STATE = join(ROOT, "qq-bridge-state.json")
+/** 桥接写的「私聊正在忙」状态（每 2 秒刷新） */
+const QQ_BUSY_FILE = join(ROOT, "busy-qq.json")
+/** 唤醒消息的前缀：不进会话归档，免得看起来像对方说的话 */
+const WAKE_MARK = "【life-world 唤醒】"
 const LOG_FILE = join(ROOT, "debug.log")
 /** FTS5 记忆索引（node:sqlite，trigram 分词） */
 const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
@@ -441,6 +445,8 @@ interface Alarm {
   chainId?: string
   /** 起串时写一次的理由，之后每一跳都带着 */
   reason?: string
+  /** 在哪起的（roleKey）：qq 的闹钟/心跳醒来时回私聊，其余回后台窗口 */
+  origin?: string
   /** 固定间隔（秒）；新数据都写这个 */
   intervalSeconds?: number
   /** 固定间隔（分钟）——旧数据用，读的时候换算成秒 */
@@ -513,7 +519,7 @@ function withWorldLock<T>(fn: () => T): T | undefined {
 }
 
 // ———————— 控制队列（lwctl / lwboard → 各会话） ————————
-interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short" }
+interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short"; text?: string; wakeHint?: string }
 function controlCommandsFile(day = dayOf()): string { return join(CONTROL_DIR, `commands-${day}.jsonl`) }
 
 /** 追加一条命令；id 唯一，不再用毫秒时间戳当序号 */
@@ -633,6 +639,18 @@ function cleanUserText(text: string): string {
     .replace(/^\[本地时间 [^\]]*\]\s*/, "")
     .split("\n")
     .filter((line) => !line.startsWith("（模型：") && !line.startsWith("（心情：") && !line.startsWith("（OneBot 桥接："))
+    .join("\n")
+    .replace(/（你最近主动给他发过：[\s\S]*?\n）/g, "")
+    .split("\n")
+    // 系统注记按行首丢：注记本身带内层括号，不能靠「到第一个右括号为止」去截
+    .filter((line) => {
+      const t = line.trim()
+      if (!t.startsWith("（")) return true
+      if (t.startsWith("（上一条 QQ 消息之后")) return false
+      if (t.startsWith("（最近 10 分钟，别的窗口有对话")) return false
+      if (t.startsWith("（这是 QQ 私聊")) return false
+      return true
+    })
     .join("\n")
     .trim()
 }
@@ -786,6 +804,7 @@ function archive(message: any): void {
     if (!text) return
     if (role === "user") {
       if (isAfterglow(text)) return
+      if (text.includes(WAKE_MARK)) return
       text = cleanUserText(text)
     }
     if (!text) return
@@ -1555,6 +1574,52 @@ function acquireTimerLock(): boolean {
   } catch { return false }
 }
 
+/** 桥接最近 90 秒有没有心跳（和 bridgeStatus 同一个阈值） */
+function bridgeAlive(): boolean {
+  const st = readJson<{ lastSeen?: string }>(BRIDGE_STATE, {})
+  const t = Date.parse(String(st.lastSeen || ""))
+  return Number.isFinite(t) && Date.now() - t < 90_000
+}
+
+/** 桥接那边的私聊会话是不是正在跑（读它每 2 秒写一次的 busy 文件） */
+function qqBusy(): boolean {
+  try {
+    const st = readJson<{ running?: boolean; updated?: string }>(QQ_BUSY_FILE, {})
+    if (st.running !== true) return false
+    const t = Date.parse(String(st.updated || ""))
+    // 状态超过 30 秒没刷新：当成不忙（桥接可能重启中）
+    return !Number.isFinite(t) || Date.now() - t < 30_000
+  } catch { return false }
+}
+
+/** 这条闹钟该在哪个窗口醒：来自 QQ 私聊且桥接在线 → 回私聊；否则后台窗口 */
+function wakeTarget(a: Alarm): "qq" | "home" {
+  if (a.origin === "qq" && CHANNEL !== "group" && bridgeAlive()) return "qq"
+  return "home"
+}
+
+/**
+ * 统一投递：qq 起源写控制命令让桥接在私聊里触发，其余走 home 的 sendTime。
+ * 私聊正忙时返回 false（不写命令）——调用方会顺延/保持 pending，避免积压几十条一次性爆发。
+ */
+function deliverWake(a: { origin?: string; reason?: string; note?: string }, text: string, opts: { context?: boolean } = {}): boolean {
+  const target = wakeTarget(a as Alarm)
+  if (target === "qq") {
+    if (qqBusy()) { log("wake → qq busy, retry later"); return false }
+    try {
+      // hint 单独存：桥接在私聊里才拼上；回落给 home 时不能带（否则 home 也不敢 reach_out）
+      const hint = "\n（这条是在私聊里醒的：直接把话写进回复里，不要调用 reach_out。）"
+      appendControl({ target: "qq", action: "wake", text: `${WAKE_MARK}${text}`, wakeHint: hint, reason: String(a.reason || a.note || "").slice(0, 100) })
+      log(`wake → qq · ${String(a.note || a.reason || "").slice(0, 40)}`)
+      return true
+    } catch (e) { log(`wake → qq failed ${String(e)}`) }
+  }
+  const wc = opts.context === false ? { text: "", nextAt: null } : wakeSuffix(currentModelPref())
+  const sent = sendTime(text + wc.text)
+  if (sent && wc.nextAt) commitWakeContext(wc.nextAt)
+  return sent
+}
+
 function sendTime(text: string): boolean {
   try {
     const r = (piRef as any)?.sendMessage?.({ customType: "life-world-time", content: text, display: true }, { triggerTurn: true, deliverAs: "followUp" })
@@ -1703,6 +1768,8 @@ function skippedLine(skipped?: Array<{ scheduled: string; note: string }>, max =
 /** 闹钟到点前，先切到任务指定的模型（local / cloud） */
 async function switchForAlarm(alarm: Alarm): Promise<void> {
   if (!alarm.model) return
+  // 回私聊醒的闹钟：切的是 home 的模型，没用；私聊那一轮沿用自己当前的模型
+  if (wakeTarget(alarm) === "qq") return
   const c = config().models
   // 本地保护模式：闹钟上写的是 local 也照旧留档，但这一跳改走在在线模型上
   const locked = localLockOn()
@@ -1868,10 +1935,10 @@ async function tick(): Promise<void> {
     // 旧版一次性闹钟：保持原行为
     for (const a of alarmsNow.filter((x) => !x.kind && !x.status)) {
       if (woke) break
-      const text = `【后台任务】${shortStamp(a.at)}：${a.note}。\n做完就结束；要让他知道就用 reach_out。做完想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
-      const legacySent = a.model
-        ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
-        : sendTime(text)
+      const legacyToQq = wakeTarget(a) === "qq"
+      const text = `【后台任务】${shortStamp(a.at)}：${a.note}。\n做完就结束；${legacyToQq ? "这条是在私聊里醒的，想让他知道就直接说，不要调用 reach_out。" : "要让他知道就用 reach_out。"}做完想想下一件，用 plan_next 重新定。今天的计划在 ${join(PLAN_DIR, `${today}.md`)}。`
+      if (a.model) await switchForAlarm(a).catch((e) => log(`alarm switch failed ${String(e)}`))
+      const legacySent = deliverWake(a, text, { context: false })
       if (!legacySent) { log("alarm send failed, retry next tick"); continue }
       withWorldLock(() => {
         const fresh = readWorld()
@@ -1881,7 +1948,7 @@ async function tick(): Promise<void> {
       })
       woke = true
     }
-    // 主活动：开始前先把还开着的上一个强制关掉，并提醒 AI
+    // 主活动：投递成功之后才关掉上一个、标 active——投不出去就整条不动，免得白关一个活动
     for (const a of alarmsNow.filter((x) => x.kind === "main" && (x.status || "pending") === "pending" && !x.paused)) {
       if (woke) break
       const closing = (readWorld().alarms || []).filter((x) => x.kind === "main" && x.status === "active" && x.id !== a.id)
@@ -1889,12 +1956,27 @@ async function tick(): Promise<void> {
       const closedSkips: Array<{ scheduled: string; note: string }> = []
       for (const o of closing) {
         closedNotes.push(o.note)
-        for (const s of o.skipped || []) closedSkips.push(s)
+        for (const sk of o.skipped || []) closedSkips.push(sk)
       }
-      const saved = withWorldLock(() => {
+      const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，会强制关闭，它的子闹钟一起关。` : ""
+      const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
+      const toQq = wakeTarget(a) === "qq"
+      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n等某个任务跑完就用 bg_run({ command, notify: true })，跑完会叫醒你；需要同步陪着他时才用 heartbeat。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；${toQq ? "这条是在私聊里醒的，想让他知道就直接说，不要调用 reach_out。" : "要让他知道就用 reach_out。"}${reminder}${skipNote ? `\n${skipNote}` : ""}`
+      // 先切模型，再投递（投递时按实际模型决定要不要带跨窗口上下文）
+      if (a.model) await switchForAlarm(a).catch((e) => log(`alarm switch failed ${String(e)}`))
+      const sentOk = deliverWake(a, text)
+      if (!sentOk) {
+        // 断在这里：下一条主活动不能插队，否则到点顺序全乱
+        log("alarm not delivered, keep pending")
+        break
+      }
+      withWorldLock(() => {
         const fresh = readWorld()
         const list = fresh.alarms || []
-        const closedIds = new Set(closing.map((x) => x.id))
+        // 投递这几秒里可能被看板取消/暂停：以锁里读到的状态为准，别白关别的活动
+        const self = list.find((x) => x.id === a.id)
+        if (!self || self.paused || (self.status || "pending") !== "pending") return writeWorld(fresh)
+        const closedIds = new Set(list.filter((x) => x.kind === "main" && x.status === "active" && x.id !== a.id).map((x) => x.id))
         // 被顶掉的活动也留尾声：标 closed，已执行的子闹钟留着，没执行的撤掉
         for (const x of list) {
           if (closedIds.has(x.id)) {
@@ -1903,38 +1985,14 @@ async function tick(): Promise<void> {
           }
         }
         const keep = list.filter((x) => !(x.kind === "sub" && x.parentId && closedIds.has(x.parentId) && x.status !== "fired"))
-        const self = keep.find((x) => x.id === a.id)
-        if (!self) return false
-        self.status = "active"
-        self.activatedAt = new Date().toISOString()
+        const me = keep.find((x) => x.id === a.id)
+        if (me) {
+          me.status = "active"
+          me.activatedAt = new Date().toISOString()
+          delete me.skipped
+        }
         fresh.alarms = keep
         fresh.lastWake = today
-        return writeWorld(fresh)
-      })
-      if (!saved) continue
-      const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
-      const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
-      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n等某个任务跑完就用 bg_run({ command, notify: true })，跑完会叫醒你；需要同步陪着他时才用 heartbeat。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}`
-      // 先切模型、再按实际模型取跨窗口上下文：切不过去时不会把本地原文发给云端
-      if (a.model) await switchForAlarm(a).catch((e) => log(`alarm switch failed ${String(e)}`))
-      const wc = wakeSuffix(currentModelPref())
-      const sentOk = sendTime(text + wc.text)
-      if (!sentOk) {
-        // 发不出去就把 active 回滚成 pending，否则下轮过滤会跳过它、这条活动永远醒不来
-        log("alarm send failed, rollback to pending")
-        withWorldLock(() => {
-          const f = readWorld()
-          const self = (f.alarms || []).find((x) => x.id === a.id)
-          if (self) { self.status = "pending"; delete self.activatedAt }
-          return writeWorld(f)
-        })
-        continue
-      }
-      if (wc.nextAt) commitWakeContext(wc.nextAt)
-      withWorldLock(() => {
-        const fresh = readWorld()
-        const self = (fresh.alarms || []).find((x) => x.id === a.id)
-        if (self) delete self.skipped
         return writeWorld(fresh)
       })
       woke = true
@@ -1956,7 +2014,7 @@ async function tick(): Promise<void> {
           // 总开关关掉时不再触发（未执行的跳保留，打开后接着跳）
           if (!heartbeatEnabled()) continue
           if (a.paused) continue
-          if (isAgentBusy()) {
+          if (isAgentBusy() || (a.origin === "qq" && qqBusy())) {
             // 心跳不该被跳过：忙就往后挪 30 秒再试
             withWorldLock(() => {
               const f = readWorld()
@@ -1978,10 +2036,8 @@ async function tick(): Promise<void> {
           const willContinue = seq0 < 60 && !timeUp
           const baseText = heartbeatText(a, !willContinue, timeUp ? "time" : (seq0 >= 60 ? "jumps" : null))
           if (a.model) await switchForAlarm(a).catch((e) => log(`heartbeat switch failed ${String(e)}`))
-          const wc = wakeSuffix(currentModelPref())
-          const hbSent = sendTime(baseText + wc.text)
+          const hbSent = deliverWake(a, baseText)
           if (!hbSent) { log("heartbeat send failed, retry next tick"); continue }
-          if (wc.nextAt) commitWakeContext(wc.nextAt)
           withWorldLock(() => {
             const f = readWorld()
             const list = f.alarms || []
@@ -2000,7 +2056,7 @@ async function tick(): Promise<void> {
                 note: a.note, setAt: new Date().toISOString(), model: a.model,
                 kind: "sub", status: "pending",
                 chainId: a.chainId, reason: a.reason, intervalSeconds: everySec0, seq: seq0 + 1,
-                startedAt: new Date(startedMs).toISOString(),
+                startedAt: new Date(startedMs).toISOString(), origin: a.origin,
               })
             }
             f.alarms = list
@@ -2030,7 +2086,6 @@ async function tick(): Promise<void> {
             finished.push({ ...job, ...st })
           }
           if (finished.length) {
-            const wc = wakeSuffix()
             const lines = finished.map((j) => {
               const codeText = j.state === "failed" && (j.code === null || j.code === undefined)
                 ? (j.signal ? `被 ${j.signal} 终止` : "异常结束")
@@ -2039,9 +2094,10 @@ async function tick(): Promise<void> {
               const mins = Number.isFinite(started) ? Math.max(1, Math.round((Date.now() - started) / 60_000)) : null
               return `- ${j.id}${j.label ? `（${j.label}）` : ""}：${codeText}${mins ? `，跑了约 ${mins} 分钟` : ""}`
             })
-            const text = `【后台任务完成】\n${lines.join("\n")}\n看输出用 bg_output({ id })。` + wc.text
-            if (sendTime(text)) {
-              if (wc.nextAt) commitWakeContext(wc.nextAt)
+            const text = `【后台任务完成】\n${lines.join("\n")}\n看输出用 bg_output({ id })。`
+            // 哪个窗口起的后台任务，跑完就回哪个窗口通知
+            const origin = finished.length === 1 ? finished[0].origin : undefined
+            if (deliverWake({ origin, reason: "后台任务完成" }, text, { context: true })) {
               for (const j of finished) {
                 try {
                   const jp = join(BG_DIR, `${j.id}.json`)
@@ -3255,6 +3311,8 @@ export default function (pi: ExtensionAPI) {
     writeStatus()
   }
   const handleControl = async (c: ControlCmd) => {
+    // wake 是写给桥接的，扩展（谁收到都算）只回个回执，别当模型切换处理
+    if (String(c.action || "") === "wake") { writeAck(c.id, { ok: bridgeAlive(), msg: bridgeAlive() ? "由桥接消费" : "桥接不在线，等回落" }); return }
     const o = config().models
     if (String(c.action || "") === "impression") {
       if (!lastCtx) { writeAck(c.id, { ok: false, msg: "还没有可用的会话上下文" }); return }
@@ -3272,6 +3330,17 @@ export default function (pi: ExtensionAPI) {
       return
     }
     if (String(c.action || "") === "alarm") { await handleAlarmCommand(c); return }
+    if (String(c.action || "") === "wake-fallback") {
+      // 桥接没能在私聊里消费掉这条唤醒：改成在后台窗口醒，靠 reach_out 让他知道
+      const t = String(c.text || "").trim()
+      if (!t) { writeAck(c.id, { ok: false, msg: "空的唤醒" }); return }
+      const wc = wakeSuffix(currentModelPref())
+      const sent = sendTime(t + wc.text)
+      if (sent && wc.nextAt) commitWakeContext(wc.nextAt)
+      writeAck(c.id, { ok: sent, msg: sent ? "已在后台窗口唤醒" : "唤醒没送进去" })
+      writeStatus()
+      return
+    }
     if (String(c.action || "") === "abort") {
       // qq 的中断由桥接处理（它握着 pi 子进程）；扩展再写一份回执会和桥接打架
       if (c.target === "qq") return
@@ -3647,6 +3716,7 @@ export default function (pi: ExtensionAPI) {
         model,
         kind: "main",
         status: "pending",
+        origin: roleKey,
       }
       const saved = withWorldLock(() => {
         const state = readWorldStrict()
@@ -3655,7 +3725,9 @@ export default function (pi: ExtensionAPI) {
         return writeWorld(state)
       })
       if (!saved) return ok("闹钟没能写进 world.json。")
-      const modelText = model === "cloud" ? "在线模型" : model === "local" ? "本地模型" : "当前模型"
+      let modelText = model === "cloud" ? "在线模型" : model === "local" ? "本地模型" : "当前模型"
+      // QQ 里起的闹钟到点回私聊醒，用的是私聊当时的模型，切 home 没有意义
+      if (CHANNEL === "qq") modelText += "（在 QQ 里起的闹钟到点回私聊醒，按私聊当时的模型跑）"
       return ok(`活动定好了：${isoLocal(new Date(target))} —— ${alarm.note}\nid：${alarm.id}（到点用${modelText}跑）`)
     },
   })
@@ -3692,6 +3764,7 @@ export default function (pi: ExtensionAPI) {
         id, label: String(params?.label || "").replace(/\s+/g, " ").trim().slice(0, 60),
         notify: params?.notify === true, notified: false,
         command: command.slice(0, 2000),
+        origin: roleKey,
         pid: 0, startedAt: new Date().toISOString(), endedAt: null, exitCode: null,
         log, exit: exitFile, cwd: ROOT,
       }
@@ -3877,6 +3950,7 @@ export default function (pi: ExtensionAPI) {
           intervalSeconds: everySec,
           seq: 1,
           startedAt: new Date(now).toISOString(),
+          origin: roleKey,
         }
         st.alarms = [...list, alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
         return { ok: writeWorld(st), chainId }

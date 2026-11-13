@@ -588,7 +588,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const s = readJson(join(ROOT, "qq-bridge-state.json"), {})
         const ts = Date.parse(s.lastSeen || 0)
-        bridge = { state: ts && Date.now() - ts < 120_000 ? "ok" : "bad", lastSeen: s.lastSeen || "" }
+        bridge = { state: ts && Date.now() - ts < 90_000 ? "ok" : "bad", lastSeen: s.lastSeen || "" }
       } catch { /* ignore */ }
       const backup = { size: backupSize(), last: (backupLog(1) || [])[0] || "" }
       return json(res, 200, { local, cloud, bridge, backup, now: new Date().toISOString() })
@@ -599,11 +599,18 @@ const server = http.createServer(async (req, res) => {
       let text = ""
       try { text = readFileSync(file, "utf8") } catch { /* ignore */ }
       const items = []
+      const plain = []
+      let inFence = false
       for (const line of text.split("\n")) {
+        if (/^\s*```/.test(line)) { inFence = !inFence; continue }
+        if (inFence) continue
         const m = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/)
-        if (m) items.push({ done: m[1].toLowerCase() === "x", text: m[2].trim().slice(0, 200) })
+        if (m) { items.push({ done: m[1].toLowerCase() === "x", text: m[2].trim().slice(0, 200) }); continue }
+        // 纯列表（没有勾选框）也当条目：AI 常写成「- **08:10** 做什么」，不是 `- [ ]`
+        const b = line.match(/^\s{0,4}(?:[-*]|\d+[.)])\s+(?!\[[ xX]\])(.{1,})$/)
+        if (b) plain.push(b[1].trim().slice(0, 200))
       }
-      return json(res, 200, { date, exists: !!text, total: items.length, done: items.filter((x) => x.done).length, items: items.slice(0, 30) })
+      return json(res, 200, { date, exists: !!text, total: items.length, done: items.filter((x) => x.done).length, items: items.slice(0, 30), plain: plain.slice(0, 40) })
     }
     if (req.method === "GET" && url.pathname === "/api/alarms") {
       const state = readJson(join(WORLD, "world.json"), {})

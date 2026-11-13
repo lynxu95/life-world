@@ -1105,7 +1105,15 @@ async function loadPlan() {
       el.innerHTML = '<div class="muted">今天还没有计划。</div>'
       return
     }
-    if (!d.total) { el.innerHTML = '<div class="muted">计划里还没有勾选项</div>'; updateSummary(); return }
+    if (!d.total) {
+      // 没有勾选项但写了纯列表：照样显示出来（计划常常是「- 08:10 做什么」）
+      const plain = Array.isArray(d.plain) ? d.plain : []
+      el.innerHTML = plain.length
+        ? `<div class="plan-list">${plain.map((t) => `<div class="plan-item"><span class="txt" title="${escAttr(t)}">${esc2(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</span></div>`).join("")}</div>`
+        : '<div class="muted">计划里还没有条目</div>'
+      updateSummary()
+      return
+    }
     const pct = Math.round((d.done / d.total) * 100)
     const undone = d.items.filter((x) => !x.done)
     const done = d.items.filter((x) => x.done)

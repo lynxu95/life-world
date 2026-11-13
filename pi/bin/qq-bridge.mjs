@@ -25,6 +25,7 @@ import {
   textOf as rpcTextOf, toolCallOf, reqPrompt, reqAbort, reqAbortBash, reqExtensionUIResponse,
 } from "./rpc-adapter.mjs"
 import { sniffAudioExt, convertSilkToWav } from "./media-sniff.mjs"
+import { otherWindowsNote } from "./window-note.mjs"
 
 const HOME = homedir()
 const ROOT = process.env.LIFE_WORLD_ROOT || join(HOME, ".local/share/life-world")
@@ -827,6 +828,27 @@ function armAfterglow(round) {
   log("afterglow armed", round, afterglowCfg.delayMs)
 }
 
+/** 扩展写的唤醒（闹钟/心跳起源于这个私聊）：直接在本会话里跑一轮，回复发给他 */
+async function wakeFromControl(text, id = "", wakeHint = "") {
+  if (!text) return
+  // 这是系统唤醒，不是他回话：别让上一轮的余波接着弹，也别让「先应一声」串到这条
+  clearAfterglow()
+  pi.onAck = null
+  try {
+    startTyping()
+    const texts = await pi.promptWithRecovery(text + wakeHint)
+    stopTyping()
+    const reply = texts.join("\n").trim()
+    if (reply && !/^\[SILENT\]$/i.test(reply)) await sendPrivate(reply)
+    log("wake delivered", text.slice(0, 40))
+  } catch (e) {
+    stopTyping()
+    log("wake failed", String(e).slice(0, 200))
+    // 没跑成：回落到后台窗口，总比无声消失好
+    wakeFallbackToHome({ id, text })
+  }
+}
+
 // ———————————————— 私聊 ————————————————
 async function handlePrivateNow(msg) {
   if (Number(msg.user_id) !== ownerQQ) return
@@ -904,7 +926,7 @@ function recentProactiveNote(hours = 12, max = 5) {
 }
 
   const proactive = recentProactiveNote()
-  const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n${proactive}（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
+  const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n${proactive}${otherWindowsNote(WORLD)}\n（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
   log("private in", text.slice(0, 60), "attachments", attachments.length)
   startTyping()
   // 她调工具前先应一声，就把那句立刻发出去；她闷头调工具就不代发，安静等结果
@@ -1343,26 +1365,64 @@ async function idleWatchdog() {
   }
 }
 
+const controlDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+
+/** 桥接没能消费掉的唤醒：写成一条给 home 的命令，让扩展在后台窗口醒来 + reach_out */
+function wakeFallbackToHome(c) {
+  try {
+    const file = join(ROOT, "control", `commands-${controlDay(new Date())}.jsonl`)
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const line = JSON.stringify({ id, at: Date.now(), target: "home", action: "wake-fallback", text: String(c.text || ""), reason: "桥接没能消费，回落" }) + "\n"
+    appendFileSync(file, line, { mode: 0o600 })
+    log("wake fallback → home", String(c.id || ""))
+  } catch (e) { log("wake fallback failed", String(e).slice(0, 160)) }
+}
+
 function pollBridgeControl() {
   try {
-    const d = new Date()
-    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-    const file = join(ROOT, "control", `commands-${day}.jsonl`)
-    if (!existsSync(file)) return
-    // 不按固定尾窗截断：一次突发几百条时，靠前的 abort 也要能被认领
-    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-2000)
+    const now = new Date()
+    const files = []
+    // 前后各扫一天：23:59 写的命令，跨零点轮询也能认领
+    for (let i = -1; i <= 1; i++) {
+      const x = new Date(now)
+      x.setDate(x.getDate() - i)
+      files.push(join(ROOT, "control", `commands-${controlDay(x)}.jsonl`))
+    }
     let changed = false
-    for (const line of lines) {
-      let c
-      try { c = JSON.parse(line) } catch { continue }
-      if (!c?.id || bridgeSeen[c.id]) continue
-      if (!c.at || Date.now() - c.at > 5 * 60_000) { bridgeSeen[c.id] = true; changed = true; continue }
-      // 只认终止类命令；其它 action 留给 pi 扩展自己处理
-      if (c.action !== "abort") continue
-      if (c.target !== "qq" && c.target !== "all") { bridgeSeen[c.id] = true; changed = true; continue }
-      bridgeSeen[c.id] = true
-      changed = true
-      void abortFromBoard(c.id)
+    // 一轮最多认领一条 wake：pi.running 要等下一拍才真，别一口气把积压的全收了
+    let claimedWake = false
+    for (const file of files) {
+      if (!existsSync(file)) continue
+      const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-2000)
+      for (const line of lines) {
+        let c
+        try { c = JSON.parse(line) } catch { continue }
+        if (!c?.id || bridgeSeen[c.id]) continue
+        // 过期命令：wake 不能静默丢，回落到后台窗口
+        if (!c.at || Date.now() - c.at > 5 * 60_000) {
+          bridgeSeen[c.id] = true
+          changed = true
+          if (c.action === "wake") wakeFallbackToHome(c)
+          continue
+        }
+        // 闹钟/心跳想在这个私聊里醒：由扩展写 action:"wake"，这里在私聊会话里触发一轮
+        if (c.action === "wake") {
+          if (c.target !== "qq" && c.target !== "all") { bridgeSeen[c.id] = true; changed = true; continue }
+          // 忙或断线时不认领：窗口内下一轮再试；过期时上面会回落
+          if (!wsReady || !pi || pi.running || claimedWake) continue
+          bridgeSeen[c.id] = true
+          changed = true
+          claimedWake = true
+          void wakeFromControl(String(c.text || ""), c.id, String(c.wakeHint || ""))
+          continue
+        }
+        // 只认终止类命令；其它 action 留给 pi 扩展自己处理
+        if (c.action !== "abort") continue
+        if (c.target !== "qq" && c.target !== "all") { bridgeSeen[c.id] = true; changed = true; continue }
+        bridgeSeen[c.id] = true
+        changed = true
+        void abortFromBoard(c.id)
+      }
     }
     if (changed) saveBridgeSeen()
   } catch { /* ignore */ }
