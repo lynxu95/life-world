@@ -78,6 +78,22 @@ check_deps() {
     echo "  · 没装 ffmpeg / imagemagick：超过 8MB 的图片不会自动缩，其它不受影响"
   fi
 
+  # QQ 语音常是 SILK，ffmpeg 自己解不了，得靠外部解码器
+  # 顺序和桥接里一致：LIFE_WORLD_PYTHON → 插件 venv → 系统 python3
+  silk_py=""
+  for py in "${LIFE_WORLD_PYTHON:-}" "${ROOT}/venv/bin/python" python3; do
+    [ -n "$py" ] || continue
+    if "$py" -c "import pilk" >/dev/null 2>&1; then silk_py="$py"; break; fi
+  done
+  if [ -n "$silk_py" ]; then
+    echo "  ✓ SILK 解码器（pilk @ ${silk_py}）：QQ 语音能转成 wav"
+  elif command -v silk_v3_decoder >/dev/null 2>&1 || command -v silk-decoder >/dev/null 2>&1; then
+    echo "  ✓ SILK 解码器（C 版）：QQ 语音能转成 wav"
+  else
+    echo "  · 没装 SILK 解码器：QQ 语音多半转不成可听的格式"
+    echo "    交给 AI 自己装：${ROOT}/venv/bin/python -m pip install pilk（没有 venv 就先 python3 -m venv ${ROOT}/venv）"
+  fi
+
   echo "  · 启动常驻：装好后跑 ${ROOT}/bin/lwctl start（或对应平台的 bin/start-*.sh）"
 }
 
@@ -104,6 +120,11 @@ ensure_world() {
   cp "$SRC"/bin/rpc-adapter.mjs "$ROOT/bin/rpc-adapter.mjs"
   if [ ! -f "$ROOT/bin/rpc-adapter.mjs" ]; then
     echo "✗ 缺少 rpc-adapter.mjs —— 桥接和家会话都起不来，安装中止" >&2
+    exit 1
+  fi
+  cp "$SRC"/bin/media-sniff.mjs "$ROOT/bin/media-sniff.mjs" 2>/dev/null || true
+  if [ ! -f "$ROOT/bin/media-sniff.mjs" ]; then
+    echo "✗ 缺少 media-sniff.mjs —— QQ 桥接起不来，安装中止" >&2
     exit 1
   fi
   cp "$SRC"/bin/control-queue.mjs "$ROOT/bin/control-queue.mjs" 2>/dev/null || true

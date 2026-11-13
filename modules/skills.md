@@ -14,4 +14,4 @@
 - 实在必须放在外面（系统级依赖、多个技能共用的 helper），在 `SKILL.md` 里写清：绝对路径、为什么放外面、怎么安装或恢复。
 - frontmatter 至少写 `name`、`description`（说清做什么、什么时候用）、`tags`；正文写用法、命令、依赖和验收标准。
 - 下载的技能不要直接改上游文件；自己的封装放同目录独立文件，并在 `SKILL.md` 注明哪部分是上游、哪部分是自己加的。
-- Python 技能优先用 `~/.local/share/life-world/venv/bin/python`（存在时）；也可用 `LIFE_WORLD_PYTHON` 指定。往 venv 装包前先问用户。
+- Python 技能优先用 `~/.local/share/life-world/venv/bin/python`（存在时）；也可用 `LIFE_WORLD_PYTHON` 指定。往 venv 装包前先问用户；例外是插件自身功能要用的工具包（比如听 SILK 语音的 `pilk`），可以直接装进这个 venv。

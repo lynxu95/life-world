@@ -24,6 +24,7 @@ import {
   isAssistant, isToolUse, isError, isOverflow, errorMessage, settledAborted, responseOk, responseError,
   textOf as rpcTextOf, toolCallOf, reqPrompt, reqAbort, reqAbortBash, reqExtensionUIResponse,
 } from "./rpc-adapter.mjs"
+import { sniffAudioExt, convertSilkToWav } from "./media-sniff.mjs"
 
 const HOME = homedir()
 const ROOT = process.env.LIFE_WORLD_ROOT || join(HOME, ".local/share/life-world")
@@ -283,7 +284,7 @@ function mediaParts(msg) {
 function imagePayload(path) {
   return { type: "image", data: readFileSync(path).toString("base64"), mimeType: mimeOf(path) }
 }
-async function resolveMedia(m, groupId = "") {
+async function resolveMedia(m, groupId = "", outFormat = "mp3") {
   const url = String(m.url || "")
   if (url.startsWith("base64://")) return { ...m, base64: url.slice(9) }
   if (/^data:[^;]+;base64,/i.test(url)) return { ...m, base64: url.split(",")[1] }
@@ -291,16 +292,16 @@ async function resolveMedia(m, groupId = "") {
   if (m.type === "voice") {
     // QQ 语音常是 SILK/AMR；让 OneBot 直接转 mp3，ffmpeg 两个平台都解不了 SILK
     try {
-      const res = await call("get_record", { file: m.file || m.fileId || "", file_id: m.fileId || "", out_format: "mp3" })
+      const res = await call("get_record", { file: m.file || m.fileId || "", file_id: m.fileId || "", out_format: outFormat })
       const d = res?.data || {}
       log("voice get_record", JSON.stringify(d).slice(0, 300))
       const u = String(d.url || "")
-      if (/^https?:\/\//i.test(u)) return { ...m, url: u, name: "voice.mp3" }
+      if (/^https?:\/\//i.test(u)) return { ...m, url: u, name: `voice.${outFormat}` }
       const f = String(d.file || "")
-      if (/^https?:\/\//i.test(f)) return { ...m, url: f, name: "voice.mp3" }
-      if (f.startsWith("base64://")) return { ...m, base64: f.slice(9), name: "voice.mp3" }
-      if (/^data:/i.test(f)) return { ...m, base64: f.split(",")[1], name: "voice.mp3" }
-      if (f && existsSync(f)) return { ...m, localPath: f, name: "voice.mp3" }
+      if (/^https?:\/\//i.test(f)) return { ...m, url: f, name: `voice.${outFormat}` }
+      if (f.startsWith("base64://")) return { ...m, base64: f.slice(9), name: `voice.${outFormat}` }
+      if (/^data:/i.test(f)) return { ...m, base64: f.split(",")[1], name: `voice.${outFormat}` }
+      if (f && existsSync(f)) return { ...m, localPath: f, name: `voice.${outFormat}` }
     } catch (e) { log("get_record failed", String(e)) }
     return undefined
   }
@@ -423,9 +424,11 @@ async function downloadMedia(m, maxBytes) {
   } else { lastAttachmentIssue = "download"; return undefined }
   if (buf.length > HARD_CAP_BYTES) { lastAttachmentIssue = "too_large"; return undefined }
   mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 })
+  // OneBot 说转 mp3 也常常原样给 SILK：按文件头定扩展名，别让下游当 mp3 去解
+  const sniffed = m.type === "voice" ? sniffAudioExt(buf) : ""
   const ext = m.type === "image"
     ? ((String(m.name || m.url || "").match(/\.(png|jpe?g|gif|webp)/i) || [".jpg"])[0])
-    : ((String(m.name || "").match(/\.[A-Za-z0-9]{1,8}$/) || [".bin"])[0])
+    : (sniffed || (String(m.name || "").match(/\.[A-Za-z0-9]{1,8}$/) || [".bin"])[0])
   let path = join(TMP_DIR, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
   writeFileSync(path, buf, { mode: 0o600 })
   if (buf.length > maxBytes) {
@@ -446,16 +449,41 @@ async function downloadMedia(m, maxBytes) {
     try { unlinkSync(path) } catch { /* ignore */ }
     path = small
   }
-  return { path, name: m.name || basename(path) }
+  return { path, name: sniffed ? basename(path) : (m.name || basename(path)) }
 }
+/** 语音落地的统一收口：SILK 能转就转，转不了打标记（所有路径都要经过这里） */
+function finalizeVoice(got) {
+  if (!got) return undefined
+  if (!got.path.endsWith(".silk")) return got
+  const wav = convertSilkToWav(got.path, got.path.replace(/\.silk$/, ".wav"))
+  if (wav) {
+    try { unlinkSync(got.path) } catch { /* ignore */ }
+    log("voice silk converted", basename(wav))
+    return { path: wav, name: basename(wav) }
+  }
+  log("voice still silk", basename(got.path))
+  return { ...got, unsupported: "silk" }
+}
+
 async function fetchAttachment(m, maxBytes, groupId = "") {
-  // 语音优先让 OneBot 转 mp3，避免拿到 SILK
+  // 语音优先让 OneBot 转 mp3，避免拿到 SILK；转失败就换 wav 再试一次
   if (m.type === "voice") {
-    const fresh = await resolveMedia({ ...m, url: "", base64: undefined, localPath: undefined }, groupId)
-    if (fresh) {
+    let silk
+    for (const fmt of ["mp3", "wav"]) {
+      const fresh = await resolveMedia({ ...m, url: "", base64: undefined, localPath: undefined }, groupId, fmt)
+      if (!fresh) continue
       const got = await downloadMedia(fresh, maxBytes)
-      if (got) return got
+      if (!got) continue
+      if (!got.path.endsWith(".silk")) {
+        if (silk) { try { unlinkSync(silk.path) } catch { /* ignore */ } }
+        return got
+      }
+      if (silk) { try { unlinkSync(got.path) } catch { /* ignore */ } }
+      else silk = got
     }
+    if (silk) return finalizeVoice(silk)
+    // 兜底：记录段自带 url 时直接下；这里不再多要一次 get_record
+    return finalizeVoice(await downloadMedia(m, maxBytes))
   }
   let got = await downloadMedia(m, maxBytes)
   if (got) return got
@@ -825,8 +853,17 @@ async function handlePrivateNow(msg) {
     return
   }
   const images = attachments.filter((a) => a.type === "image").map((a) => imagePayload(a.path))
+  const silkVoices = attachments.filter((a) => a.unsupported === "silk")
+  const describe = (a) => a.type === "image" ? `[图片 ${basename(a.path)}]`
+    : a.type === "voice"
+      ? (a.unsupported === "silk" ? `[语音 ${basename(a.path)}：SILK 格式，本机解不了，听不到]` : `[语音 ${basename(a.path)}：${a.path}]`)
+      : `[文件 ${basename(a.path)}：${a.path}]`
+  const hasImage = attachments.some((a) => a.type === "image")
+  const noteTail = silkVoices.length
+    ? `SILK 语音听不了：可以自己往插件 venv 装解码器（${join(ROOT, "venv/bin/python")} -m pip install pilk），装好让他重发一次；装不了就直说没听清。${hasImage ? "图片已附在请求里。" : ""}其它文件路径可直接用 read 工具读。`
+    : "图片已附在请求里，语音可以用 perceive({ path: \"…\", kind: \"audio\" }) 听，文件路径可直接用 read 工具读。"
   const notes = attachments.length
-    ? `\n（对方发来 ${attachments.length} 个附件：${attachments.map((a) => a.type === "image" ? `[图片 ${basename(a.path)}]` : a.type === "voice" ? `[语音 ${basename(a.path)}：${a.path}]` : `[文件 ${basename(a.path)}：${a.path}]`).join("、")}；图片已附在请求里，语音可以用 perceive({ path: "…", kind: "audio" }) 听，文件路径可直接用 read 工具读。）`
+    ? `\n（对方发来 ${attachments.length} 个附件：${attachments.map(describe).join("、")}；${noteTail}）`
     : (media.length ? `\n（对方发了 ${media.length} 个附件，但都没下载下来。）` : "")
   /** 读主动发送流水：对方隔很久才回时，让会话知道「我之前发过什么」 */
 function recentProactiveNote(hours = 12, max = 5) {

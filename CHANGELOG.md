@@ -15,6 +15,22 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.8.1] - 2026-11-13
+
+### 修复
+
+- **QQ 语音拿到 SILK 却被当成 mp3 存**：OneBot 的 `get_record(out_format="mp3")` 在部分实现上
+  仍原样返回 SILK（文件头 `#!SILK_V3`），桥接按 `.mp3` 落盘后 ffmpeg 解不了，听起来只有一声「滋」。
+  - 落盘前按**文件头**判断真实格式再命名（`.silk` / `.amr` / `.mp3` / `.wav` / `.ogg` / `.m4a`）；
+  - mp3 拿不到就**换 wav 再要一次**；
+  - 仍是 SILK 时，本机若装了解码器（**优先用插件自己的 venv**：`<ROOT>/venv/bin/pip install pilk`；
+    也支持 `LIFE_WORLD_PYTHON` 指定的解释器和 C 版 `silk_v3_decoder`）自动转 `.wav`；
+  - 都没有就保留 `.silk`，并在附件注记里明确写「SILK 格式，听不到」，不再假装可听；
+    模块文档同步告诉 AI：遇到 `.silk` 就自己往插件 venv 里装 `pilk`（插件自己的隔离环境，可直接装），
+    装完让对方重发一次即可，装不了再如实说。
+  - 新增 `bin/media-sniff.mjs`（`install.sh` 会装上，缺了会拒绝安装）；`install.sh` 的环境检查里
+    增加解码器状态提示。装了 pilk 但不是 `python3` 的话，用 `LIFE_WORLD_PYTHON` 指定解释器。
+
 ## [1.8.0] - 2026-11-13
 
 ### 新增

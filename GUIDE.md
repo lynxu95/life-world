@@ -146,8 +146,10 @@ worlds/default/skills/
 python3 -m venv ~/.local/share/life-world/venv
 ```
 
-  建好后 `skill_run` 会**自动优先用** `~/.local/share/life-world/venv/bin/python`；也可以用环境变量 `LIFE_WORLD_PYTHON` 指定别的解释器。往 venv 里装包前先问用户。
+  建好后 `skill_run` 会**自动优先用** `~/.local/share/life-world/venv/bin/python`；也可以用环境变量 `LIFE_WORLD_PYTHON` 指定别的解释器。往 venv 里装包前先问用户；插件自身功能要用的包（如听 SILK 的 `pilk`）例外，可以直接装。
 - venv 在 `worlds/default` 外面，不会进世界快照；重建世界数据不受影响。
+- 这个 venv 也用来解 QQ 语音的 SILK：`venv/bin/python -m pip install pilk` 之后，桥接收到 SILK 会自己转成 wav；
+  没装的话 AI 会按模块文档自己装上再让对方重发。
 
 ---
 
