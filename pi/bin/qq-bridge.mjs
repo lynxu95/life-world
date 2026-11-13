@@ -828,7 +828,45 @@ async function handlePrivateNow(msg) {
   const notes = attachments.length
     ? `\n（对方发来 ${attachments.length} 个附件：${attachments.map((a) => a.type === "image" ? `[图片 ${basename(a.path)}]` : a.type === "voice" ? `[语音 ${basename(a.path)}：${a.path}]` : `[文件 ${basename(a.path)}：${a.path}]`).join("、")}；图片已附在请求里，语音可以用 perceive({ path: "…", kind: "audio" }) 听，文件路径可直接用 read 工具读。）`
     : (media.length ? `\n（对方发了 ${media.length} 个附件，但都没下载下来。）` : "")
-  const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
+  /** 读主动发送流水：对方隔很久才回时，让会话知道「我之前发过什么」 */
+function recentProactiveNote(hours = 12, max = 5) {
+  try {
+    const dir = join(WORLD, "proactive")
+    if (!existsSync(dir)) return ""
+    const since = Date.now() - hours * 3600_000
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort().slice(-2)
+    const items = []
+    for (const f of files) {
+      for (const line of readFileSync(join(dir, f), "utf8").split("\n")) {
+        if (!line.trim()) continue
+        let rec
+        try { rec = JSON.parse(line) } catch { continue }
+        const t = Date.parse(rec.t || "")
+        if (!Number.isFinite(t) || t < since) continue
+        items.push(rec)
+      }
+    }
+    if (!items.length) return ""
+    const label = (k) => (k === "image" ? "图片" : k === "voice" ? "语音" : k === "file" ? "文件" : k)
+    const lines = items.slice(-max).map((r) => {
+      const d = new Date(r.t)
+      const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+      // 云端模型不念正文：本地发过的私密内容不该进云端上下文
+      const cfg = readJson(CONFIG_FILE, {})
+      const cloudMode = !!(cfg?.models?.cloud && MODEL === cfg.models.cloud)
+      const body = cloudMode
+        ? `[${label(r.kind)}]`
+        : (r.kind === "reach"
+          ? String(r.text || "").slice(0, 60).replace(/\s+/g, " ")
+          : `[${label(r.kind)}] ${String(r.name || "").slice(0, 40)}${r.text ? `：${String(r.text).slice(0, 40).replace(/\s+/g, " ")}` : ""}`)
+      return `  ${hm} ${body}`
+    })
+    return `（你最近主动给他发过：\n${lines.join("\n")}\n）\n`
+  } catch { return "" }
+}
+
+  const proactive = recentProactiveNote()
+  const annotated = `[私聊｜${nameOf(msg)}（QQ ${msg.user_id}）] ${text || "（只有附件，没有文字）"}${notes}\n${proactive}（这是 QQ 私聊：按 system 里的规则回复；直接写正文，不要调用 reach_out。）`
   log("private in", text.slice(0, 60), "attachments", attachments.length)
   startTyping()
   // 她调工具前先应一声，就把那句立刻发出去；她闷头调工具就不代发，安静等结果

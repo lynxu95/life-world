@@ -35,6 +35,8 @@ const STICKER_DIR = join(WORLD, "表情包")
 const VOICE_DIR = join(WORLD, "语音")
 const TMP_DIR = join(WORLD, "tmp")
 const OUTBOX_DIR = join(WORLD, "outbox")
+/** 主动发送流水：消息 / 图片 / 语音 / 文件，供她隔很久后回看「我之前发过什么」 */
+const PROACTIVE_DIR = join(WORLD, "proactive")
 /** 技能库：自制 / 下载分开；索引文件按需查 */
 const SKILLS_DIR = join(WORLD, "skills")
 const SKILL_OWN_DIR = join(SKILLS_DIR, "own")
@@ -57,6 +59,66 @@ function readTail(file: string, bytes: number): string {
 }
 
 /** 路径转成 shell 单引号字面量 */
+const BG_MAX_PARALLEL = 3
+const readBgJobs = (): any[] => {
+  try {
+    return readdirSync(BG_DIR)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => {
+        try {
+          const j = JSON.parse(readFileSync(join(BG_DIR, f), "utf8"))
+          if (!j || typeof j !== "object") return null
+          // 文件名必须和 id 一致、日志必须在 bg/ 里：挡住伪造 job 拿来读任意文件
+          if (`${j.id}.json` !== f) return null
+          if (j.log && !String(j.log).startsWith(BG_DIR + sep)) return null
+          if (j.exit && !String(j.exit).startsWith(BG_DIR + sep)) return null
+          return j
+        } catch { return null }
+      })
+      .filter(Boolean)
+  } catch { return [] }
+}
+const bgAlive = (job: any): boolean => {
+  if (!job || job.endedAt || !job.pid) return false
+  // 只靠 kill(pid,0) 会被 pid 复用骗到：再核对命令行里有没有本任务的唯一路径
+  const marker = String(job.exit || "")
+  if (marker) {
+    const psBin = existsSync("/bin/ps") ? "/bin/ps" : "ps"
+    const r = spawnSync(psBin, ["-p", String(job.pid), "-o", "args="], { encoding: "utf8", timeout: 2000 })
+    // ps 不可用时宁可当它没在跑，也别退回 kill(pid,0)——pid 复用会被骗
+    if (r.error) return false
+    const args = String(r.stdout || "")
+    if (args) return args.includes(marker)
+    return false
+  }
+  try { process.kill(Number(job.pid), 0); return true } catch { return false }
+}
+/** 任务状态：退出码文件最可信（pid 结束后可能变僵尸或被复用），其次才看进程 */
+const bgState = (job: any): { state: string; code: number | null; signal?: string | null } => {
+  let code: number | null = null
+  try {
+    const raw = readFileSync(job.exit || join(BG_DIR, `${job.id}.exit`), "utf8").trim()
+    const n = Number(raw)
+    if (raw !== "" && Number.isFinite(n)) code = n
+  } catch { /* 还没写出来 */ }
+  if (code !== null) return { state: code === 0 ? "done" : "failed", code }
+  if (job.endedAt) {
+    if (job.exitCode !== null && job.exitCode !== undefined) {
+      return { state: Number(job.exitCode) === 0 ? "done" : "failed", code: Number(job.exitCode), signal: job.signal || null }
+    }
+    return { state: "failed", code: null, signal: job.signal || null }
+  }
+  if (bgAlive(job)) return { state: "running", code: null }
+  return { state: "unknown", code: null }
+}
+const bgSpan = (ms: number): string => {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total} 秒`
+  const m = Math.floor(total / 60)
+  if (m < 60) return `${m} 分 ${total % 60} 秒`
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
+}
+
 const shqPath = (v: string): string => `'${String(v).replace(/'/g, `'\\''`)}'`
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const BRIDGE_STATE = join(ROOT, "qq-bridge-state.json")
@@ -157,7 +219,7 @@ function readText(path: string): string { try { return existsSync(path) ? readFi
 function readJson<T>(path: string, fallback: T): T { try { return JSON.parse(readFileSync(path, "utf8")) as T } catch { return fallback } }
 
 function ensureDirs(): void {
-  for (const dir of [CONV_DIR, DIARY_DIR, PLAN_DIR, IDENTITY_DIR, ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR, OUTBOX_DIR, SKILLS_DIR, SKILL_OWN_DIR, SKILL_DL_DIR]) {
+  for (const dir of [CONV_DIR, DIARY_DIR, PLAN_DIR, IDENTITY_DIR, ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR, OUTBOX_DIR, PROACTIVE_DIR, SKILLS_DIR, SKILL_OWN_DIR, SKILL_DL_DIR]) {
     try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch { /* ignore */ }
   }
 }
@@ -661,6 +723,39 @@ function wakeSuffix(prefer?: string): { text: string; nextAt: string | null } {
   const ctx = peekRecentContext()
   if (!ctx || !ctx.text) return { text: "", nextAt: null }
   return { text: `\n\n${ctx.text}`, nextAt: ctx.nextAt }
+}
+
+/** 记一笔「我主动发出去的东西」：隔很久对方才回时，靠它回忆前因后果 */
+function logProactive(rec: { kind: string; text?: string; path?: string; name?: string }): void {
+  try {
+    mkdirSync(PROACTIVE_DIR, { recursive: true, mode: 0o700 })
+    const entry = { t: new Date().toISOString(), src: ROLE, target: CHANNEL === "group" ? "group" : "private", ...rec }
+    appendFileSync(join(PROACTIVE_DIR, `${dayOf()}.jsonl`), `${JSON.stringify(entry)}\n`, { mode: 0o600 })
+  } catch (e) { log(`proactive log failed ${String(e)}`) }
+}
+
+/** 读最近 hours 小时内主动发出去的记录（按时间升序返回最后 limit 条） */
+function readProactive(hours = 24, limit = 20, includeGroup = false): Array<{ t: string; kind: string; text?: string; name?: string; src?: string }> {
+  try {
+    if (!existsSync(PROACTIVE_DIR)) return []
+    const h = Math.max(1, Math.min(168, hours))
+    const since = Date.now() - h * 3_600_000
+    const need = Math.min(9, Math.ceil(h / 24) + 1)
+    const files = readdirSync(PROACTIVE_DIR).filter((f) => f.endsWith(".jsonl")).sort().slice(-need)
+    const out: Array<{ t: string; kind: string; text?: string; name?: string; src?: string }> = []
+    for (const f of files) {
+      for (const line of readFileSync(join(PROACTIVE_DIR, f), "utf8").split("\n")) {
+        if (!line.trim()) continue
+        let rec: any
+        try { rec = JSON.parse(line) } catch { continue }
+        const ts = Date.parse(rec.t || "")
+        if (!Number.isFinite(ts) || ts < since) continue
+        if (!includeGroup && rec.target === "group") continue
+        out.push({ t: rec.t, kind: String(rec.kind || "reach"), text: rec.text, name: rec.name, src: rec.src })
+      }
+    }
+    return out.sort((a, b) => Date.parse(a.t) - Date.parse(b.t)).slice(-limit)
+  } catch { return [] }
 }
 
 function archive(message: any): void {
@@ -1627,6 +1722,18 @@ async function tick(): Promise<void> {
     // 每日清理 tmp；桥接心跳检查
     if (state.lastCleanup !== today) {
       if (cleanupTmp(c.cleanup.tmpMaxAgeHours)) updateWorld((s) => { s.lastCleanup = today })
+      // 主动发送流水留 7 天
+      try {
+        if (existsSync(PROACTIVE_DIR)) {
+          const pc = Date.now() - 7 * 86400_000
+          for (const f of readdirSync(PROACTIVE_DIR)) {
+            try {
+              const fp = join(PROACTIVE_DIR, f)
+              if (statSync(fp).isFile() && statSync(fp).mtimeMs < pc) unlinkSync(fp)
+            } catch { /* ignore */ }
+          }
+        }
+      } catch { /* ignore */ }
       // 后台任务的 job / 日志留 7 天；日志超 20MB 截断到 1MB
       try {
         if (existsSync(BG_DIR)) {
@@ -1723,7 +1830,7 @@ async function tick(): Promise<void> {
       const reminder = closedNotes.length ? `\n注意：上一项活动《${closedNotes.join("、")}》还没结束，已强制关闭，它的子闹钟一起关了。` : ""
       const skipNote = skippedLine([...(a.skipped || []), ...closedSkips])
       const wc = wakeSuffix(a.model)
-      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n要盯某件事、过一会儿回来看，就用 heartbeat({ reason: "接着做「${a.note.slice(0, 20)}」", every_minutes: 3 }) 起一条心跳；也可以直接排一条新的日程。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}` + wc.text
+      const text = `【后台任务·活动开始】${shortStamp(a.at)}：${a.note}。\n活动 id：${a.id}。\n等某个任务跑完就用 bg_run({ command, notify: true })，跑完会叫醒你；需要同步陪着他时才用 heartbeat。\n做完或不想做了，用 cancel_alarm({ id: "${a.id}" }) 关闭活动。\n做完就结束；要让他知道就用 reach_out。${reminder}${skipNote ? `\n${skipNote}` : ""}` + wc.text
       const sentOk = a.model
         ? await switchForAlarm(a).then(() => sendTime(text)).catch((e) => { log(`alarm switch failed ${String(e)}`); return sendTime(text) })
         : sendTime(text)
@@ -1821,6 +1928,52 @@ async function tick(): Promise<void> {
           break
         }
       }
+    }
+    // 后台任务完成通知（bg_run 带 notify: true 时，跑完叫醒一次，不用开心跳轮询）
+    if (!woke) {
+      try {
+        if (existsSync(BG_DIR)) {
+          const finished: any[] = []
+          // 用 readBgJobs 的校验版本，别让伪造的 job.json 混进来
+          for (const job of readBgJobs()) {
+            if (!job?.notify || job.notified) continue
+            const st = bgState(job)
+            if (st.state === "running") continue
+            // 进程没了却既没有 .exit 也没有 endedAt：给 10 分钟宽限，之后按异常结束报
+            if (st.state === "unknown") {
+              const started = Date.parse(job.startedAt || "")
+              if (!Number.isFinite(started) || Date.now() - started < 10 * 60_000) continue
+            }
+            finished.push({ ...job, ...st })
+          }
+          if (finished.length) {
+            const wc = wakeSuffix()
+            const lines = finished.map((j) => {
+              const codeText = j.state === "failed" && (j.code === null || j.code === undefined)
+                ? (j.signal ? `被 ${j.signal} 终止` : "异常结束")
+                : `退出码 ${j.code}`
+              const started = Date.parse(j.startedAt || "")
+              const mins = Number.isFinite(started) ? Math.max(1, Math.round((Date.now() - started) / 60_000)) : null
+              return `- ${j.id}${j.label ? `（${j.label}）` : ""}：${codeText}${mins ? `，跑了约 ${mins} 分钟` : ""}`
+            })
+            const text = `【后台任务完成】\n${lines.join("\n")}\n看输出用 bg_output({ id })。` + wc.text
+            if (sendTime(text)) {
+              if (wc.nextAt) commitWakeContext(wc.nextAt)
+              for (const j of finished) {
+                try {
+                  const jp = join(BG_DIR, `${j.id}.json`)
+                  const cur = JSON.parse(readFileSync(jp, "utf8"))
+                  cur.notified = true
+                  atomicWrite(jp, JSON.stringify(cur, null, 2))
+                } catch { /* ignore */ }
+              }
+              woke = true
+            } else {
+              log("bg notify send failed, retry next tick")
+            }
+          }
+        }
+      } catch (e) { log(`bg notify failed ${String(e)}`) }
     }
     if (woke) return
     maybeRandomCare()
@@ -3284,75 +3437,17 @@ export default function (pi: ExtensionAPI) {
   })
 
   // —— 后台任务：生图 / 转码这类长命令扔到 detached 进程，先回话，稍后再查 ——
-  const BG_MAX_PARALLEL = 3
-  const readBgJobs = (): any[] => {
-    try {
-      return readdirSync(BG_DIR)
-        .filter((f) => f.endsWith(".json"))
-        .map((f) => {
-          try {
-            const j = JSON.parse(readFileSync(join(BG_DIR, f), "utf8"))
-            if (!j || typeof j !== "object") return null
-            // 文件名必须和 id 一致、日志必须在 bg/ 里：挡住伪造 job 拿来读任意文件
-            if (`${j.id}.json` !== f) return null
-            if (j.log && !String(j.log).startsWith(BG_DIR + sep)) return null
-            if (j.exit && !String(j.exit).startsWith(BG_DIR + sep)) return null
-            return j
-          } catch { return null }
-        })
-        .filter(Boolean)
-    } catch { return [] }
-  }
-  const bgAlive = (job: any): boolean => {
-    if (!job || job.endedAt || !job.pid) return false
-    // 只靠 kill(pid,0) 会被 pid 复用骗到：再核对命令行里有没有本任务的唯一路径
-    const marker = String(job.exit || "")
-    if (marker) {
-      const psBin = existsSync("/bin/ps") ? "/bin/ps" : "ps"
-      const r = spawnSync(psBin, ["-p", String(job.pid), "-o", "args="], { encoding: "utf8", timeout: 2000 })
-      // ps 不可用时宁可当它没在跑，也别退回 kill(pid,0)——pid 复用会被骗
-      if (r.error) return false
-      const args = String(r.stdout || "")
-      if (args) return args.includes(marker)
-      return false
-    }
-    try { process.kill(Number(job.pid), 0); return true } catch { return false }
-  }
-  /** 任务状态：退出码文件最可信（pid 结束后可能变僵尸或被复用），其次才看进程 */
-  const bgState = (job: any): { state: string; code: number | null; signal?: string | null } => {
-    let code: number | null = null
-    try {
-      const raw = readFileSync(job.exit || join(BG_DIR, `${job.id}.exit`), "utf8").trim()
-      const n = Number(raw)
-      if (raw !== "" && Number.isFinite(n)) code = n
-    } catch { /* 还没写出来 */ }
-    if (code !== null) return { state: code === 0 ? "done" : "failed", code }
-    if (job.endedAt) {
-      if (job.exitCode !== null && job.exitCode !== undefined) {
-        return { state: Number(job.exitCode) === 0 ? "done" : "failed", code: Number(job.exitCode), signal: job.signal || null }
-      }
-      return { state: "failed", code: null, signal: job.signal || null }
-    }
-    if (bgAlive(job)) return { state: "running", code: null }
-    return { state: "unknown", code: null }
-  }
-  const bgSpan = (ms: number): string => {
-    const total = Math.max(0, Math.round(ms / 1000))
-    if (total < 60) return `${total} 秒`
-    const m = Math.floor(total / 60)
-    if (m < 60) return `${m} 分 ${total % 60} 秒`
-    return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
-  }
 
   addTool(pi, {
     name: "bg_run",
     label: "Background run",
-    description: "把可能跑很久的命令扔到后台，立刻返回，不占着这一轮。适合生图、转码、下载、长脚本。跑完用 bg_status 看状态、bg_output 读输出。",
+    description: "把可能跑很久的命令扔到后台，立刻返回，不占着这一轮。适合生图、转码、下载、长脚本。加 notify: true 会在跑完时自动叫醒你一次（等任务完成用这个，别开轮询）；也可以随时 bg_status / bg_output 看进度。",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "要执行的 shell 命令（在 life-world 根目录下跑）" },
         label: { type: "string", description: "一句话说明这是干嘛的，查状态时好认" },
+        notify: { type: "boolean", description: "跑完自动叫醒你一次；等任务完成用这个，别开心跳轮询" },
       },
       required: ["command"],
     },
@@ -3371,6 +3466,7 @@ export default function (pi: ExtensionAPI) {
       const exitFile = join(BG_DIR, `${id}.exit`)
       const job = {
         id, label: String(params?.label || "").replace(/\s+/g, " ").trim().slice(0, 60),
+        notify: params?.notify === true, notified: false,
         command: command.slice(0, 2000),
         pid: 0, startedAt: new Date().toISOString(), endedAt: null, exitCode: null,
         log, exit: exitFile, cwd: ROOT,
@@ -3500,7 +3596,7 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "heartbeat",
     label: "Heartbeat",
-    description: "起一个固定间隔的心跳串：每隔 N 分钟醒一次，用来盯后台任务、等一个过程、或者保持连续关注。理由写一次，之后每一跳都带着；每跳结束后会自动续下一跳（最多 60 跳）。同时最多 2 条串；不需要了用 heartbeat_stop 停掉。",
+    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 分钟在当下醒一次，像一直坐在旁边。理由写一次，之后每一跳都带着；每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
     parameters: {
       type: "object",
       properties: {
@@ -3596,6 +3692,41 @@ export default function (pi: ExtensionAPI) {
   })
 
   addTool(pi, {
+    name: "check_proactive",
+    label: "Check proactive",
+    description: "查你最近主动发出去的东西（消息 / 图片 / 语音 / 文件）。对方隔了很久才回你的时候，先看一眼这个再回，别一头雾水「我什么时候找过你」。",
+    parameters: {
+      type: "object",
+      properties: {
+        hours: { type: "number", description: "回溯多少小时，默认 24，最多 168" },
+        limit: { type: "number", description: "最多几条，默认 20，最多 100" },
+      },
+    },
+    async execute(_id: string, params: any) {
+      if (JUDGE || CHANNEL === "group") return ok("这个会话不用查。")
+      const hours = Math.max(1, Math.min(168, Number(params?.hours) || 24))
+      const limit = Math.max(1, Math.min(100, Number(params?.limit) || 20))
+      const list = readProactive(hours, limit)
+      if (!list.length) return ok(`最近 ${hours} 小时没有主动发过东西。`)
+      // 云端模式不念正文：本地发过的私密内容不该进云端上下文
+      const o = config().models
+      const cloudNow = !!(o.local && lastCtx && modelIdOf(lastCtx) !== o.local)
+      if (cloudNow) {
+        const kinds = list.map((r) => (r.kind === "reach" ? "消息" : r.kind === "image" ? "图片" : r.kind === "voice" ? "语音" : r.kind === "file" ? "文件" : r.kind))
+        return ok(`最近 ${hours} 小时主动发过 ${list.length} 条：${kinds.join("、")}。（云端模式不读正文；要看内容请切回本地模型。）`)
+      }
+      const label = (k: string) => (k === "reach" ? "消息" : k === "image" ? "图片" : k === "voice" ? "语音" : k === "file" ? "文件" : k)
+      const lines = list.map((r) => {
+        const d = new Date(r.t)
+        const hm = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+        const body = r.kind === "reach" ? String(r.text || "").slice(0, 120) : `[${label(r.kind)}] ${r.name || ""}${r.text ? `：${String(r.text).slice(0, 80)}` : ""}`
+        return `- ${hm}（${r.src || "?"}）${body}`
+      })
+      return ok(`最近 ${hours} 小时主动发过 ${list.length} 条：\n${lines.join("\n")}`)
+    },
+  })
+
+  addTool(pi, {
     name: "check_alarm",
     label: "Check alarms",
     description: "看现在的日程、心跳串、跳过的唤醒和旧版一次性闹钟。",
@@ -3614,7 +3745,7 @@ export default function (pi: ExtensionAPI) {
         const mState = m.status === "active" ? "进行中" : m.status === "closed" ? "已结束" : "待开始"
         lines.push(`- 活动《${m.note}》（${mState}；${shortStamp(m.at)}；id ${m.id}）${m.paused ? "【已暂停】" : ""}`)
         if (m.skipped?.length) lines.push(`  - 跳过：${m.skipped.map((s) => `${shortStamp(s.scheduled)} ${s.note}`).join("、")}`)
-        if (m.status === "active") lines.push(`  - 想每隔几分钟回来看一眼，就 heartbeat({ reason: "接着做「${m.note.slice(0, 16)}」", every_minutes: 3 })`)
+        if (m.status === "active") lines.push(`  - 等任务跑完用 bg_run({ notify: true })；需要同步陪着对方时才用 heartbeat`)
       }
       // 心跳串（独立于日程）
       const beatMap = new Map<string, Alarm[]>()
@@ -3703,6 +3834,7 @@ export default function (pi: ExtensionAPI) {
       try {
         mkdirSync(OUTBOX_DIR, { recursive: true, mode: 0o700 })
         appendFileSync(join(OUTBOX_DIR, `${dayOf()}.jsonl`), `${JSON.stringify({ t: new Date().toISOString(), kind: "reach", text, session: "pi" })}\n`, { mode: 0o600 })
+        logProactive({ kind: "reach", text })
       } catch (e) { return ok(`写 outbox 失败：${String(e)}`) }
       return ok("话放出去了，桥接会送到对方 QQ。")
     },
@@ -3734,10 +3866,13 @@ export default function (pi: ExtensionAPI) {
         if (mediaType === "file") return ok("群聊不发文件。")
         if (!real.startsWith(realpathSync(STICKER_DIR) + sep) && !real.startsWith(realpathSync(VOICE_DIR) + sep)) return ok("群聊只能从 表情包/语音 里发。")
       }
+      const status = bridgeStatus()
+      if (status !== "在线") return ok(`OneBot 桥接${status}，这条媒体没有送出去。`)
       const target = CHANNEL === "group" ? { kind: "group", id: GROUP_ID } : { kind: "private" }
       try {
         mkdirSync(OUTBOX_DIR, { recursive: true, mode: 0o700 })
         appendFileSync(join(OUTBOX_DIR, `${dayOf()}.jsonl`), `${JSON.stringify({ t: new Date().toISOString(), kind: "media", path: real, name: basename(real), mediaType, text: String(params.text || "").trim(), session: "pi", target })}\n`, { mode: 0o600 })
+        logProactive({ kind: mediaType, text: String(params.text || "").trim(), path: real, name: basename(real) })
       } catch (e) { return ok(`写 outbox 失败：${String(e)}`) }
       return ok(`已经交给桥接：${basename(real)}。投递结果未知。`)
     },
