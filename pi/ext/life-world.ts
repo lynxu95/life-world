@@ -3893,7 +3893,7 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "heartbeat",
     label: "Heartbeat",
-    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 秒/分钟在当下醒一次，像一直坐在旁边。理由写一次，之后每一跳都带着；每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
+    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 秒/分钟在当下醒一次，像一直坐在旁边。**没有会话/窗口参数**：在哪个窗口起，之后每一跳就回到那个窗口醒（私聊里起的回私聊，桥接离线才回后台）。理由写一次，之后每一跳都带着；每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
     parameters: {
       type: "object",
       properties: {
