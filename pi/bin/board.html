@@ -1639,13 +1639,22 @@ function layoutBrain() {
     const a = (i / Math.max(1, docs.length)) * Math.PI * 2 - Math.PI / 2
     pos.set(node.id, { x: Math.cos(a) * 2.4, y: i % 2 === 0 ? 0.7 : -0.7, z: Math.sin(a) * 2.4 })
   })
-  // 辅助文档（存档/待沉淀）：主星外的第二层，像核外电子一样一圈高速绕行
+  // 辅助文档（存档/待沉淀）：三条各自倾斜的电子轨道，各走一个平面，不在同一圈上
   const SAT_R = 7.6
-  const sats = nodes.filter((node) => node.kind === "satellite")
-  sats.forEach((node, i) => {
-    const a = (i / Math.max(1, sats.length)) * Math.PI * 2 - Math.PI / 2
-    pos.set(node.id, { x: Math.cos(a) * SAT_R, y: 0, z: Math.sin(a) * SAT_R })
-  })
+  const SAT_TILT = [0.62, -0.58, 0.3]
+  const SAT_PSI = [0, 1.15, 2.35]
+  const satList = nodes.map((node, i) => ({ node, i })).filter(({ node }) => node.kind === "satellite")
+  BRAIN.satPoses = satList.map(({ node, i }, k) => ({
+    i,
+    id: node.id,
+    R: SAT_R + (k % 2 ? 0.4 : 0),
+    base: (k / Math.max(1, satList.length)) * Math.PI * 2 - Math.PI / 2,
+    tilt: SAT_TILT[k % SAT_TILT.length],
+    psi: SAT_PSI[k % SAT_PSI.length],
+    spin: 7.2 + ((hashStr(node.id) % 30) / 100),
+  }))
+  BRAIN.satPoseById = new Map(BRAIN.satPoses.map((q) => [q.id, q]))
+  satList.forEach(({ node }, k) => pos.set(node.id, satPos(BRAIN.satPoses[k], 0)))
   const idx = new Map(nodes.map((node, i) => [node.id, i]))
   const arr = nodes.map((node) => pos.get(node.id))
   for (let it = 0; it < 55; it++) {
@@ -1683,10 +1692,20 @@ function layoutBrain() {
   const clamped = raw.map((f) => Math.max(0.8, Math.min(1.6, f)))
   const avg = clamped.reduce((a, b) => a + b, 0) / Math.max(1, clamped.length) || 1
   arr.forEach((p, i) => { p.rot = clamped[i] / avg })
-  // 第二层辅助文档：自转因子拉大，绕核速度明显快于主星（电子层的感觉）
-  nodes.forEach((n, i) => { if (n.kind === "satellite") arr[i].rot = 7.2 + ((hashStr(n.id) % 30) / 100) })
+  // 辅助文档的转速在 satPose.spin 里单独算（三维倾斜轨道），这里不再给它们额外的整体自转
+  nodes.forEach((n, i) => { if (n.kind === "satellite") arr[i].rot = 1 })
   BRAIN.meanR = meanR
   BRAIN.maxR = radii.reduce((m, r) => Math.max(m, r), 6)
+}
+
+// 卫星的三维轨道：圆环半径 R，先绕 X 轴倾 tilt，再绕 Y 轴转 psi；位置逐帧算
+function satPos(pose, yaw, dAngle = 0) {
+  const a = pose.base + yaw * (pose.spin - 1) + dAngle
+  const x = Math.cos(a) * pose.R, z = Math.sin(a) * pose.R
+  const ct = Math.cos(pose.tilt), st = Math.sin(pose.tilt)
+  const y1 = -z * st, z1 = z * ct
+  const cp = Math.cos(pose.psi), sp = Math.sin(pose.psi)
+  return { x: x * cp - z1 * sp, y: y1, z: x * sp + z1 * cp, rot: 1 }
 }
 
 function projectPoint(p, w, h, fitK) {
@@ -1830,24 +1849,20 @@ function satRgb(node) {
 }
 // 彗尾：沿各自轨道往后拖一段渐淡弧线，转得越快尾巴越张
 function drawOrbitTrails(ctx, proj, w, h, fitK, focus, focusMix) {
-  BRAIN.nodes.forEach((node, i) => {
-    if (node.kind !== "satellite") return
-    const p = BRAIN.pos[i], pp = proj[i]
-    if (!p || !pp) return
-    const R = Math.hypot(p.x, p.z)
-    if (!R) return
-    const a0 = Math.atan2(p.z, p.x)
+  if (!BRAIN.filters.doc) return
+  for (const pose of BRAIN.satPoses || []) {
+    const node = BRAIN.nodes[pose.i]
+    if (!node || !proj[pose.i]) continue
     const [r0, g0, b0] = satRgb(node)
     const focusMul = focus && !focus.has(node.id) ? 1 - 0.82 * focusMix : 1
     const q = BRAIN.search
     const queryMul = !q || String(node.content || "").toLowerCase().includes(q) ? 1 : 0.2
-    const span = 1.1, seg = 16, rot = p.rot || 1
+    const span = 1.1, seg = 16
     ctx.save()
     ctx.lineCap = "round"
     let prev = null
     for (let k = 0; k <= seg; k++) {
-      const a = a0 - span * (k / seg)
-      const cur = projectPoint({ x: Math.cos(a) * R, y: p.y, z: Math.sin(a) * R, rot }, w, h, fitK)
+      const cur = projectPoint(satPos(pose, BRAIN.yaw, -span * (k / seg)), w, h, fitK)
       if (prev) {
         const fade = Math.pow(1 - (k - 0.5) / seg, 2.4)
         ctx.strokeStyle = `rgba(${r0},${g0},${b0},${(0.5 * fade * focusMul * queryMul).toFixed(3)})`
@@ -1857,7 +1872,7 @@ function drawOrbitTrails(ctx, proj, w, h, fitK, focus, focusMix) {
       prev = cur
     }
     ctx.restore()
-  })
+  }
 }
 // 到父星的细虚线：待沉淀/存档挂在「我是谁」上，心情·存档挂在「心情」上
 function drawSatelliteTethers(ctx, idx, proj, focus, focusMix) {
@@ -1948,6 +1963,8 @@ function drawBrain(t) {
   ctx.globalAlpha = 1
   const idx = new Map(BRAIN.nodes.map((node, i) => [node.id, i]))
   const fitK = Math.min(24, Math.max(12, (Math.min(w, h) * 0.52) / Math.max(6, BRAIN.maxR || 16)))
+  // 电子的三维轨道逐帧推进（倾斜平面不能靠整体 yaw 旋转，得自己算位置）
+  if (BRAIN.satPoses) for (const pose of BRAIN.satPoses) BRAIN.pos[pose.i] = satPos(pose, BRAIN.yaw)
   const proj = BRAIN.pos.map((p) => projectPoint(p, w, h, fitK))
   const query = BRAIN.search
   const hover = BRAIN.hover
