@@ -631,6 +631,9 @@ class PiSession {
     if (isAgentSettled(msg)) {
       this.running = false
       this.currentTool = null
+      // 扩展可能在本轮里换了新会话（空闲懒刷新）：重新问一次 sessionFile，
+      // 否则桥接重启时会拿旧文件把长会话接回来
+      this.syncSessionFile()
       const collected = this.texts.splice(0)
       // 被中断的这一轮不要半截回复（msg.aborted 是 pi 自己的信号）
       const texts = (this.abortRequested || settledAborted(msg)) ? [] : collected
@@ -647,6 +650,18 @@ class PiSession {
     }
   }
   write(obj) { try { this.child?.stdin.write(JSON.stringify(obj) + "\n") } catch (e) { log("pi write failed", String(e)) } }
+  /** 重新同步当前会话文件（扩展内部 newSession 后桥接不会收到通知） */
+  syncSessionFile() {
+    if (!this.child || this.closed) return
+    this.request("get_state").then((res) => {
+      const file = res?.data?.sessionFile
+      if (!file || file === this.sessionFile) return
+      this.sessionFile = file
+      if (this.channel === "qq") { state.piSessionFile = file; saveState() }
+      log("session file synced", String(file).slice(-48))
+    }).catch(() => {})
+  }
+
   request(type, extra = {}) {
     if (!this.pendingResponses) this.pendingResponses = new Map()
     const id = `r-${++this.reqId}`

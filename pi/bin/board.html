@@ -170,6 +170,7 @@ label.check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--m
 input[type=checkbox]{accent-color:var(--accent)}
 
 /* —— 会话 —— */
+.sess-refresh{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--muted)}
 .sessions{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
 .card{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 11px;background:var(--panel-2);min-width:0}
 .card .top{display:flex;align-items:baseline;gap:8px}
@@ -444,6 +445,12 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <section>
         <div class="sec-head"><h2>会话</h2><span class="spacer"></span><span class="sec-note">10s 刷新</span></div>
         <div class="sessions" id="sessions"><div class="muted">加载中…</div></div>
+        <div class="sess-refresh">
+          <label class="check"><input type="checkbox" id="sr-home">空闲刷新</label>
+          <input type="number" id="sr-min" min="1" max="1440" step="1" style="width:64px" aria-label="空闲刷新分钟数"> 分钟
+          <label class="bf"><input type="checkbox" id="sr-qq">QQ 私聊</label>
+        </div>
+        <div class="hint" id="sr-hint">闲下来超过这个时长，下一次回合结束就换新会话（这一轮仍用旧上下文）。</div>
       </section>
         <section>
           <div class="sec-head"><h2>今日</h2><span class="spacer"></span><span class="sec-note" id="today-note">…</span></div>
@@ -767,6 +774,31 @@ function renderBoardAddr(b) {
 }
 let boardTouched = false
 
+function renderSessionRefresh(sr) {
+  if (!sr) return
+  const min = $("sr-min")
+  if (min && document.activeElement !== min) min.value = sr.idleRefreshMinutes || 30
+  $("sr-home").checked = sr.refreshHome !== false
+  $("sr-qq").checked = sr.refreshQq === true
+
+  $("sr-hint").textContent = `闲下来超过 ${sr.idleRefreshMinutes || 30} 分钟，下一次回合结束就换新会话（这一轮仍用旧上下文）。`
+}
+async function saveSessionRefresh() {
+  const r = await postJson("/api/session-refresh", {
+    idleRefreshMinutes: Number($("sr-min").value) || 30,
+    refreshHome: $("sr-home").checked,
+    refreshQq: $("sr-qq").checked,
+  }).catch(() => null)
+  if (r && r.ok) $("sr-hint").textContent = r.msg
+  else $("sr-hint").textContent = (r && r.msg) || "保存失败，稍后再试"
+}
+for (const id of ["sr-home", "sr-qq"]) $(id).addEventListener("change", saveSessionRefresh)
+$("sr-min").addEventListener("change", () => {
+  const v = Math.max(1, Math.min(1440, Math.round(Number($("sr-min").value) || 30)))
+  $("sr-min").value = v
+  void saveSessionRefresh()
+})
+
 function renderLocalLock(l, cloudModel) {
   const on = !!(l && l.enabled)
   const box = $("lp-enabled")
@@ -813,6 +845,7 @@ async function loadOverview() {
       fillSelect($("m-vision"), (d.multimodal && d.multimodal.model) || "", d.available || [], "（不启用）")
     }
     if (Array.isArray(d.available)) mLoaded = true
+    renderSessionRefresh(d.session)
     renderLocalLock(d.localLock, (d.models && d.models.cloud) || "deepseek/deepseek-flash")
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode

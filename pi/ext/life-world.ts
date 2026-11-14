@@ -293,6 +293,7 @@ interface Config {
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
   guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number; allowRestart: boolean }
   cleanup: { tmpMaxAgeHours: number }
+  session: { idleRefreshMinutes: number; refreshHome: boolean; refreshQq: boolean }
   memory: { decay: DecayOptions; actr: ActrOptions; association: AssociationOptions; impression: ImpressionOptions }
 }
 
@@ -387,6 +388,8 @@ function config(): Config {
     backup: { enabled: true, hour: 4, includePrivate: false },
     guard: { enabled: true, staleSeconds: 300, cooldownMinutes: 10, allowRestart: true },
     cleanup: { tmpMaxAgeHours: 72 },
+    // 空闲会话懒刷新：下一个回合结束后换新会话（默认只开 home）
+    session: { idleRefreshMinutes: 30, refreshHome: true, refreshQq: false },
     memory: {
       decay: { enabled: true, halfLifeDays: 30, hitBoost: 0.15, maxStrength: 3, minStrength: 0.1 },
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
@@ -414,6 +417,7 @@ function config(): Config {
       association: { ...base.memory.association, ...((raw.memory || {}).association || {}) },
       impression: { ...base.memory.impression, ...((raw.memory || {}).impression || {}) },
     },
+    session: { ...base.session, ...(raw.session || {}) },
   }
 }
 
@@ -1636,6 +1640,8 @@ function deliverWake(a: { origin?: string; reason?: string; note?: string; conti
 
 function sendTime(text: string): boolean {
   try {
+    // 正在跑的这一轮里又排了一条唤醒：懒刷新要避开，免得新会话把它吞掉
+    if (isAgentBusy()) wakeQueuedThisTurn = true
     const r = (piRef as any)?.sendMessage?.({ customType: "life-world-time", content: text, display: true }, { triggerTurn: true, deliverAs: "followUp" })
     log(`sendTime ${text.slice(0, 60)}`)
     return r !== false
@@ -1793,6 +1799,31 @@ function heartbeatText(a: Alarm, last = false, why: "jumps" | "time" | null = nu
     reason && reason !== body ? `（起这个心跳的理由：${reason}）` : "",
     tail,
   ].filter(Boolean).join("\n")
+}
+
+/** 空闲会话懒刷新：上一次回合结束到这一次开始，隔够久就在本回合结束后换个新会话 */
+let lastTurnEndAt = 0
+let idleRefreshDue = false
+let idleGapMs = 0
+let lastTurnBad = false
+let wakeQueuedThisTurn = false
+function idleRefreshEnabled(): boolean {
+  const c = config().session
+  if (ROLE === "home") return c.refreshHome !== false
+  if (CHANNEL === "qq") return c.refreshQq === true
+  // 群聊由桥接回收；终端每次都是新会话，不需要这个开关
+  return false
+}
+function markIdleBeforeTurn(): void {
+  idleRefreshDue = false
+  if (!lastTurnEndAt) return
+  const rawMin = Number(config().session.idleRefreshMinutes)
+  if (!Number.isFinite(rawMin) || rawMin <= 0) return
+  const min = Math.max(1, Math.min(1440, Math.round(rawMin)))
+  if (!idleRefreshEnabled()) return
+  if (Date.now() - lastTurnEndAt < min * 60_000) return
+  idleGapMs = Date.now() - lastTurnEndAt
+  idleRefreshDue = true
 }
 
 /** 某个会话最近 90 秒有没有心跳（判断它还在不在） */
@@ -3705,6 +3736,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     lastCtx = ctx
+    lastTurnBad = false
+    wakeQueuedThisTurn = false
+    markIdleBeforeTurn()
     setAgentBusy(true)
     // 脚本级兜底：当前模型探活失败就自动切另一个（不依赖模型自己判断）
     await ensureModelAlive(ctx)
@@ -3875,16 +3909,35 @@ export default function (pi: ExtensionAPI) {
   })
 
   // 上下文超限：本轮结束后自动开新会话（QQ/群聊由桥接层换会话并重发，不在这里做）
-  pi.on("agent_settled", async (_event: any, ctx: any) => {
+  pi.on("agent_settled", async (event: any, ctx: any) => {
     // 连续在场：这一轮说完了，接下一跳（普通心跳不受影响）
     void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
-    if (!contextOverflowPending) return
-    contextOverflowPending = false
-    if (CHANNEL === "qq" || CHANNEL === "group") return
-    try {
-      const r = await ctx?.newSession?.()
-      log(`auto new session · context overflow${r?.cancelled ? " (cancelled)" : ""}`)
-    } catch (e) { log(`auto new session failed · ${String(e)}`) }
+    lastTurnEndAt = Date.now()
+    if (contextOverflowPending) {
+      contextOverflowPending = false
+      idleRefreshDue = false
+      if (CHANNEL === "qq" || CHANNEL === "group") return
+      try {
+        const r = await ctx?.newSession?.()
+        log(`auto new session · context overflow${r?.cancelled ? " (cancelled)" : ""}`)
+      } catch (e) { log(`auto new session failed · ${String(e)}`) }
+      return
+    }
+    // 空闲懒刷新：这一轮是「闲了很久之后的第一轮」，跑完就换新会话
+    if (idleRefreshDue) {
+      idleRefreshDue = false
+      // 被打断/报错的回合不换：用户多半还要接着刚才的话题重试
+      if (event?.aborted === true || lastTurnBad) { log("idle refresh skipped · turn aborted or errored"); return }
+      // 这一轮里还排了别的唤醒（后台任务完成之类），换会话可能把它弄丢
+      if (wakeQueuedThisTurn) { log("idle refresh skipped · wake queued this turn"); return }
+      // 连续在场/群聊不换：连续模式轮与轮之间本来就很短，群聊由桥接回收
+      if (CHANNEL === "group") return
+      if (activeContinuous(readWorldStrict())) return
+      try {
+        const r = await ctx?.newSession?.()
+        log(`idle refresh · new session after ${Math.round(idleGapMs / 60000)}m idle${r?.cancelled ? " (cancelled)" : ""}`)
+      } catch (e) { log(`idle refresh failed · ${String(e)}`) }
+    }
   })
 
   // 工具连续失败两次（参数错 / 调用不了）→ 切到另一个模型看看情况

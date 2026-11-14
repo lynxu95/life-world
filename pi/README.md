@@ -137,7 +137,8 @@ pi          # TUI，已经带 life-world
 
 ```json
 "guard": { "enabled": true, "staleSeconds": 300, "cooldownMinutes": 10, "allowRestart": true },
-"cleanup": { "tmpMaxAgeHours": 72 }
+"cleanup": { "tmpMaxAgeHours": 72 },
+"session": { "idleRefreshMinutes": 30, "refreshHome": true, "refreshQq": false }
 ```
 
 ## 配置

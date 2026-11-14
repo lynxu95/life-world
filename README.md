@@ -215,6 +215,12 @@ git fetch origin && git checkout pi-agent-adv && git pull
 心跳相关的两项都可在看板「心跳与关怀」里改：`heartbeatEnabled`（总开关，关掉后不再自动醒）、
 `heartbeatMaxMinutes`（单串最长分钟数，默认 20，1~1440）。
 
+**空闲会话懒刷新**（`session` 段）：某个窗口闲了 `idleRefreshMinutes`（默认 30 分钟）之后，
+它下一次回合跑完就自动换一个新会话——不为刷新而刷新，只在「这一轮已经用完了」时清掉长上下文。
+默认只开 home（`refreshHome: true`），`refreshQq` 默认关；群聊不参与，终端每次都是新会话、不需要。
+看板「会话」模块里有同一个开关（分钟数 + home / QQ）。
+换会话前这一轮仍在旧上下文里跑，所以不会把话题拦腰截断。
+
 ```json
 {
   "world": { "enabled": true, "running": true, "reviewHour": 23, "fallbackWakeTime": "09:00", "heartbeatMaxMinutes": 20, "heartbeatEnabled": true },
@@ -247,6 +253,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
   "backup": { "enabled": true, "hour": 4, "includePrivate": false },
   "guard": { "enabled": true, "staleSeconds": 300, "cooldownMinutes": 10, "allowRestart": true },
   "cleanup": { "tmpMaxAgeHours": 72 },
+  "session": { "idleRefreshMinutes": 30, "refreshHome": true, "refreshQq": false },
   "memory": {
     "decay": { "enabled": true, "halfLifeDays": 30, "hitBoost": 0.15, "maxStrength": 3, "minStrength": 0.1 },
     "actr": { "enabled": true, "decay": 0.5, "weight": 0.2, "maxAccess": 50 },

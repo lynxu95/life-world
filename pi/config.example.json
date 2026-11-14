@@ -95,6 +95,11 @@
   "cleanup": {
     "tmpMaxAgeHours": 72
   },
+  "session": {
+    "idleRefreshMinutes": 30,
+    "refreshHome": true,
+    "refreshQq": false
+  },
   "memory": {
     "decay": {
       "enabled": true,

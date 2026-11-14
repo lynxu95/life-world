@@ -563,6 +563,11 @@ const server = http.createServer(async (req, res) => {
         })(),
         heartbeatEnabled: !(c.world && c.world.heartbeatEnabled === false),
         localLock: readLocalLockStrict(),
+        session: {
+          idleRefreshMinutes: (() => { const v = Number(c.session && c.session.idleRefreshMinutes); return Number.isFinite(v) && v > 0 ? Math.max(1, Math.min(1440, Math.round(v))) : 30 })(),
+          refreshHome: !(c.session && c.session.refreshHome === false),
+          refreshQq: !!(c.session && c.session.refreshQq === true),
+        },
         worldRunning: !(c.world && (c.world.enabled === false || c.world.running === false)),
         update: readJson(UPDATE_CHECK_FILE, null),
         updateResult: readJson(join(ROOT, "update-result.json"), null),
@@ -844,6 +849,31 @@ const server = http.createServer(async (req, res) => {
         try { appendCommand(ROOT, { target: "all", action: "model", model: "cloud", reason: "本地保护模式" }) } catch { /* 命令下发失败不影响锁 */ }
       }
       return json(res, 200, { ok: true, enabled, msg: enabled ? "已开：正在把会话切到在线" : "已关" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/session-refresh") {
+      const data = await body(req)
+      let c = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { c = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      if (!c || typeof c !== "object" || Array.isArray(c)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
+      const cur = c.session && typeof c.session === "object" ? c.session : {}
+      const next = { idleRefreshMinutes: 30, refreshHome: true, refreshQq: false, ...cur }
+      delete next.refreshCli
+      if (data.idleRefreshMinutes !== undefined) {
+        const v = Math.round(Number(data.idleRefreshMinutes))
+        if (!Number.isFinite(v) || v < 1 || v > 1440) return json(res, 400, { ok: false, msg: "空闲刷新要在 1-1440 分钟之间" })
+        next.idleRefreshMinutes = v
+      }
+      for (const k of ["refreshHome", "refreshQq"]) {
+        if (typeof data[k] === "boolean") next[k] = data[k]
+      }
+      c.session = next
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {
+        return json(res, 500, { ok: false, msg: `写配置失败：${String(e)}` })
+      }
+      return json(res, 200, { ok: true, msg: `已保存：空闲 ${next.idleRefreshMinutes} 分钟刷新（home ${next.refreshHome ? "开" : "关"} / QQ ${next.refreshQq ? "开" : "关"}）` })
     }
     if (req.method === "POST" && url.pathname === "/api/heartbeat-limit") {
       const data = await body(req)
