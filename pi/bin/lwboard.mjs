@@ -458,6 +458,8 @@ function memoryGraph(limit = 400) {
       id: `doc-${doc.file}`,
       kind: doc.satelliteOf ? "satellite" : "identity",
       parent: doc.satelliteOf ? `doc-${doc.satelliteOf}` : undefined,
+      // 辅助文档分两种：待沉淀（还在酝酿）、存档（已退役），星图用不同颜色/亮度区分
+      sat: doc.satelliteOf ? (/待沉淀/.test(doc.file) ? "staging" : "archive") : undefined,
       t: new Date(mtime).toISOString(),
       role: "identity",
       content: text.slice(0, 800),
