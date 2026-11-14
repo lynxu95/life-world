@@ -1640,20 +1640,22 @@ function layoutBrain() {
     pos.set(node.id, { x: Math.cos(a) * 2.4, y: i % 2 === 0 ? 0.7 : -0.7, z: Math.sin(a) * 2.4 })
   })
   // 辅助文档（存档/待沉淀）：三条各自倾斜的电子轨道，各走一个平面，不在同一圈上
-  const SAT_R = 7.6
+  const SAT_R = 5.6
   const SAT_TILT = [0.62, -0.58, 0.3]
   const SAT_PSI = [0, 1.15, 2.35]
   const satList = nodes.map((node, i) => ({ node, i })).filter(({ node }) => node.kind === "satellite")
-  BRAIN.satPoses = satList.map(({ node, i }, k) => ({
-    i,
-    id: node.id,
-    R: SAT_R + (k % 2 ? 0.4 : 0),
-    base: (k / Math.max(1, satList.length)) * Math.PI * 2 - Math.PI / 2,
-    tilt: SAT_TILT[k % SAT_TILT.length],
-    psi: SAT_PSI[k % SAT_PSI.length],
-    spin: 7.2 + ((hashStr(node.id) % 30) / 100),
-  }))
-  BRAIN.satPoseById = new Map(BRAIN.satPoses.map((q) => [q.id, q]))
+  BRAIN.satPoses = satList.map(({ node, i }, k) => {
+    const tilt = SAT_TILT[k % SAT_TILT.length], psi = SAT_PSI[k % SAT_PSI.length]
+    return {
+      i,
+      R: SAT_R + (k % 2 ? 0.3 : 0),
+      base: (k / Math.max(1, satList.length)) * Math.PI * 2 - Math.PI / 2,
+      tilt, psi,
+      ct: Math.cos(tilt), st: Math.sin(tilt),
+      cp: Math.cos(psi), sp: Math.sin(psi),
+      spin: 7.2 + ((hashStr(node.id) % 30) / 100),
+    }
+  })
   satList.forEach(({ node }, k) => pos.set(node.id, satPos(BRAIN.satPoses[k], 0)))
   const idx = new Map(nodes.map((node, i) => [node.id, i]))
   const arr = nodes.map((node) => pos.get(node.id))
@@ -1702,10 +1704,8 @@ function layoutBrain() {
 function satPos(pose, yaw, dAngle = 0) {
   const a = pose.base + yaw * (pose.spin - 1) + dAngle
   const x = Math.cos(a) * pose.R, z = Math.sin(a) * pose.R
-  const ct = Math.cos(pose.tilt), st = Math.sin(pose.tilt)
-  const y1 = -z * st, z1 = z * ct
-  const cp = Math.cos(pose.psi), sp = Math.sin(pose.psi)
-  return { x: x * cp - z1 * sp, y: y1, z: x * sp + z1 * cp, rot: 1 }
+  const y1 = -z * pose.st, z1 = z * pose.ct
+  return { x: x * pose.cp - z1 * pose.sp, y: y1, z: x * pose.sp + z1 * pose.cp, rot: 1 }
 }
 
 function projectPoint(p, w, h, fitK) {
@@ -2234,11 +2234,15 @@ function showBrainDetail(n) {
 }
 
 function hitBrain(x, y) {
-  let best = null, bd = 15
+  let best = null, bd = Infinity
   BRAIN.nodes.forEach((node, i) => {
     if (!nodeVisible(node) || !BRAIN.proj[i]) return
     const p = BRAIN.proj[i], d = Math.hypot(p.x - x, p.y - y)
-    if (d < bd) { bd = d; best = node }
+    // 命中半径按类型分档：主星光晕大、给足 18px；卫星环小，收紧到 10px，免得路过的电子抢点
+    const lim = node.kind === "identity" ? Math.max(18, 14 * p.s)
+      : node.kind === "satellite" ? Math.max(10, 9 * p.s)
+      : 15
+    if (d < lim && d < bd) { bd = d; best = node }
   })
   return best
 }
