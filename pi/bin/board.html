@@ -616,7 +616,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <section class="star" id="star-shell">
         <div class="sec-head">
           <h2>记忆星图</h2>
-          <span class="sec-note">拖拽旋转 · 滚轮缩放 · 点星看原文 · 亮白星=注入文档</span>
+          <span class="sec-note">拖拽旋转 · 滚轮缩放 · 点星看原文 · 亮白星=注入文档，外层小白点=辅助文档</span>
         </div>
         <div class="brain-bar">
           <div class="brain-stats" id="brain-stats">加载中…</div>
@@ -1594,13 +1594,14 @@ buildClouds()
 
 function nodeColor(n) {
   if (n.kind === "identity") return "#e8fbff"
+  if (n.kind === "satellite") return "#c7ecf7"
   if (n.kind === "short") return "#c4b5fd"
   if (n.kind === "impression") return "#fbbf24"
   if (n.kind === "diary") return "#f59e0b"
   return n.role === "user" ? "#4fc3f7" : "#2dd4bf"
 }
 function nodeVisible(n) {
-  if (n.kind === "identity") return BRAIN.filters.doc
+  if (n.kind === "identity" || n.kind === "satellite") return BRAIN.filters.doc
   if (n.kind === "short") return BRAIN.filters.imp
   if (n.kind === "impression") return BRAIN.filters.imp
   if (n.kind === "diary") return BRAIN.filters.diary
@@ -1617,14 +1618,14 @@ function layoutBrain() {
     const h = hashStr(node.id)
     const theta = ((h % 1000) / 1000) * Math.PI * 2
     const phi = (((h >> 10) % 1000) / 1000) * Math.PI
-    const r = node.kind === "impression" ? 2.2 : node.kind === "short" ? 18 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : 9 + ((h >> 20) % 7)
+    const r = node.kind === "impression" ? 2.2 : node.kind === "short" ? 18 : node.kind === "diary" ? 5.5 : node.kind === "identity" ? 3.4 : node.kind === "satellite" ? 3.4 : 9 + ((h >> 20) % 7)
     pos.set(node.id, { x: Math.cos(theta) * Math.sin(phi) * r, y: Math.cos(phi) * r, z: Math.sin(theta) * Math.sin(phi) * r })
   })
-  // 印象固定在中心一圈，避免互相挤叠
+  // 印象固定在中心外一圈（辅助文档层之外），避免互相挤叠
   const imps = nodes.filter((node) => node.kind === "impression")
   imps.forEach((node, i) => {
     const a = (i / Math.max(1, imps.length)) * Math.PI * 2 - Math.PI / 2
-    pos.set(node.id, { x: Math.cos(a) * 6.8, y: i % 2 === 0 ? 2.2 : -2.2, z: Math.sin(a) * 6.8 })
+    pos.set(node.id, { x: Math.cos(a) * 8.4, y: i % 2 === 0 ? 2.4 : -2.4, z: Math.sin(a) * 8.4 })
   })
   // 短期印象单独一圈（最外圈）：最近 24 小时闪着的念头。
   // 放得离长期印象远一点（6.8 → 17.2），否则两圈标签会叠在一起；顺带填上外圈的空。
@@ -1638,6 +1639,12 @@ function layoutBrain() {
   docs.forEach((node, i) => {
     const a = (i / Math.max(1, docs.length)) * Math.PI * 2 - Math.PI / 2
     pos.set(node.id, { x: Math.cos(a) * 2.4, y: i % 2 === 0 ? 0.7 : -0.7, z: Math.sin(a) * 2.4 })
+  })
+  // 辅助文档（存档/待沉淀）：主星外的第二层，像核外电子一样一圈高速绕行
+  const sats = nodes.filter((node) => node.kind === "satellite")
+  sats.forEach((node, i) => {
+    const a = (i / Math.max(1, sats.length)) * Math.PI * 2 - Math.PI / 2
+    pos.set(node.id, { x: Math.cos(a) * 5.8, y: 0, z: Math.sin(a) * 5.8 })
   })
   const idx = new Map(nodes.map((node, i) => [node.id, i]))
   const arr = nodes.map((node) => pos.get(node.id))
@@ -1663,7 +1670,7 @@ function layoutBrain() {
       disp[b].x -= dx; disp[b].y -= dy; disp[b].z -= dz
     }
     for (let i = 0; i < arr.length; i++) {
-      if (nodes[i].kind === "impression" || nodes[i].kind === "short" || nodes[i].kind === "identity") continue
+      if (nodes[i].kind === "impression" || nodes[i].kind === "short" || nodes[i].kind === "identity" || nodes[i].kind === "satellite") continue
       arr[i].x = arr[i].x * 0.98 + disp[i].x
       arr[i].y = arr[i].y * 0.98 + disp[i].y
       arr[i].z = arr[i].z * 0.98 + disp[i].z
@@ -1676,6 +1683,8 @@ function layoutBrain() {
   const clamped = raw.map((f) => Math.max(0.8, Math.min(1.6, f)))
   const avg = clamped.reduce((a, b) => a + b, 0) / Math.max(1, clamped.length) || 1
   arr.forEach((p, i) => { p.rot = clamped[i] / avg })
+  // 第二层辅助文档：自转因子拉大，绕核速度明显快于主星（电子层的感觉）
+  nodes.forEach((n, i) => { if (n.kind === "satellite") arr[i].rot = 3.2 + ((hashStr(n.id) % 40) / 100) })
   BRAIN.meanR = meanR
   BRAIN.maxR = radii.reduce((m, r) => Math.max(m, r), 6)
 }
@@ -1885,6 +1894,8 @@ function drawBrain(t) {
     if (hoverNode && hoverNode.kind === "identity") {
       // 悬停主星时聚焦整组注入文档，而不是只剩一颗
       for (const n of BRAIN.nodes) if (n.kind === "identity") set.add(n.id)
+    } else if (hoverNode && hoverNode.kind === "satellite" && hoverNode.parent) {
+      set.add(hoverNode.parent)
     } else {
       for (const l of BRAIN.links) {
         if (l.source === hover) set.add(l.target)
@@ -1934,7 +1945,7 @@ function drawBrain(t) {
   }
   if (BRAIN.showEdges) drawPulses(ctx, idx, proj)
   const order = BRAIN.nodes.map((node, i) => i).filter((i) => nodeVisible(BRAIN.nodes[i])).sort((a, b) => {
-    const rank = (n) => n.kind === "identity" ? 3 : (n.kind === "impression" || n.kind === "short") ? 2 : n.kind === "diary" ? 1 : 0
+    const rank = (n) => (n.kind === "identity" || n.kind === "satellite") ? 3 : (n.kind === "impression" || n.kind === "short") ? 2 : n.kind === "diary" ? 1 : 0
     return (rank(BRAIN.nodes[a]) - rank(BRAIN.nodes[b])) || (proj[b].z - proj[a].z)
   })
   let labels = 0
@@ -1944,7 +1955,7 @@ function drawBrain(t) {
     const queryDim = query && !hit
     const focusDim = focus && !focus.has(node.id)
     const dimAlpha = queryDim ? 0.18 : focusDim ? 1 - 0.82 * focusMix : 1
-    const base = node.kind === "identity" ? 8.5 : node.kind === "impression" ? 7 : node.kind === "short" ? 5.5 : node.kind === "diary" ? 4 : 1.8 + Math.min(3, (node.score || 0) * 2)
+    const base = node.kind === "identity" ? 8.5 : node.kind === "satellite" ? 5 : node.kind === "impression" ? 7 : node.kind === "short" ? 5.5 : node.kind === "diary" ? 4 : 1.8 + Math.min(3, (node.score || 0) * 2)
     const r = Math.max(1.2, base * p.s)
     ctx.globalAlpha = dimAlpha
     if (node.kind === "short") {
@@ -2019,11 +2030,11 @@ function drawBrain(t) {
     const showLabel = BRAIN.hover === node.id || BRAIN.selected === node.id || hit ||
       (namedStar
         ? BRAIN.showSpecialLabels
-        : (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.score || 0) > 0.2))
+        : (node.kind !== "identity" && node.kind !== "satellite" && BRAIN.zoom > 1.25 && labels < 48 && (node.score || 0) > 0.2))
     if (showLabel && !queryDim) {
       labels++
-      const text = node.kind === "identity" ? node.subject : node.kind === "short" ? `短·${node.subject}` : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
-      ctx.font = (node.kind === "identity" || node.kind === "impression" || node.kind === "short") ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
+      const text = node.kind === "identity" ? node.subject : node.kind === "satellite" ? node.subject : node.kind === "short" ? `短·${node.subject}` : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
+      ctx.font = (node.kind === "identity" || node.kind === "satellite" || node.kind === "impression" || node.kind === "short") ? "600 11px system-ui,sans-serif" : "10px system-ui,sans-serif"
       let lx = p.x, ly = p.y - r - 6
       if (node.kind === "identity") {
         const dx = p.x - w / 2, dy = p.y - h / 2
@@ -2086,8 +2097,8 @@ let brainLoadSeq = 0
 function showBrainDetail(n) {
   const seq = ++detailSeq
   const el = $("brain-detail")
-  if (n.kind === "identity") {
-    el.innerHTML = `<h4>注入文档 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>文件：${esc2(n.file || "")}</span><span>更新：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span></div>`
+  if (n.kind === "identity" || n.kind === "satellite") {
+    el.innerHTML = `<h4>${n.kind === "satellite" ? "辅助文档" : "注入文档"} · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>文件：${esc2(n.file || "")}</span><span>更新：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span></div>`
   } else if (n.kind === "short") {
     el.innerHTML = `<h4>短期印象 · ${esc2(n.subject)}</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>最近 24 小时 · 每天 05:00 重写</span><span>${esc2(n.meta || "")}</span></div>`
   } else if (n.kind === "impression") {
@@ -2097,7 +2108,7 @@ function showBrainDetail(n) {
   } else {
     el.innerHTML = `<h4>记忆节点</h4><div class="txt">${esc2(n.content)}</div><div class="meta"><span>时间：${esc2(new Date(n.t).toLocaleString("zh-CN"))}</span><span>角色：${n.role === "user" ? "对方" : "我"}</span><span>激活：${n.activation}</span><span>命中：${n.hits} 次 · 关联：${n.degree} 条</span></div>`
   }
-  if (!n.kind || n.kind === "identity" || n.kind === "diary") {
+  if (!n.kind || n.kind === "identity" || n.kind === "satellite" || n.kind === "diary") {
     getJson("/api/node?id=" + encodeURIComponent(n.id)).then((d) => {
       if (seq !== detailSeq || !d || typeof d.content !== "string") return
       const txt = el.querySelector(".txt")

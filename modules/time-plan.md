@@ -26,4 +26,4 @@
 - 想知道自己主动说过什么：翻 outbox/ 里的记录，或用 memory_timeline。
 
 今天的安排在 ~/.local/share/life-world/worlds/default/plan/YYYY-MM-DD.md。早上一醒来先看：没有就自己拟一份大概的，之后每次醒来都可以改。计划不是写完就完事——每挑出一件事，就用 plan_next 排上时间。
-每晚（以 life-world.json 的 world.reviewHour 为准，默认 23 点）回顾：回看今天、写日记、更新「我是谁」、更新用户画像、清理到期心情。
+每晚（以 life-world.json 的 world.reviewHour 为准，默认 23 点）回顾：回看今天、写日记、更新用户画像、清理到期心情；想改「我是谁」就写进 `worlds/default/identity/我是谁-待沉淀.md`（第二天 5 点会判要不要进正文），不要直接改正文。

@@ -134,6 +134,11 @@
       "shortCount": 5,
       "shortMaxChars": 150,
       "shortHour": 5
+    },
+    "identity": {
+      "enabled": true,
+      "hour": 5,
+      "maxChars": 1000
     }
   }
 }

@@ -435,7 +435,10 @@ function memoryGraph(limit = 400) {
   // 自动注入的人格文档：星图中心最亮的几颗星
   const IDENTITY_DOCS = [
     { file: "我是谁.md", label: "我是谁" },
+    { file: "我是谁-待沉淀.md", label: "待沉淀", satelliteOf: "我是谁.md" },
+    { file: "我是谁-存档.md", label: "我是谁·存档", satelliteOf: "我是谁.md" },
     { file: "心情.md", label: "心情" },
+    { file: "心情-存档.md", label: "心情·存档", satelliteOf: "心情.md" },
     { file: "用户画像.md", label: "用户画像" },
     { file: "模型使用规范.md", label: "模型规范" },
     { file: "化形表.md", label: "化形" },
@@ -453,7 +456,8 @@ function memoryGraph(limit = 400) {
     try { mtime = statSync(path).mtimeMs } catch { /* ignore */ }
     identityNodes.push({
       id: `doc-${doc.file}`,
-      kind: "identity",
+      kind: doc.satelliteOf ? "satellite" : "identity",
+      parent: doc.satelliteOf ? `doc-${doc.satelliteOf}` : undefined,
       t: new Date(mtime).toISOString(),
       role: "identity",
       content: text.slice(0, 800),
@@ -466,9 +470,11 @@ function memoryGraph(limit = 400) {
     })
   }
   const identityLinks = []
-  for (let i = 0; i < identityNodes.length; i++) {
-    for (let j = i + 1; j < identityNodes.length; j++) {
-      identityLinks.push({ source: identityNodes[i].id, target: identityNodes[j].id, w: 0.8, kind: "identity" })
+  // 辅助文档是主星外的一层「电子」，不画连线
+  const mainDocs = identityNodes.filter((n) => n.kind !== "satellite")
+  for (let i = 0; i < mainDocs.length; i++) {
+    for (let j = i + 1; j < mainDocs.length; j++) {
+      identityLinks.push({ source: mainDocs[i].id, target: mainDocs[j].id, w: 0.8, kind: "identity" })
     }
   }
   const pickedMsgs = all.slice(0, Math.max(50, Math.min(1000, limit)))
@@ -669,7 +675,7 @@ const server = http.createServer(async (req, res) => {
       const id = String(url.searchParams.get("id") || "")
       if (!id) return json(res, 400, { error: "missing id" })
       if (id.startsWith("doc-")) {
-        const allowed = new Set(["我是谁.md", "心情.md", "用户画像.md", "模型使用规范.md", "化形表.md", "印象.md", "印象-短期.md"])
+        const allowed = new Set(["我是谁.md", "我是谁-待沉淀.md", "我是谁-存档.md", "心情.md", "心情-存档.md", "用户画像.md", "模型使用规范.md", "化形表.md", "印象.md", "印象-短期.md"])
         const file = id.slice(4)
         if (!allowed.has(file)) return json(res, 404, { error: "not found" })
         const path = join(WORLD, "identity", file)

@@ -28,6 +28,12 @@ const DIARY_DIR = join(WORLD, "diary")
 const PLAN_DIR = join(WORLD, "plan")
 const IDENTITY_DIR = join(WORLD, "identity")
 const SELF_FILE = join(IDENTITY_DIR, "我是谁.md")
+const SELF_STAGING_FILE = join(IDENTITY_DIR, "我是谁-待沉淀.md")
+const SELF_ARCHIVE_FILE = join(IDENTITY_DIR, "我是谁-存档.md")
+/** 提示词里用的相对路径（常驻进程 cwd 就是 ROOT，别写死绝对路径） */
+const SELF_REL = "worlds/default/identity/我是谁.md"
+const SELF_STAGING_REL = "worlds/default/identity/我是谁-待沉淀.md"
+const SELF_ARCHIVE_REL = "worlds/default/identity/我是谁-存档.md"
 const PROFILE_FILE = join(IDENTITY_DIR, "用户画像.md")
 const MOOD_FILE = join(IDENTITY_DIR, "心情.md")
 const IMPRESSION_FILE = join(IDENTITY_DIR, "印象.md")
@@ -294,7 +300,7 @@ interface Config {
   guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number; allowRestart: boolean }
   cleanup: { tmpMaxAgeHours: number }
   session: { idleRefreshMinutes: number; refreshHome: boolean; refreshQq: boolean }
-  memory: { decay: DecayOptions; actr: ActrOptions; association: AssociationOptions; impression: ImpressionOptions }
+  memory: { decay: DecayOptions; actr: ActrOptions; association: AssociationOptions; impression: ImpressionOptions; identity: IdentityOptions }
 }
 
 /** ACT-R 基级激活（频率 × 近因幂律） */
@@ -346,6 +352,15 @@ interface ImpressionOptions {
   shortHour: number
 }
 
+/** 「我是谁」三文档：正文 / 待沉淀 / 存档 */
+interface IdentityOptions {
+  enabled: boolean
+  /** 每天几点做一次沉淀（默认 5 点，排在印象之后） */
+  hour: number
+  /** 正文软上限（字），维护说明不计 */
+  maxChars: number
+}
+
 /** 遗忘曲线：命中加强、随时间衰减（只降权，不删） */
 interface DecayOptions {
   enabled: boolean
@@ -395,6 +410,7 @@ function config(): Config {
       actr: { enabled: true, decay: 0.5, weight: 0.2, maxAccess: 50 },
       association: { enabled: true, weight: 0.1, learnRate: 0.05, decayPerDay: 0.02, maxWeight: 1, maxNeighbors: 50, bootstrap: true },
       impression: { enabled: true, hour: 5, days: 3, maxItems: 5, staleDays: 3, expireDays: 7, itemMaxChars: 300, shortCount: 5, shortMaxChars: 150, shortHour: 5 },
+      identity: { enabled: true, hour: 5, maxChars: 1000 },
     },
   }
   const raw = readJson<Partial<Config>>(CONFIG_FILE, {})
@@ -416,6 +432,7 @@ function config(): Config {
       actr: { ...base.memory.actr, ...((raw.memory || {}).actr || {}) },
       association: { ...base.memory.association, ...((raw.memory || {}).association || {}) },
       impression: { ...base.memory.impression, ...((raw.memory || {}).impression || {}) },
+      identity: { ...base.memory.identity, ...((raw.memory || {}).identity || {}) },
     },
     session: { ...base.session, ...(raw.session || {}) },
   }
@@ -474,7 +491,7 @@ interface ContinuousChain {
   intervalSeconds?: number
   endedAt?: string
 }
-interface WorldState { running?: boolean; alarms?: Alarm[]; continuous?: ContinuousChain; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastControlPrune?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string; lastShortImpression?: string }
+interface WorldState { running?: boolean; alarms?: Alarm[]; continuous?: ContinuousChain; lastReview?: string; lastWake?: string; lastRandom?: string; lastBackup?: string; lastBackupAttempt?: string; lastGuard?: string; lastCleanup?: string; lastControlPrune?: string; lastDecay?: string; lastEdgeDecay?: string; lastImpression?: string; lastShortImpression?: string; lastSelfReview?: string }
 function readWorld(): WorldState {
   const s = readJson<WorldState>(WORLD_FILE, { running: true, alarms: [] })
   // 合法 JSON 但 elements 坏掉（null / 字符串）会让 tick 每轮抛异常，先滤掉
@@ -1315,6 +1332,32 @@ function diaryTitle(day: string): string {
   return ""
 }
 
+/** 正文「我是谁」：去掉维护说明段（不注入），按上限截断 */
+function selfCoreText(): string {
+  let text = readText(SELF_FILE)
+  if (!text) return ""
+  // 维护说明：只剥「文件开头附近、且确实闭合」的那一段，避免注释没闭合时把正文一起吞掉
+  const at = text.search(/<!--\s*维护说明/)
+  if (at >= 0 && at < 400) {
+    const end = text.indexOf("-->", at)
+    if (end > at && end - at < 3000) {
+      text = text.slice(0, at) + text.slice(end + 3)
+    } else {
+      // 注释没闭合：只剥到第一个正文起点（标题或条目），别吞正文，也别让说明漏进提示词
+      const rest = text.slice(at)
+      const m = rest.match(/\n(?=##\s|-\s)/)
+      text = m ? text.slice(0, at) + rest.slice(m.index) : text.slice(0, at)
+    }
+  }
+  // 也兼容写成 markdown 小节的形式：## 维护说明 … 到下一个标题
+  text = text.replace(/(^|\n)##\s*维护说明[\s\S]*?(?=\n##\s|$)/, "\n")
+  text = text.trim()
+  const max = Math.max(200, Number(config().memory.identity.maxChars) || 1000)
+  const chars = Array.from(text) // 按码点算，别切断 emoji
+  if (chars.length > max) text = `${chars.slice(0, max).join("")}\n（超出 ${max} 字上限，已截断）`
+  return text
+}
+
 function memoryBlock(): string {
   const c = config()
   const h = c.world.hydrate
@@ -1347,7 +1390,7 @@ function memoryBlock(): string {
     if (n === 0 && !title) continue
     map.push(`- ${day} · ${n > 0 ? `${n} 句` : "没有对话"}${title ? ` · 《${title}》` : ""}`)
   }
-  const self = readText(SELF_FILE)
+  const self = selfCoreText()
   const parts = [
     "## 我的记忆",
     `最近 ${h.hours} 小时的原话（来自以前的窗口）：`,
@@ -2036,6 +2079,24 @@ function nextTickDelayMs(): number {
   return Math.max(2_000, Math.min(30_000, next))
 }
 
+/** 「我是谁」三文档的每日沉淀提示词 */
+function selfReviewPrompt(cfg: IdentityOptions): string {
+  const max = Math.max(200, Number(cfg.maxChars) || 1000)
+  return `【后台任务·我是谁·沉淀】每天一次，维护你的自我认知。三份文档（没有就新建）：
+- ${SELF_REL}（正文，约 ${max} 字上限，每次会话注入；文件开头那段维护说明必须保持 HTML 注释格式：<!-- 维护说明 …… -->）
+- ${SELF_STAGING_REL}（候选区，可以为空，不限字数）
+- ${SELF_ARCHIVE_REL}（退役区，不限字数）
+
+步骤：
+1. 读这三份文档，再回看最近 24 小时的对话、日记、印象（用 memory_timeline / memory_search）。
+2. **判旧**：待沉淀里日期早于今天的条目，逐条决定「并入正文 / 合并进已有条目 / 舍弃」。舍弃的直接删掉，不写存档。
+3. **改正文**：条目格式 \`- [主题] 一句话\`；新增会把正文撑过 ${max} 字时，把被替换、降级或合并掉的原文写进存档（原文 + 退役日期 + 理由），别硬扩。
+4. **写今天的新候选**：有就写进待沉淀，按 \`## YYYY-MM-DD\` 分组；没有也行，不强求。
+5. **自检**：正文 ≤ ${max} 字（维护说明不算）、存档按时间倒序、待沉淀不留旧日期。
+
+目标不是写满，是让「我是谁」随经历慢慢变得更准。三份文件都用 ${SELF_REL.replace("/我是谁.md", "/")} 这个相对路径写（基准是 ROOT，不是当前目录）。`
+}
+
 let ticking = false
 async function tick(): Promise<void> {
   if (ticking) return
@@ -2055,7 +2116,7 @@ async function tick(): Promise<void> {
     const hour = now.getHours()
     // 每日回顾
     if (hour >= c.world.reviewHour && state.lastReview !== today) {
-      sendTime(`【后台任务·每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新「我是谁」、更新用户画像、清理到期心情。${openActivitiesLine()}`)
+      sendTime(`【后台任务·每日回顾】${today} 快过完了，回头看看今天。今天的聊天记录在 ${CONV_DIR}，日记在 ${DIARY_DIR}。写日记、更新用户画像、清理到期心情；想改自我认知，写进 ${SELF_STAGING_REL}（明天 5 点会判要不要进正文），不要直接改正文。${openActivitiesLine()}`)
       updateWorld((s) => { s.lastReview = today })
       return
     }
@@ -2398,6 +2459,22 @@ async function tick(): Promise<void> {
       }
       if (sendTime(impressionPrompt(impCfg))) updateWorld((s) => { s.lastImpression = today })
       else log("impression · send failed, will retry")
+    }
+    // 我是谁：三文档沉淀，每天一次，排在印象之后
+    const idCfg = c.memory.identity
+    if (idCfg.enabled && state.lastSelfReview !== today && hour >= idCfg.hour) {
+      const o = c.models
+      if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
+        const r = await switchTo(lastCtx, o.local, "我是谁·沉淀")
+        log(`self review · switch model · ${r}`)
+      }
+      const wc1 = wakeSuffix()
+      if (sendTime(selfReviewPrompt(idCfg) + wc1.text)) {
+        if (wc1.nextAt) commitWakeContext(wc1.nextAt)
+        updateWorld((s) => { s.lastSelfReview = today })
+        return
+      }
+      log("self review · send failed, will retry")
     }
     // 早上兜底
     if (state.lastWake === today) return
