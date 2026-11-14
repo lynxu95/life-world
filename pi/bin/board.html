@@ -158,6 +158,9 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 #tab-memory .row-2 .day-wrap pre.log{height:100%;max-height:none}
 #tab-memory .row-2 .dates{max-height:100%}
 @media (max-width:900px){
+  #tab-memory .row-2{display:flex;flex-direction:column}
+  #tab-memory .row-2 > section:nth-child(1){order:2}
+  #tab-memory .row-2 > section:nth-child(2){order:1}
   #tab-memory .row-2 > section{height:auto;min-height:0}
   #tab-memory .row-2 .results{max-height:420px}
   #tab-memory .row-2 .day-wrap{flex:none;min-height:0}
@@ -409,7 +412,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .day-wrap{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px}
 @media (max-width:620px){.day-wrap{grid-template-columns:1fr}}
 .dates{display:flex;flex-direction:column;gap:4px;max-height:300px;overflow:auto}
-.dates button{text-align:left;font-family:var(--mono);font-size:11px;padding:4px 8px;
+.dates button{flex:0 0 auto;text-align:left;font-family:var(--mono);font-size:11px;padding:4px 8px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dates button.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
 pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border:1px solid var(--line);
