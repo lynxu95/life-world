@@ -615,7 +615,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/alarms") {
       const state = readJson(join(WORLD, "world.json"), {})
       const alarms = Array.isArray(state.alarms) ? state.alarms : []
-      return json(res, 200, { alarms, now: Date.now() })
+      return json(res, 200, { alarms, continuous: state.continuous || null, now: Date.now() })
     }
     if (req.method === "POST" && url.pathname === "/api/alarm") {
       const data = await body(req)

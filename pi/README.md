@@ -258,7 +258,8 @@ lwctl board stop
 ### 日程 / 心跳
 
 - `plan_next({ note, at|after_minutes, model })` 开一个**活动**，到点唤醒并保持 `active`；
-- `heartbeat({ reason, every_minutes, note })` 起一条**心跳串**，独立于日程、固定间隔自动续跳（最多 60 跳），同时最多 2 条；`heartbeat_stop` 停掉；
+- `heartbeat({ reason, every_minutes, note })` 起一条**心跳串**，独立于日程、固定间隔自动续跳（最多 60 跳），同时最多 2 条；
+  `heartbeat({ reason, continuous: true })` 是**连续在场**特殊模式：说完就接下一跳，同时只能一条、其他心跳让路；`heartbeat_stop` 停掉；
 - 心跳到点若 home 正在跑一轮，会顺延 30 秒再试，不会被跳过；
 - 下一条主活动开始时，上一条还 `active` 的活动会被强制关闭并提醒；
 - `cancel_alarm({ id })` 关闭日程；看板「日程 / 心跳」页可暂停/继续/关闭，心跳可单独停止；

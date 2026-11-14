@@ -744,10 +744,12 @@ function renderUpdate(u, result) {
 
 let hbLimitTouched = false
 let HB_ENABLED = true
+let HB_MAX_MINUTES = 20
 let WORLD_RUNNING = true
 function renderHeartbeatLimit(minutes, enabled) {
   HB_ENABLED = enabled !== false
   const v = Number(minutes) || 20
+  HB_MAX_MINUTES = v
   if (!hbLimitTouched) {
     $("hb-limit").value = v
     $("hb-enabled").checked = enabled !== false
@@ -1175,7 +1177,8 @@ function renderSubs(list) {
     : ""
   // —— 心跳：和日程平行，按串分组 ——
   // 正在跳的串排在最前，已停的往后放；同组里按时间排序
-  const isLive = (items) => items.some((x) => x.status !== "fired" && x.status !== "cancelled")
+  const isLive = (items) => items.some((x) => x.status !== "fired" && x.status !== "cancelled") ||
+    !!(LAST_CONT && !LAST_CONT.endedAt && items.some((x) => x.chainId === LAST_CONT.chainId))
   const chainEntries = [...chains.entries()].sort((a, b) => {
     const la = isLive(a[1]) ? 1 : 0
     const lb = isLive(b[1]) ? 1 : 0
@@ -1196,7 +1199,14 @@ function renderSubs(list) {
     const everySec = numOr(sample && sample.intervalSeconds, 0) || numOr(sample && sample.intervalMinutes, 0) * 60 || 120
     const every = everySec ? (everySec < 60 ? `${Math.round(everySec)} 秒` : `${Math.round((everySec / 60) * 10) / 10} 分钟`) : "?"
     const seq = next ? numOr(next.seq, 1) : (sample ? numOr(sample.seq, 0) : 0)
-    const state = !HB_ENABLED ? "已关闭" : (live.length ? "跳着" : "已停")
+    // 连续在场：这一串是「说完就接下一跳」；链级状态以 world.continuous 为准，
+    // 跳与跳之间没有 pending 时也算「进行中」，不能显示成已停
+    const chainCont = LAST_CONT && LAST_CONT.chainId === cid && !LAST_CONT.endedAt ? LAST_CONT : null
+    const cont = items.some((x) => x.continuous === true) || !!chainCont
+    const startedMs = Date.parse(String((chainCont && chainCont.startedAt) || (sample && sample.startedAt) || ""))
+    const remainMin = cont && Number.isFinite(startedMs) ? Math.max(0, Math.round((startedMs + HB_MAX_MINUTES * 60_000 - Date.now()) / 60_000)) : null
+    const running = live.length > 0 || !!chainCont
+    const state = !HB_ENABLED ? "已关闭" : (chainCont ? "连续在场" : (live.length ? "跳着" : (cont ? "连续·已停" : "已停")))
     // 执行过和「起过但没等」的跳按时间混排，后者标成「未执行」
     const history = items
       .filter((x) => x.status === "fired" || x.status === "cancelled")
@@ -1206,12 +1216,12 @@ function renderSubs(list) {
         ? `<div class="sub-item fired"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>已执行</span></div>`
         : `<div class="sub-item cancelled"><span class="t">${fmtClock(s.at)}</span><span class="n">第 ${esc2(s.seq)} 跳</span><span>未执行</span></div>`)
       .join("")
-    const actions = live.length ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
-    const ended = !live.length
+    const actions = running ? `<div class="sub-actions"><button data-op="stop_chain" data-id="${escAttr(cid)}">停止心跳</button></div>` : ""
+    const ended = !running
     // 还在跳（没停、没跑完、总开关开着）的串标成 live：红色呼吸
     const liveCls = !ended && HB_ENABLED && WORLD_RUNNING ? " live" : ""
     return `<div class="sub-card beat${ended ? " ended" : liveCls}"><div class="sub-head"><b>♥ ${esc2(reason)}</b><span class="sub-state">${state}</span></div>
-      <div class="sub-meta">每 ${esc2(every)} · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""} · 已执行 ${done.length} 次</div>
+      <div class="sub-meta">${cont ? "每轮间隔" : "每"} ${esc2(every)} · 第 ${esc2(seq)} 跳${next ? ` · 下一跳 ${fmtClock(next.at)}（${relTime(next.at)}）` : ""}${remainMin !== null && running ? ` · 剩余约 ${remainMin} 分钟` : ""} · 已执行 ${done.length} 次</div>
       ${history}
       ${actions}</div>`
   }).join("")
@@ -1221,9 +1231,11 @@ function renderSubs(list) {
   if (cards || legacyHtml) parts.push('<div class="sub-group">日程</div>', cards, legacyHtml)
   el.innerHTML = parts.join("")
 }
+let LAST_CONT = null
 async function loadSubs() {
   try {
     const d = await getJson("/api/alarms")
+    LAST_CONT = d.continuous || null
     renderSubs(d.alarms || [])
   } catch { /* ignore */ }
 }

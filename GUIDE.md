@@ -41,7 +41,7 @@
 |---|---|
 | 跨会话记得 | 直接开新会话；新会话第一次会注入最近 48h + 记忆地图 + 自述 |
 | 翻更早的事 | 「还记得上个月那件事吗」→ `memory_search` / `memory_day` / `memory_timeline` |
-| 安排今天 / 提醒 | 「你打算做什么」「X 点提醒我」→ `plan_next`；想每隔几分钟回来看 → `heartbeat` |
+| 安排今天 / 提醒 | 「你打算做什么」「X 点提醒我」→ `plan_next`；想每隔几分钟回来看 → `heartbeat`；要「一直陪着」→ `heartbeat({ continuous: true })`（很费 token，需明确确认） |
 | 看它在忙什么 | `check_alarm` |
 | 写日记 / 记心情 | 每天回顾写 `diary/`、更新 `identity/心情.md` |
 | 技能 | `skills/own`（自制）/ `skills/downloaded`（下载）；`skill_list` / `skill_read` / `skill_run` / `skill_toggle` |

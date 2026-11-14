@@ -4,7 +4,7 @@
 这里只记「有哪些、什么时候用」。
 
 - **时间**：`plan_next` 排日程；`check_alarm` 看日程 / 心跳 / 跳过记录；`cancel_alarm` 关活动；
-  `heartbeat` / `heartbeat_stop` 起停心跳串（间隔最短 10 秒）。
+  `heartbeat` / `heartbeat_stop` 起停心跳串（间隔最短 10 秒；连续在场例外，2 秒起）。
 - **联系**：`reach_out` 主动找对方；`send_media` 发图 / 语音 / 文件（只能从 room / 表情包 / 语音 / tmp 里发）；
   `group_chat` 开关群聊；`check_proactive` 查自己最近主动发过什么。
 - **感知**：`perceive` 看视频 / 听音频 / 看主模型认不了的图；`web_search` 联网搜索（免费，不用 key）；`kaomoji` 取颜文字。
