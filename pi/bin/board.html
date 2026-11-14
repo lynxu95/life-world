@@ -445,12 +445,6 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <section>
         <div class="sec-head"><h2>会话</h2><span class="spacer"></span><span class="sec-note">10s 刷新</span></div>
         <div class="sessions" id="sessions"><div class="muted">加载中…</div></div>
-        <div class="sess-refresh">
-          <label class="check"><input type="checkbox" id="sr-home">空闲刷新</label>
-          <input type="number" id="sr-min" min="1" max="1440" step="1" style="width:64px" aria-label="空闲刷新分钟数"> 分钟
-          <label class="bf"><input type="checkbox" id="sr-qq">QQ 私聊</label>
-        </div>
-        <div class="hint" id="sr-hint">闲下来超过这个时长，下一次回合结束就换新会话（这一轮仍用旧上下文）。</div>
       </section>
         <section>
           <div class="sec-head"><h2>今日</h2><span class="spacer"></span><span class="sec-note" id="today-note">…</span></div>
@@ -507,6 +501,13 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <label class="check" style="margin-top:10px"><input type="checkbox" id="lp-enabled">本地保护（只用在线）</label>
         <div class="hint" id="lp-hint">开着的时候不会切回本地，写着 local 的闹钟执行时也改走在线。</div>
         <div class="hint" id="mode-hint"></div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>会话刷新</h2><span class="spacer"></span><span class="sec-note" id="sr-note">…</span></div>
+        <label class="field">空闲 <input type="number" id="sr-min" min="1" max="1440" step="1" style="width:70px;margin-left:6px" aria-label="空闲刷新分钟数"> 分钟</label>
+        <label class="check" style="margin-top:8px"><input type="checkbox" id="sr-home">home 会话</label>
+        <label class="check" style="margin-top:6px"><input type="checkbox" id="sr-qq">QQ 私聊</label>
+        <div class="hint" id="sr-hint">闲下来超过这个时长，下一次回合结束就换新会话（这一轮仍用旧上下文）。</div>
       </section>
         <section>
         <div class="sec-head"><h2>快捷操作</h2></div>
@@ -781,6 +782,7 @@ function renderSessionRefresh(sr) {
   $("sr-home").checked = sr.refreshHome !== false
   $("sr-qq").checked = sr.refreshQq === true
 
+  $("sr-note").textContent = `${sr.idleRefreshMinutes || 30} 分钟 · ${sr.refreshHome !== false ? "home 开" : "home 关"}${sr.refreshQq ? " · QQ 开" : ""}`
   $("sr-hint").textContent = `闲下来超过 ${sr.idleRefreshMinutes || 30} 分钟，下一次回合结束就换新会话（这一轮仍用旧上下文）。`
 }
 async function saveSessionRefresh() {

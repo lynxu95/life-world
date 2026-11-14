@@ -614,8 +614,8 @@ function pidIsBoard(pid) {
     try {
       const r = spawnSync(bin, ["-p", String(pid), "-o", "command="], { encoding: "utf8" })
       if (r.error || r.status !== 0) continue
-      // 必须是 node 在跑 lwboard.mjs，别把命令行里恰好提到它的进程当成看板
-      return /(^|\/)node(js)?\s.*lwboard\.mjs/.test(String(r.stdout || ""))
+      // 必须是 node 在跑 lwboard.mjs；node 可执行文件常带后缀（node-22、nodejs20 等）
+      return /(^|\/)node[-A-Za-z0-9._]*\s.*lwboard\.mjs/.test(String(r.stdout || ""))
     } catch { /* 试下一个 */ }
   }
   return false
