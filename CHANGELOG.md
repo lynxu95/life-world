@@ -15,6 +15,13 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.14.8] - 2026-11-14
+
+### 修复
+
+- **移动端概览各模块宽度不齐**：窄屏把概览改成纵向 flex 后，沿用了 grid 的 `align-items:start`，
+  内容短的模块（她此刻 / 最近事件 / 快捷操作 / 健康）按内容宽度收缩。现在显式 `align-items:stretch`，全部满宽。
+
 ## [1.14.7] - 2026-11-14
 
 ### 修复

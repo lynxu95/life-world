@@ -111,7 +111,7 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 @media (max-width:1080px){
   .dash{grid-template-columns:1fr}
   /* 概览页手机上重排：她此刻 → 会话 → 右侧各栏 → 今日 → 用量 → 最近事件 */
-  #tab-overview .dash{display:flex;flex-direction:column}
+  #tab-overview .dash{display:flex;flex-direction:column;align-items:stretch}
   #tab-overview .dash>main,#tab-overview .dash>aside{display:contents}
   #tab-overview .dash main>section:nth-child(1){order:1}
   #tab-overview .dash main>section:nth-child(2){order:2}
