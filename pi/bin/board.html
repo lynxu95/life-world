@@ -623,6 +623,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <label class="bf"><input type="checkbox" id="f-imp" checked>印象</label>
             <label class="bf"><input type="checkbox" id="f-doc" checked>文档</label>
             <label class="bf"><input type="checkbox" id="f-edge" checked>连线</label>
+            <label class="bf"><input type="checkbox" id="f-label" checked>星名</label>
             <input id="brain-q" placeholder="在星图里搜索（按摘要）…">
             <button id="brain-refresh">刷新</button>
             <button id="star-full">全屏</button>
@@ -1462,7 +1463,7 @@ $("backup").onclick = async () => {
 }
 
 // ———————— 记忆星图（Canvas 3D + 星云） ————————
-const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true }, showEdges: true, dirty: true, dpr: 0 }
+const BRAIN = { nodes: [], links: [], pos: [], proj: [], yaw: 0.62, pitch: -0.24, zoom: 1, drag: null, hover: null, focusMix: 0, focusIds: null, selected: null, search: "", filters: { mem: true, diary: true, imp: true, doc: true }, showEdges: true, showSpecialLabels: true, dirty: true, dpr: 0 }
 const PULSES = []
 const POINTERS = new Map()
 const brainCanvas = document.createElement("canvas")
@@ -2010,7 +2011,12 @@ function drawBrain(t) {
       ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.5
       ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke()
     }
-    const showLabel = BRAIN.hover === node.id || node.kind === "impression" || node.kind === "short" || hit || BRAIN.selected === node.id || (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.kind === "diary" || (node.score || 0) > 0.2))
+    // 印象 / 短期印象 / 日记这三类星名由「星名」开关统一控制；悬停或选中时仍然显示，方便辨认
+    const namedStar = node.kind === "impression" || node.kind === "short" || node.kind === "diary"
+    const showLabel = BRAIN.hover === node.id || BRAIN.selected === node.id || hit ||
+      (namedStar
+        ? BRAIN.showSpecialLabels
+        : (node.kind !== "identity" && BRAIN.zoom > 1.25 && labels < 48 && (node.score || 0) > 0.2))
     if (showLabel && !queryDim) {
       labels++
       const text = node.kind === "identity" ? node.subject : node.kind === "short" ? `短·${node.subject}` : node.kind === "impression" ? `印象·${node.subject}` : node.kind === "diary" ? `日记 ${String(node.t).slice(5, 10)}` : String(node.content).slice(0, 18)
@@ -2229,6 +2235,15 @@ for (const id of ["f-mem", "f-diary", "f-imp", "f-doc"]) $(id).addEventListener(
 // 连线开关：只影响绘制，不动数据；偏好存本地，刷新后保持
 const EDGE_KEY = "lw:showEdges"
 try { const saved = localStorage.getItem(EDGE_KEY); if (saved === "0") { $("f-edge").checked = false; BRAIN.showEdges = false } } catch { /* 隐私模式忽略 */ }
+// 星名开关：统一控制长期印象 / 短期印象 / 日记的标签；偏好存本地
+const LABEL_KEY = "lw:showLabels"
+try { const saved = localStorage.getItem(LABEL_KEY); if (saved === "0") { $("f-label").checked = false; BRAIN.showSpecialLabels = false } } catch { /* 隐私模式忽略 */ }
+$("f-label").addEventListener("change", () => {
+  BRAIN.showSpecialLabels = $("f-label").checked
+  try { localStorage.setItem(LABEL_KEY, BRAIN.showSpecialLabels ? "1" : "0") } catch { /* 忽略 */ }
+  BRAIN.dirty = true
+})
+
 $("f-edge").addEventListener("change", () => {
   BRAIN.showEdges = $("f-edge").checked
   // 关掉连线时清空在途光点，免得重新打开时一堆半路光点突然冒出来
