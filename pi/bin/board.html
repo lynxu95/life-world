@@ -108,7 +108,22 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 .dash.memory{grid-template-columns:minmax(0,1fr)}
 .dash.single{grid-template-columns:minmax(0,1fr)}
 #tab-memory #graph{height:clamp(460px,62vh,720px)}
-@media (max-width:1080px){.dash{grid-template-columns:1fr}}
+@media (max-width:1080px){
+  .dash{grid-template-columns:1fr}
+  /* 概览页手机上重排：她此刻 → 会话 → 右侧各栏 → 今日 → 用量 → 最近事件 */
+  #tab-overview .dash{display:flex;flex-direction:column}
+  #tab-overview .dash>main,#tab-overview .dash>aside{display:contents}
+  #tab-overview .dash main>section:nth-child(1){order:1}
+  #tab-overview .dash main>section:nth-child(2){order:2}
+  #tab-overview .dash main>section:nth-child(3){order:8}
+  #tab-overview .dash main>section:nth-child(4){order:9}
+  #tab-overview .dash main>section:nth-child(5){order:10}
+  #tab-overview .dash aside>section:nth-child(1){order:3}
+  #tab-overview .dash aside>section:nth-child(2){order:4}
+  #tab-overview .dash aside>section:nth-child(3){order:5}
+  #tab-overview .dash aside>section:nth-child(4){order:6}
+  #tab-overview .dash aside>section:nth-child(5){order:7}
+}
 main,.rail{display:flex;flex-direction:column;gap:18px;min-width:0}
 @media (max-width:1080px){.rail{order:2}}
 section{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
