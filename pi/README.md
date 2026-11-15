@@ -185,7 +185,7 @@ pi          # TUI，已经带 life-world
 
 本地模型实测与推荐的优化参数见仓库根 README《本地模型实测》（RTX 5060 Ti + Basalt + Qwen3.8-Flash-Next IQ3_XXS 搭配 DeepSeek Flash）。
 
-`models.local` 留空则不启用热切换（机密抽屉也随之停用）；`autoFailover` 打开时，扩展在每轮开始前探活当前模型，挂了就自动切到另一个（冷却 `cooldownMs`，防止来回抖）。
+`models.local` 留空则不启用热切换（机密抽屉也随之停用）；`autoFailover` 是自动兜底的基线开关：打开时，扩展在每轮开始前探活当前模型，模型无响应或工具连续失败两次也会自动切到另一个（冷却 `cooldownMs`，防止来回抖）。想临时完全不自动切（用本地模型完整跑一个项目），打开「本地锁定」——看板「模型设置」里有复选框，AI 用 `local_pin({ enabled: true })`，状态存在 `local-pin.json`（带时间/理由，读坏时按锁定处理），解除后回到 `autoFailover` 基线。
 
 ### 机密抽屉
 

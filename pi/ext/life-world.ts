@@ -146,6 +146,7 @@ const CONTROL_DIR = join(ROOT, "control")
 const ACK_DIR = join(ROOT, "control-acks")
 const MODEL_MODE_FILE = join(ROOT, "model-mode.json")
 const LOCAL_LOCK_FILE = join(ROOT, "local-lock.json")
+const LOCAL_PIN_FILE = join(ROOT, "local-pin.json")
 const safeRoleKey = (rk: string) => rk.replace(/[^A-Za-z0-9_.-]/g, "_")
 const controlAckFile = (id: string, rk: string) => join(ACK_DIR, `${id}-${safeRoleKey(rk)}.json`)
 const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.json")
@@ -2026,13 +2027,16 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
   // 回私聊醒的闹钟：切的是 home 的模型，没用；私聊那一轮沿用自己当前的模型
   if (wakeTarget(alarm) === "qq") return
   const c = config().models
-  // 本地保护模式：闹钟上写的是 local 也照旧留档，但这一跳改走在在线模型上
+  // 两个锁都会改写这一跳：保护把 local 改走在线，锁定把 cloud 改走本地；闹钟上的标签不动
   const locked = localLockOn()
-  const want = alarm.model === "local" ? (locked ? "cloud" : "local") : alarm.model === "cloud" ? "cloud" : ""
+  const pinned = !locked && localPinOn()
+  const want = alarm.model === "local" ? (locked ? "cloud" : "local")
+    : alarm.model === "cloud" ? (pinned ? "local" : "cloud") : ""
   const target = want === "local" ? c.local : want === "cloud" ? c.cloud : ""
   if (!target || !lastCtx) return
   if (modelIdOf(lastCtx) === target) return
-  const why = locked && alarm.model === "local" ? "（本地保护模式，改用在线）" : ""
+  const why = locked && alarm.model === "local" ? "（本地保护模式，改用在线）"
+    : pinned && alarm.model === "cloud" ? "（本地锁定，改用本地）" : ""
   const result = await switchTo(lastCtx, target, `闹钟任务：${alarm.note.slice(0, 20)}${why}`)
   log(`alarm model · ${result}`)
 }
@@ -3048,7 +3052,7 @@ async function ensureModelAlive(ctx: any): Promise<void> {
     }
     return
   }
-  if (!o.autoFailover) return
+  if (!autoFailoverOn()) return
   if (failingOver) return
   if (Date.now() - lastSwitch.at < o.cooldownMs) return
   failingOver = true
@@ -3073,6 +3077,11 @@ async function failoverToOther(ctx: any, reason: string, opts: { onlyToCloud?: b
   if (CHANNEL === "group") return false
   const o = config().models
   if (!o.local || !o.cloud) return false
+  // 总开关关掉（或本地锁定开着）就完全不自动切，模型无响应也一样：宁可报错，也别把本地长任务踢回在线
+  if (!autoFailoverOn()) {
+    log(`failover off · skip (${reason})`)
+    return false
+  }
   const cur = modelIdOf(ctx)
   if (opts.onlyToCloud && cur !== o.local) return false
   const alt = cur === o.local ? o.cloud : cur === o.cloud ? o.local : ""
@@ -3117,20 +3126,20 @@ function currentModelPref(): "local" | "cloud" | undefined {
 }
 
 /** 本地保护模式：开着的时候只能用在线模型；闹钟上的 local 标签不动，执行时改走在线 */
-interface LocalLockState { enabled: boolean; at?: string; by?: string; reason?: string }
+interface LocalLockState { enabled: boolean; at?: string; by?: string; reason?: string; broken?: boolean }
 function readLocalLock(): LocalLockState {
   // 文件存在但读不出来时按「开着」处理：宁可锁死也不要在游戏/渲染时被切回本地
   if (!existsSync(LOCAL_LOCK_FILE)) return { enabled: false }
   try {
     const v = JSON.parse(readFileSync(LOCAL_LOCK_FILE, "utf8")) as LocalLockState
-    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true }
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true, broken: true }
     return {
       enabled: typeof v.enabled === "boolean" ? v.enabled : true,
       at: typeof v.at === "string" ? v.at : undefined,
       by: typeof v.by === "string" ? v.by : undefined,
       reason: typeof v.reason === "string" ? v.reason : undefined,
     }
-  } catch { return { enabled: true } }
+  } catch { return { enabled: true, broken: true } }
 }
 function localLockOn(): boolean { return readLocalLock().enabled }
 function writeLocalLock(enabled: boolean, reason = "", by = ROLE): void {
@@ -3140,6 +3149,37 @@ function writeLocalLock(enabled: boolean, reason = "", by = ROLE): void {
     by,
     reason: String(reason || "").slice(0, 200),
   }, null, 2))
+}
+
+/** 本地锁定：和本地保护同构的临时锁，开着时不会自动切走（工具失败/模型无响应/探活都不切） */
+interface LocalPinState { enabled: boolean; at?: string; by?: string; reason?: string; broken?: boolean }
+function readLocalPin(): LocalPinState {
+  // 和本地保护反过来：文件坏了按「锁定」处理，宁可留在本地也别被悄悄切走
+  if (!existsSync(LOCAL_PIN_FILE)) return { enabled: false }
+  try {
+    const v = JSON.parse(readFileSync(LOCAL_PIN_FILE, "utf8")) as LocalPinState
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true, broken: true }
+    return {
+      enabled: typeof v.enabled === "boolean" ? v.enabled : true,
+      at: typeof v.at === "string" ? v.at : undefined,
+      by: typeof v.by === "string" ? v.by : undefined,
+      reason: typeof v.reason === "string" ? v.reason : undefined,
+    }
+  } catch { return { enabled: true, broken: true } }
+}
+function localPinOn(): boolean { return readLocalPin().enabled }
+function writeLocalPin(enabled: boolean, reason = "", by = ROLE): void {
+  atomicWrite(LOCAL_PIN_FILE, JSON.stringify({
+    enabled,
+    at: new Date().toISOString(),
+    by,
+    reason: String(reason || "").slice(0, 200),
+  }, null, 2))
+}
+/** 自动兜底总判定：本地锁定优先，其次看 life-world.json 的基线开关 */
+function autoFailoverOn(): boolean {
+  if (localPinOn()) return false
+  return config().models.autoFailover !== false
 }
 
 let lastModeText = ""
@@ -4670,12 +4710,63 @@ export default function (pi: ExtensionAPI) {
         }
         try { writeLocalLock(true, String(params.reason || ""), roleKey) }
         catch (e) { return ok(`已切到在线，但锁没写上：${String(e)}。请重试或检查 ${ROOT} 的写权限。`) }
+        // 两个锁互斥：保护是安全锁，开它就把本地锁定解掉
+        const hadPin = localPinOn()
+        if (hadPin) {
+          try { writeLocalPin(false, "本地保护模式开启，自动解除本地锁定", roleKey) }
+          catch (e) { log(`解除本地锁定失败 · ${String(e)}`) }
+        }
         writeStatus(); writeModelMode()
-        return ok("本地保护模式已开：现在只能用在线模型，闹钟里写着 local 的也会改走在线（标签不变）。")
+        return ok(`本地保护模式已开：现在只能用在线模型，闹钟里写着 local 的也会改走在线（标签不变）。${hadPin ? "\n顺带解除了本地锁定。" : ""}`)
       }
-      writeLocalLock(false, String(params.reason || ""), roleKey)
+      try { writeLocalLock(false, String(params.reason || ""), roleKey) }
+      catch (e) { return ok(`没关成：${String(e)}。保护还开着，请重试或检查 ${ROOT} 的写权限。`) }
       writeStatus()
       return ok("本地保护模式已关：可以切回本地了。")
+    },
+  })
+
+  // 群聊不给本地锁定（避免一个群成员把大家的兜底关掉）
+  if (CHANNEL !== "group") addTool(pi, {
+    name: "local_pin",
+    label: "Local pin",
+    description: "本地锁定：临时「只用本地、不自动切走」的开关，和本地保护（只用在线）正好一对。开着的时候探活失败、模型无响应、工具连续失败两次都不会自动切到在线，适合用本地模型完整跑一个项目；打开时会先把当前会话切到本地，切不过去就不锁。不传 enabled 就是查状态。",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: { type: "boolean", description: "true 锁定 / false 解除；省略则查状态" },
+        reason: { type: "string", description: "为什么锁（写一句，看板会显示）" },
+      },
+    },
+    async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+      const o = config().models
+      const cur = modelIdOf(ctx) || ""
+      const kind = modelKind(cur)
+      if (params?.enabled === undefined) {
+        const p = readLocalPin()
+        const when = p.at && Number.isFinite(Date.parse(p.at)) ? `${isoLocal(new Date(p.at))} 开启` : ""
+        const eff = autoFailoverOn()
+        const broken = p.enabled && p.broken ? "（状态文件读不出来，按锁定处理）" : ""
+        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}\n自动兜底：${eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
+      }
+      const on = params.enabled === true
+      if (on) {
+        // 和本地保护对称：先切到本地，切不过去就别把门锁上
+        if (!o.local) return ok("锁不了：life-world.json 里没配 models.local（本地模型）。")
+        if (localLockOn()) return ok("本地保护模式正开着（只能用在线），要锁定本地先把 local_protect({ enabled: false }) 关掉。")
+        if (cur !== o.local) {
+          const r = await switchTo(ctx, o.local, "开启本地锁定")
+          if (!r.startsWith("已切到") && !r.startsWith("已经是")) return ok(`没锁成：${r}`)
+        }
+        try { writeLocalPin(true, String(params.reason || ""), roleKey) }
+        catch (e) { return ok(`已切到本地，但锁没写上：${String(e)}。请重试或检查 ${ROOT} 的写权限。`) }
+        writeStatus()
+        return ok("本地锁定已开：探活失败、模型无响应、工具连续失败都不会自动切走了；要换模型还是可以手动 switch_model。")
+      }
+      try { writeLocalPin(false, String(params.reason || ""), roleKey) }
+      catch (e) { return ok(`没解除成：${String(e)}。锁还是开着的，请重试或检查 ${ROOT} 的写权限。`) }
+      writeStatus()
+      return ok("本地锁定已关：自动兜底按 life-world.json 的基线恢复。")
     },
   })
 
@@ -4683,7 +4774,7 @@ export default function (pi: ExtensionAPI) {
   if (CHANNEL !== "group") addTool(pi, {
     name: "switch_model",
     label: "Switch model",
-    description: "本地 / 在线模型热切换，也能查看和切换其他会话。target: local=本地小模型，cloud=在线大模型，provider/model；不传 target 查所有会话状态。session: self（默认）/ all / roleKey（home、qq、group-...）。",
+    description: "本地 / 在线模型热切换，也能查看和切换其他会话。target: local=本地小模型，cloud=在线大模型，provider/model；不传 target 查所有会话状态。注意：要临时不自动切模型，用 local_pin，不是这个工具。",
     parameters: {
       type: "object",
       properties: {
@@ -4705,7 +4796,7 @@ export default function (pi: ExtensionAPI) {
           : "（没有活跃会话）"
       }
       if (!raw || raw === "status") {
-        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${o.autoFailover ? "开" : "关"}\n本地保护：${localLockOn() ? "开（只能用在线）" : "关"}`)
+        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}\n本地保护：${localLockOn() ? "开（只能用在线）" : "关"}\n本地锁定：${localPinOn() ? "开（不会自动切走）" : "关"}`)
       }
       if (!o.local && !o.cloud) return ok("还没配 models.local / models.cloud，先在 life-world.json 里配好。")
       const target = raw === "local" ? o.local : raw === "cloud" ? o.cloud : raw

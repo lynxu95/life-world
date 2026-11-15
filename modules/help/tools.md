@@ -32,6 +32,8 @@
 ## 模型
 - 切换：`switch_model({ target: "local|cloud", reason: "为什么切" })`
 - 查状态：`switch_model()`，或 `switch_model({ target: "status" })`
+- 本地锁定：`local_pin({ enabled: true, reason: "跑项目" })` —— 和本地保护正好一对（保护锁在线、锁定锁本地）。
+  开着时探活失败、模型无响应、工具连续失败都不会自动切走，适合用本地模型完整跑一个项目；`local_pin()` 查状态，跑完记得解除。
 - 本地保护：`local_protect({ enabled: true|false, reason: "打游戏" })`（不传参数查状态）
 - 子代理：`delegate({ task: "完整任务、输入和验收标准", model: "provider/model（可选）" })`
 - gal 选项：`gal_choice({ question: "镜头停在哪，一句", options: ["…", "…"] })`

@@ -61,9 +61,28 @@ function readLocalLockStrict() {
   if (!existsSync(file)) return { enabled: false }
   try {
     const v = JSON.parse(readFileSync(file, "utf8"))
-    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true }
-    return { enabled: typeof v.enabled === "boolean" ? v.enabled : true }
-  } catch { return { enabled: true } }
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true, broken: true }
+    return {
+      enabled: typeof v.enabled === "boolean" ? v.enabled : true,
+      at: typeof v.at === "string" ? v.at : undefined,
+      reason: typeof v.reason === "string" ? v.reason : undefined,
+    }
+  } catch { return { enabled: true, broken: true } }
+}
+
+// 本地锁定：和本地保护同构，开着时不自动切模型
+function readLocalPinStrict() {
+  const file = join(ROOT, "local-pin.json")
+  if (!existsSync(file)) return { enabled: false }
+  try {
+    const v = JSON.parse(readFileSync(file, "utf8"))
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { enabled: true, broken: true }
+    return {
+      enabled: typeof v.enabled === "boolean" ? v.enabled : true,
+      at: typeof v.at === "string" ? v.at : undefined,
+      reason: typeof v.reason === "string" ? v.reason : undefined,
+    }
+  } catch { return { enabled: true, broken: true } }
 }
 
 function writeAtomic(file, text) {
@@ -571,6 +590,7 @@ const server = http.createServer(async (req, res) => {
         })(),
         heartbeatEnabled: !(c.world && c.world.heartbeatEnabled === false),
         localLock: readLocalLockStrict(),
+        localPin: readLocalPinStrict(),
         session: {
           idleRefreshMinutes: (() => { const v = Number(c.session && c.session.idleRefreshMinutes); return Number.isFinite(v) && v > 0 ? Math.max(1, Math.min(1440, Math.round(v))) : 30 })(),
           refreshHome: !(c.session && c.session.refreshHome === false),
@@ -846,17 +866,40 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/local-lock") {
       const data = await body(req)
+      if (typeof data.enabled !== "boolean") return json(res, 400, { ok: false, msg: "enabled 必须是 true/false" })
       const enabled = data.enabled === true
       const cfg = readJson(CONFIG_FILE, {})
       const cloud = String((cfg.models && cfg.models.cloud) || "")
       if (enabled && !cloud) return json(res, 400, { ok: false, msg: "没配在线模型（models.cloud），开了也切不过去" })
       const doc = { enabled, at: new Date().toISOString(), by: "board", reason: String(data.reason || "").slice(0, 200) }
       writeAtomic(join(ROOT, "local-lock.json"), JSON.stringify(doc, null, 2))
+      // 两个锁互斥：本地保护开起来，本地锁定就解掉
+      if (enabled && existsSync(join(ROOT, "local-pin.json"))) {
+        try { writeAtomic(join(ROOT, "local-pin.json"), JSON.stringify({ enabled: false, at: doc.at, by: "board", reason: "本地保护模式开启，自动解除本地锁定" }, null, 2)) }
+        catch (e) { console.error(`清 local-pin 失败：${String(e)}`) }
+      }
       // 开锁时顺手把所有会话推到在线，别等下一轮才切换
       if (enabled && cloud) {
         try { appendCommand(ROOT, { target: "all", action: "model", model: "cloud", reason: "本地保护模式" }) } catch { /* 命令下发失败不影响锁 */ }
       }
       return json(res, 200, { ok: true, enabled, msg: enabled ? "已开：正在把会话切到在线" : "已关" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/local-pin") {
+      const data = await body(req)
+      if (typeof data.enabled !== "boolean") return json(res, 400, { ok: false, msg: "enabled 必须是 true/false" })
+      const enabled = data.enabled === true
+      const cfg = readJson(CONFIG_FILE, {})
+      const local = String((cfg.models && cfg.models.local) || "")
+      if (enabled && !local) return json(res, 400, { ok: false, msg: "没配本地模型（models.local），锁了也没地方可待" })
+      // 两个锁互斥：本地保护开着就不让锁定（和 local_pin 工具一致）
+      if (enabled && readLocalLockStrict().enabled) return json(res, 400, { ok: false, msg: "本地保护模式开着（只能用在线），先关掉再锁定" })
+      const doc = { enabled, at: new Date().toISOString(), by: "board", reason: String(data.reason || "").slice(0, 200) }
+      writeAtomic(join(ROOT, "local-pin.json"), JSON.stringify(doc, null, 2))
+      // 锁定时顺手把所有会话推到本地，别等下一轮才切
+      if (enabled) {
+        try { appendCommand(ROOT, { target: "all", action: "model", model: "local", reason: "本地锁定" }) } catch { /* 命令下发失败不影响锁 */ }
+      }
+      return json(res, 200, { ok: true, localPin: { enabled, at: doc.at, reason: doc.reason }, msg: enabled ? "已锁定：正在把会话切到本地" : "已解除" })
     }
     if (req.method === "POST" && url.pathname === "/api/session-refresh") {
       const data = await body(req)

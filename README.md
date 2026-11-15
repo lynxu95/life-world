@@ -318,7 +318,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 
 - 角色自己切：`switch_model({ target: "local"|"cloud"|"provider/model", reason })`；
 - 人能切：`lwctl` 交互菜单 / `lwctl set qq cloud` / 看板按钮；
-- 脚本兜底：模型无响应立即切另一个；工具连续失败两次从本地切云端；每轮探活（`autoFailover`）；开启本地保护时不往本地掉；
+- 脚本兜底：模型无响应立即切另一个；工具连续失败两次从本地切云端；每轮探活。想临时不切就用「本地锁定」（看板「模型设置」可开，`local_pin` 工具也行），和「本地保护（只用在线）」正好一对；开启本地保护时不往本地掉；
 - 切换记录写进会话，恢复会话时保留；
 - 规范文件 `worlds/default/identity/模型使用规范.md`（建议 ≤500 字）会注入 system，说明什么时候切、切换礼仪。
 

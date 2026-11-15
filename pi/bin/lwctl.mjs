@@ -319,6 +319,20 @@ function cmdRestart(target) {
       else model = process.env.LIFE_WORLD_MODEL || c.local || ""
     }
   } catch { /* 读不了就照旧 */ }
+  // 本地锁定：重启后直接落在本地；同样按 fail-closed 读，保护优先
+  try {
+    const pinFile = join(ROOT, "local-pin.json")
+    if (existsSync(pinFile)) {
+      let pinned = true
+      try { pinned = JSON.parse(readFileSync(pinFile, "utf8")).enabled !== false } catch { /* 坏文件按锁定 */ }
+      let protectedNow = false
+      try {
+        const lockFile = join(ROOT, "local-lock.json")
+        protectedNow = existsSync(lockFile) && JSON.parse(readFileSync(lockFile, "utf8")).enabled !== false
+      } catch { protectedNow = existsSync(join(ROOT, "local-lock.json")) }
+      if (pinned && !protectedNow && c.local) model = c.local
+    }
+  } catch { /* 读不了就照旧 */ }
   if (model && !/^[A-Za-z0-9._:/@-]+$/.test(model)) {
     console.error(`模型名不合法，拒绝执行：${model}`)
     return false

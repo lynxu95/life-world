@@ -531,6 +531,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint">辅助感知只补主模型缺的能力（视频/音频，或主模型不支持图片时）；留空即停用，推荐 qwen3.8-omni-flash。</div>
         <label class="check" style="margin-top:10px"><input type="checkbox" id="lp-enabled">本地保护（只用在线）</label>
         <div class="hint" id="lp-hint">开着的时候不会切回本地，写着 local 的闹钟执行时也改走在线。</div>
+        <label class="check" style="margin-top:10px"><input type="checkbox" id="mf-enabled">本地锁定（不自动切走）</label>
+        <div class="hint" id="mf-hint">开着的时候探活失败、模型无响应、工具连续失败都不会自动切到在线——适合用本地模型完整跑一个项目。</div>
         <div class="hint" id="mode-hint"></div>
       </section>
         <section>
@@ -845,8 +847,54 @@ function renderLocalLock(l, cloudModel) {
 $("lp-enabled")?.addEventListener("change", async () => {
   const enabled = $("lp-enabled").checked
   const r = await postJson("/api/local-lock", { enabled, reason: "看板手动" }).catch(() => null)
-  if (r && r.ok) renderLocalLock({ enabled, at: new Date().toISOString(), reason: "看板手动" }, LAST_MODEL_INFO.cloud)
+  if (r && r.ok) {
+    renderLocalLock({ enabled, at: new Date().toISOString(), reason: "看板手动" }, LAST_MODEL_INFO.cloud)
+    LAST_MODEL_INFO.protectOn = enabled
+    // 开保护时服务端会清掉锁定；关保护时直接用最新 overview 校准，别猜
+    if (enabled) renderLocalPin({ enabled: false }, LAST_MODEL_INFO.failoverBaseOff, LAST_MODEL_INFO, true)
+    else void loadOverview()
+  }
   else { $("lp-enabled").checked = !enabled; $("lp-hint").textContent = "保存失败，稍后再试" }
+})
+
+function renderLocalPin(pin, baseOff, models, protectOn) {
+  const on = !!(pin && pin.enabled)
+  const hasLocal = !!(models && models.local)
+  const box = $("mf-enabled")
+  if (box) {
+    // 没配本地模型、或本地保护开着时不给锁（和工具侧一致）
+    box.disabled = !hasLocal || !!protectOn
+    box.title = !hasLocal ? "没配本地模型（models.local）" : protectOn ? "本地保护开着，先关掉它" : ""
+    if (document.activeElement !== box) box.checked = on && !protectOn
+  }
+  const hint = $("mf-hint")
+  if (!hint) return
+  // 保护优先：两个锁万一同时存在，先解释保护
+  if (protectOn) {
+    hint.textContent = on ? "本地保护开着（只能用在线），本地锁定暂不生效。" : "本地保护开着（只能用在线），要锁本地先把它关掉。"
+  } else if (on) {
+    const at = pin.at && Number.isFinite(Date.parse(pin.at)) ? new Date(pin.at).toLocaleString("zh-CN", { hour12: false }) : ""
+    const broken = pin.broken ? "（状态文件读不出来，按锁定处理）" : ""
+    hint.textContent = `已锁定${at ? ` · ${at}` : ""}${pin.reason ? ` · ${pin.reason}` : ""}${broken}——不会自动切到在线`
+  } else if (!hasLocal) {
+    hint.textContent = "没配本地模型（models.local），这个开关用不了。"
+  } else if (baseOff) {
+    hint.textContent = "关着（life-world.json 里 autoFailover 基线就是关的）。"
+  } else {
+    hint.textContent = "关着：探活失败、模型无响应、工具连续失败会自动切到另一个模型。"
+  }
+}
+$("mf-enabled")?.addEventListener("change", async () => {
+  const on = $("mf-enabled").checked
+  if (on && !LAST_MODEL_INFO.local) { $("mf-enabled").checked = false; $("mf-hint").textContent = "没配本地模型（models.local），这个开关用不了。"; return }
+  if (on && LAST_MODEL_INFO.protectOn) { $("mf-enabled").checked = false; $("mf-hint").textContent = "本地保护开着（只能用在线），要锁本地先把它关掉。"; return }
+  const r = await postJson("/api/local-pin", { enabled: on, reason: "看板手动" }).catch(() => null)
+  if (r && r.ok) {
+    renderLocalPin({ enabled: on, at: new Date().toISOString(), reason: "看板手动" }, LAST_MODEL_INFO.failoverBaseOff, LAST_MODEL_INFO, LAST_MODEL_INFO.protectOn)
+  } else {
+    $("mf-enabled").checked = !on
+    $("mf-hint").textContent = (r && r.msg) || "保存失败，稍后再试"
+  }
 })
 
 async function loadOverview() {
@@ -873,6 +921,7 @@ async function loadOverview() {
     if (Array.isArray(d.available)) mLoaded = true
     renderSessionRefresh(d.session)
     renderLocalLock(d.localLock, (d.models && d.models.cloud) || "deepseek/deepseek-flash")
+    renderLocalPin(d.localPin, d.models && d.models.autoFailover === false, d.models, d.localLock && d.localLock.enabled)
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
       $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`
@@ -884,6 +933,8 @@ async function loadOverview() {
       cloud: (d.models && d.models.cloud) || "",
       subagent: (d.subagent && d.subagent.model) || "",
       multimodal: (d.multimodal && d.multimodal.model) || "",
+      failoverBaseOff: !!(d.models && d.models.autoFailover === false),
+      protectOn: !!(d.localLock && d.localLock.enabled),
       group: !!(d.bridge && d.bridge.group && d.bridge.group.enabled),
     }
     renderUpdate(d.update, d.updateResult)
