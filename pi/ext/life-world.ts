@@ -647,7 +647,12 @@ function currentModelLine(): string {
 }
 
 function stateText(withMood = true): string {
-  const parts = [currentModelLine(), withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
+  // 两个特殊模式只在开着的时候出现，免得刷屏；开着的时候必须让 AI 记得，否则会误判自己能不能切模型
+  const modes = [
+    localLockOn() ? "本地保护：开（只能用在线）" : "",
+    localPinOn() && !localLockOn() ? "本地锁定：开（不自动切走）" : "",
+  ]
+  const parts = [currentModelLine(), ...modes, withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
   return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）`
 }
 
@@ -672,7 +677,7 @@ function cleanUserText(text: string): string {
   return text
     .replace(/^\[本地时间 [^\]]*\]\s*/, "")
     .split("\n")
-    .filter((line) => !line.startsWith("（模型：") && !line.startsWith("（心情：") && !line.startsWith("（OneBot 桥接："))
+    .filter((line) => !line.startsWith("（模型：") && !line.startsWith("（心情：") && !line.startsWith("（OneBot 桥接：") && !line.startsWith("（本地保护：") && !line.startsWith("（本地锁定：") && !line.startsWith("（本地时间 "))
     .join("\n")
     .replace(/（你最近主动给他发过：[\s\S]*?\n）/g, "")
     .split("\n")
