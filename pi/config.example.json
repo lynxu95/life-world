@@ -71,6 +71,10 @@
     "probeTimeoutMs": 4000,
     "cooldownMs": 60000
   },
+  "forms": {
+    "enabled": false,
+    "free": ""
+  },
   "care": {
     "enabled": true,
     "quietStart": "23:30",

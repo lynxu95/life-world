@@ -199,6 +199,78 @@ const MODEL_RULES_MARK = "## 模型使用规范"
 /** 化形表：模型 → 外观/称呼（identity/化形表.md） */
 const FORMS_FILE = join(IDENTITY_DIR, "化形表.md")
 const FORMS_MARK = "## 化形表"
+/** 内置默认化形：表里的同关键词行优先，认不出的在线厂商让 AI 自己挑 */
+const FORM_DEFAULTS: Array<{ keys: string[]; label: string }> = [
+  { keys: ["deepseek"], label: "鲸鱼娘" },
+  { keys: ["claude", "anthropic"], label: "claude娘" },
+  { keys: ["qwen", "qwq", "tongyi", "通义"], label: "千问大小姐" },
+  { keys: ["gemini"], label: "哈基米猫娘" },
+  { keys: ["gpt", "chatgpt", "openai"], label: "白龙娘" },
+  { keys: ["grok", "xai"], label: "刁蛮雌小鬼" },
+  { keys: ["kimi", "moonshot"], label: "kimi娘" },
+  { keys: ["glm", "zhipu", "bigmodel", "智谱"], label: "噶啦嘛狐狸娘" },
+]
+/** 化形标签只占一行小字段，去掉会破坏状态行的括号/分号/换行 */
+function cleanFormLabel(text: string): string {
+  return cutChars(String(text || "").replace(/[（）()；;\r\n]/g, " ").replace(/\s+/g, " ").trim(), 20)
+}
+/**
+ * 化形表：只认 `- 关键词 → 标签` 这种行（也接受 => / ->），其余自由描述不参与匹配。
+ * 关键词对模型的 provider 和模型名做包含匹配，大小写不限。
+ */
+function parseFormTable(): Array<{ key: string; label: string }> {
+  const text = readText(FORMS_FILE)
+  if (!text) return []
+  // 只解析《化形描述》之前的部分：描述里可能有 `- 尾巴：...` 之类，别被当成映射
+  const head = text.split(/^##\s*化形描述\s*$/m)[0]
+  const out: Array<{ key: string; label: string }> = []
+  for (const line of head.split("\n")) {
+    // 只认箭头：说明性 bullet（- qwen：……）不能被当成映射
+    const m = line.match(/^\s*[-*]\s+([^\s→]+)\s*(?:→|=>|->)\s*(.+?)\s*$/)
+    if (!m) continue
+    const key = m[1].replace(/[*_`]/g, "").toLowerCase()
+    const label = cleanFormLabel(m[2].split(/[（(，,；;·|]/)[0].replace(/[*_`]/g, ""))
+    if (key.length >= 2 && key.length <= 40 && label) out.push({ key, label })
+  }
+  return out
+}
+function formLabelFor(id: string): { label: string; source: "table" | "builtin" } | null {
+  const ref = String(id || "").toLowerCase()
+  if (!ref) return null
+  // 长关键词优先：`deepseek-r1` 不会被更宽的 `deep` 抢先命中
+  for (const e of parseFormTable().sort((a, b) => b.key.length - a.key.length)) if (ref.includes(e.key)) return { label: e.label, source: "table" }
+  for (const e of FORM_DEFAULTS) if (e.keys.some((k) => ref.includes(k))) return { label: e.label, source: "builtin" }
+  return null
+}
+/** 化形描述：`## 化形描述` 下面每个 `### 名字` 一节，AI 自己维护；解析时只取正文前 300 字 */
+function formDetails(): Map<string, string> {
+  const out = new Map<string, string>()
+  const text = readText(FORMS_FILE)
+  const i = text.search(/^##\s*化形描述\s*$/m)
+  if (i < 0) return out
+  let label = "", buf: string[] = []
+  const flush = () => {
+    if (!label) return
+    const body = cutChars(buf.join("\n").replace(/\s+/g, " ").trim(), 300)
+    if (body) out.set(label, body)
+    buf = []
+  }
+  for (const line of text.slice(i).split("\n").slice(1)) {
+    const h = line.match(/^###\s+(.+?)\s*$/)
+    if (h) { flush(); label = cleanFormLabel(h[1].replace(/[*_`]/g, "")); continue }
+    if (/^##\s/.test(line)) { flush(); label = ""; break }
+    if (label) buf.push(line)
+  }
+  flush()
+  return out
+}
+function formDetailFor(label: string): string {
+  const details = formDetails()
+  const exact = details.get(label)
+  if (exact) return exact
+  for (const [k, v] of details) if (label.includes(k) || k.includes(label)) return v
+  return ""
+}
 const AUTH_FILE = join(homedir(), ".pi/agent/auth.json")
 const MODELS_FILE = join(homedir(), ".pi/agent/models.json")
 /** 机密抽屉：切到云端前把这段对话（含机密文件内容）收起来，切回本地再打开 */
@@ -300,6 +372,8 @@ interface Config {
   multimodal: MultimodalOptions
   localModel: LocalModelOptions
   models: ModelSwitchOptions
+  /** 化形：可选功能，默认关；开启后在线跟模型走，free 是本地/未登记厂商时的自选标签 */
+  forms: { enabled: boolean; free: string }
   care: CareOptions
   homeAssistant: HomeAssistantOptions
   privacy: { drawer: boolean }
@@ -415,6 +489,7 @@ function config(): Config {
     multimodal: { enabled: false, model: "", timeoutMs: 300_000, warnImageBytes: 8 * 1024 * 1024, warnVideoBytes: 200 * 1024 * 1024 },
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
+    forms: { enabled: false, free: "" },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
     homeAssistant: { enabled: false, sayService: "", sayEntity: "" },
     privacy: { drawer: true },
@@ -441,6 +516,7 @@ function config(): Config {
     multimodal: { ...base.multimodal, ...(raw.multimodal || {}) },
     localModel: { ...base.localModel, ...(raw.localModel || {}) },
     models: { ...base.models, ...(raw.models || {}) },
+    forms: { ...base.forms, ...(raw.forms || {}) },
     care: { ...base.care, ...(raw.care || {}) },
     homeAssistant: { ...base.homeAssistant, ...(raw.homeAssistant || {}) },
     privacy: { ...base.privacy, ...(raw.privacy || {}) },
@@ -665,6 +741,29 @@ function currentModelLine(): string {
   return `模型：${kind} · ${id}`
 }
 
+/** 当前化形：在线跟模型走；本地或未登记厂商用自己挑的标签 */
+function currentForm(): { line: string; label: string } | null {
+  if (!config().forms.enabled) return null // 关着就是完全自由：不加字段、不设限制
+  let id = ""
+  try { id = lastCtx ? modelIdOf(lastCtx) : "" } catch { /* stale ctx */ }
+  if (!id) return null
+  const o = config().models
+  const free = cleanFormLabel(config().forms.free)
+  if (o.local && id === o.local) {
+    return { line: `化形：${free || "本相"}（本地 · ${free ? "自己挑的" : "自由"}）`, label: free || "本相" }
+  }
+  const hit = formLabelFor(id)
+  if (hit) return { line: `化形：${hit.label}（在线 · 跟着模型）`, label: hit.label }
+  return { line: `化形：${free || "自由"}（在线 · 未登记，${free ? "自己挑的" : "自由决定"}）`, label: free || "自由" }
+}
+function currentFormLine(): string { return currentForm()?.line || "" }
+/** 当前化形在《化形描述》里写下的细节；群聊不带（可能是私密口味） */
+function currentFormDetail(form: { label: string } | null = currentForm()): string {
+  if (CHANNEL === "group" || ROLE === "group" || !form) return ""
+  const d = formDetailFor(form.label)
+  return d ? `化形设定：${d}` : ""
+}
+
 function stateText(withMood = true): string {
   // 两个特殊模式只在开着的时候出现，免得刷屏；开着的时候必须让 AI 记得，否则会误判自己能不能切模型
   const modes = [
@@ -672,8 +771,11 @@ function stateText(withMood = true): string {
     localPinOn() && !localLockOn() ? "本地锁定：开（不自动切走）" : "",
   ]
   const wx = weatherText()
-  const parts = [currentModelLine(), ...modes, wx ? `天气：${wx}` : "", withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
-  return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）`
+  const form = currentForm()
+  const parts = [currentModelLine(), form ? form.line : "", ...modes, wx ? `天气：${wx}` : "", withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
+  // 化形描述单独一行，不塞进括号组：正文里的括号/分号不会破坏状态行
+  const formDetail = currentFormDetail(form)
+  return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）${formDetail ? `\n${formDetail}` : ""}`
 }
 
 // ———————— 归档 / 记忆 ————————
@@ -4107,10 +4209,11 @@ export default function (pi: ExtensionAPI) {
     const cloudActive = !!o.local && !isLocal
     // 模型使用规范：和心情一样注入（identity/模型使用规范.md，控制在 500 字内）
     const rules = readText(MODEL_RULES_FILE)
-    if (rules && !prompt.includes(MODEL_RULES_MARK)) prompt = `${prompt}\n\n${MODEL_RULES_MARK}\n${rules}`
-    // 化形表：模型 → 外观/称呼（控制在 800 字内）
-    const forms = readText(FORMS_FILE)
-    if (forms && !prompt.includes(FORMS_MARK)) prompt = `${prompt}\n\n${FORMS_MARK}\n${forms.slice(0, 800)}`
+    // 用整行匹配：模块正文里可能有 `### 化形表怎么认` 之类，裸 includes 会误判成已注入
+    if (rules && !prompt.includes(`\n${MODEL_RULES_MARK}\n`)) prompt = `${prompt}\n\n${MODEL_RULES_MARK}\n${rules}`
+    // 化形表：可选功能，开着才注入（模型 → 标签 + AI 自己写的描述）
+    const forms = config().forms.enabled ? readText(FORMS_FILE) : ""
+    if (forms && !prompt.includes(`\n${FORMS_MARK}\n`)) prompt = `${prompt}\n\n${FORMS_MARK}\n${cutChars(forms, 1600)}`
     // 印象只给私聊/家会话：群聊里不能出现私密判断（群规则明确禁止提画像、日记、私聊内容）
     if (CHANNEL !== "group") {
       const clip = (text: string, max: number) => {
@@ -5485,6 +5588,51 @@ export default function (pi: ExtensionAPI) {
       const range = d.lo && d.hi ? `，${d.lo}~${d.hi}°C` : ""
       const tail = remember ? "。已设为默认城市" : city === cur ? "" : "（临时查询，没改默认城市）"
       return ok(`${city} 今天：${d.desc} ${d.tempC}°C（体感 ${d.feelsC}°C${range}，湿度 ${d.humidity}%）${tail}。`)
+    },
+  })
+
+  addTool(pi, {
+    name: "form",
+    label: "Form",
+    description: "看/改自己的化形标签。在线模型时化形跟着厂商走（deepseek=鲸鱼娘、claude=claude娘…）；本地模型或认不出的在线厂商，可以用这个工具挑自己喜欢的化形，全机所有会话统一。",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "新的自选化形标签，比如 小狐狸；省略则只看当前" },
+        clear: { type: "boolean", description: "true = 清掉自选化形，本地/未登记时回到默认" },
+      },
+    },
+    async execute(_id: string, params: any) {
+      if (!config().forms.enabled) return ok("化形功能没开（默认关）；现在化形完全自由，不设任何标签。要开就在 web 看板「扩展功能 · 化形」打开。")
+      if (CHANNEL === "group" || ROLE === "group") return ok("群聊里不调化形。")
+      let id = ""
+      try { id = lastCtx ? modelIdOf(lastCtx) : "" } catch { /* stale ctx */ }
+      const o = config().models
+      const local = !!o.local && id === o.local
+      const hit = formLabelFor(id)
+      const want = cleanFormLabel(params?.name)
+      const clear = params?.clear === true
+      if (!want && !clear) {
+        const detail = currentFormDetail()
+        return ok(`现在：${currentFormLine() || "（还没有模型信息）"}${detail ? `\n${detail}` : ""}。化形表：${FORMS_FILE}；自选化形管本地和未登记厂商，用 form({ name: "小狐狸" }) 改，描述写在「化形描述」小节。`)
+      }
+      const next = clear ? "" : want
+      let raw: any = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return ok("life-world.json 解析失败，先别改化形配置。") }
+      }
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return ok("配置不是对象，先别改化形配置。")
+      try {
+        raw.forms = raw.forms && typeof raw.forms === "object" && !Array.isArray(raw.forms) ? raw.forms : {}
+        raw.forms.free = next
+        atomicWrite(CONFIG_FILE, JSON.stringify(raw, null, 2))
+      } catch (e) { return ok(`没写成：${String(e)}`) }
+      if (!next) return ok("自选化形已清掉；本地默认「本相」，未登记厂商默认「自由」。")
+      const effect = local ? `现在就在本地，马上生效：化形：${next}`
+        : hit ? `现在在线用 ${hit.label}，化形仍跟着模型走；切回本地或换到未登记厂商时会用 ${next}`
+        : `现在是未登记厂商，马上生效：化形：${next}`
+      return ok(`自选化形已设为「${next}」（全机所有会话统一）。${effect}。`)
     },
   })
 

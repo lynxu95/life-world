@@ -23,6 +23,7 @@ const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-w
 const WORLD = join(ROOT, "worlds/default")
 const CONFIG_FILE = join(ROOT, "life-world.json")
 const HA_SECRET_FILE = join(WORLD, "机密抽屉", "钥匙串", "homeassistant.json")
+const FORMS_FILE = join(WORLD, "identity", "化形表.md")
 const STATUS_DIR = join(ROOT, "status")
 const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
 const boardCfg = (() => {
@@ -1046,6 +1047,55 @@ const server = http.createServer(async (req, res) => {
       try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) }
       catch (e) { return json(res, 500, { ok: false, msg: `配置写不进去：${String(e)}` }) }
       return json(res, 200, { ok: true, enabled: cfg.privacy.drawer })
+    }
+    if (req.method === "GET" && url.pathname === "/api/forms") {
+      const cfg = readJson(CONFIG_FILE, {})
+      const f = cfg.forms && typeof cfg.forms === "object" && !Array.isArray(cfg.forms) ? cfg.forms : {}
+      let raw = ""
+      try { raw = readFileSync(FORMS_FILE, "utf8") } catch { /* 还没建过表 */ }
+      const i = raw.search(/^##\s*化形描述\s*$/m)
+      return json(res, 200, {
+        ok: true,
+        enabled: f.enabled === true,
+        free: String(f.free || ""),
+        mapping: (i < 0 ? raw : raw.slice(0, i)).replace(/\s+$/, ""),
+        path: FORMS_FILE,
+        exists: !!raw,
+      })
+    }
+    if (req.method === "POST" && url.pathname === "/api/forms") {
+      const data = await body(req)
+      if (!data || typeof data !== "object" || Array.isArray(data)) return json(res, 200, { ok: false, msg: "body 不是对象" })
+      const known = ["enabled", "free", "mapping"]
+      if (!known.some((k) => k in data)) return json(res, 200, { ok: false, msg: "没有可保存的字段（body 解析失败？）" })
+      let cfg = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 200, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 200, { ok: false, msg: "配置不是对象，拒绝写入" })
+      cfg.forms = cfg.forms && typeof cfg.forms === "object" && !Array.isArray(cfg.forms) ? cfg.forms : {}
+      if (typeof data.enabled === "boolean") cfg.forms.enabled = data.enabled
+      if (typeof data.free === "string") {
+        const free = data.free.replace(/[（）()；;\r\n]/g, " ").replace(/\s+/g, " ").trim()
+        cfg.forms.free = Array.from(free).slice(0, 20).join("") // 按码点，别切坏 emoji
+      }
+      if (typeof data.mapping === "string") {
+        if (/^##\s*化形描述\s*$/m.test(data.mapping)) return json(res, 200, { ok: false, msg: "「化形描述」那节留给 AI 自己维护，这里只改上面的映射" })
+        const mapping = data.mapping.replace(/\r/g, "").replace(/\s+$/, "")
+        if (mapping.length > 20_000) return json(res, 200, { ok: false, msg: "化形表太长了（上限 20000 字）" })
+        let prev = ""
+        try { prev = readFileSync(FORMS_FILE, "utf8") } catch { /* 新表 */ }
+        const i = prev.search(/^##\s*化形描述\s*$/m)
+        const desc = i < 0 ? "## 化形描述\n" : prev.slice(i)
+        try {
+          mkdirSync(dirname(FORMS_FILE), { recursive: true })
+          writeAtomic(FORMS_FILE, mapping ? `${mapping}\n\n${desc}` : desc)
+        } catch (e) { return json(res, 200, { ok: false, msg: `化形表写不进去：${String(e)}` }) }
+      }
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) }
+      catch (e) { return json(res, 200, { ok: false, msg: `配置写不进去：${String(e)}` }) }
+      return json(res, 200, { ok: true, enabled: cfg.forms.enabled === true, free: cfg.forms.free || "" })
     }
     if (req.method === "GET" && url.pathname === "/api/ha") {
       const cfg = readJson(CONFIG_FILE, {})

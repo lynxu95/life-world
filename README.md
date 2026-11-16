@@ -45,6 +45,7 @@
 | 印象整理 | 每天把近期对话/日记归纳成 `identity/印象.md`，本地/云端都注入 |
 | 记忆星图 | 看板 3D 星图：全屏、星云背景随旋转、印象连线回真实来源 |
 | 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换；`local_protect` 本地保护模式（临时只用在线） |
+| 化形（可选，默认关） | 看板「扩展功能」开启后，在线模型自动对应社区化形（deepseek=鲸鱼娘、claude=claude娘…），每轮状态行显示；本地或未登记厂商用 `form` 自己挑，看板/`identity/化形表.md` 可改映射；关着时不加任何字段，完全自由 |
 | 代码编辑 | `patch` 行级哈希编辑：只给 tag + 行号，不用抄原文；`edit` 兜底 |
 | Home Assistant | 默认关；看板填地址+令牌（存 `机密抽屉/钥匙串`），`ha` 工具查实体/调服务/让音箱说话 |
 | 多窗口时间线 | 每个窗口每轮追加一行（48 小时），交接班时注入别的窗口最近 10 条 + 「更早还有 N 条」；群聊不参与 |
@@ -514,7 +515,7 @@ home（后台那个「总脑」）在日程、心跳、想起你、早上这些�
 
 ## 工具
 
-`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `local_protect` · `web_search`
+`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `local_protect` · `form` · `weather` · `ha` · `patch` · `web_search`
 
 - `web_search` 走 TinyFish keyless，免 API Key；
 - `delegate` 起独立 `pi -p` 子进程，深度 1 层；

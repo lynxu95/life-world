@@ -110,11 +110,13 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 /* 扩展功能：模块内容不多，一行放两个；HA 字段多，占满一行 */
 #tab-ext .dash.single>main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:stretch}
 #tab-ext .dash.single>main>section:nth-child(3),
-#tab-ext .dash.single>main>section:nth-child(4){grid-column:1 / -1}
+#tab-ext .dash.single>main>section:nth-child(4),
+#tab-ext .dash.single>main>section:nth-child(5){grid-column:1 / -1}
 @media (max-width:900px){
   #tab-ext .dash.single>main{grid-template-columns:minmax(0,1fr)}
   #tab-ext .dash.single>main>section:nth-child(3),
-  #tab-ext .dash.single>main>section:nth-child(4){grid-column:auto}
+  #tab-ext .dash.single>main>section:nth-child(4),
+  #tab-ext .dash.single>main>section:nth-child(5){grid-column:auto}
 }
 #tab-memory .star{--brain-h:clamp(460px,62vh,720px)}
 @media (max-width:1080px){
@@ -153,6 +155,7 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 /* 心跳与关怀：整块统一 12px，别让 muted / 输入框比标签大一号 */
 .hb-care{font-size:12px}
 #tab-ext .hint,#tab-ext .muted,#tab-ext .field input{font-size:12px}
+#tab-ext textarea{width:100%;box-sizing:border-box;background:var(--panel-2);color:var(--fg);border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 9px;font-family:var(--mono);font-size:12px;line-height:1.55;resize:vertical}
 .dw-files{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
 .dw-files .row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);padding:3px 0}
 .dw-files .row b{font-weight:500;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -645,6 +648,16 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             </aside>
           </div>
         </section>
+        <section>
+          <div class="sec-head"><h2>化形</h2><span class="spacer"></span><span class="sec-note" id="form-note">未启用</span></div>
+          <label class="check"><input type="checkbox" id="form-enabled">启用化形</label>
+          <div class="hint">开着：每轮消息头显示当前化形，在线跟着模型走，本地/未登记厂商用自选标签。关着：不加任何化形字段，完全由她自己决定。</div>
+          <label class="field" style="margin-top:8px">自选化形 <input id="form-free" type="text" placeholder="小狐狸（本地/未登记厂商时用）" style="flex:1;min-width:0"></label>
+          <div class="hint" style="margin-top:10px">映射一行一个，写成 <code>关键词 → 标签</code>；关键词匹配厂商和模型名，大小写不限。内置默认：deepseek=鲸鱼娘、claude=claude娘、qwen=千问大小姐、gemini=哈基米猫娘、gpt=白龙娘、grok=刁蛮雌小鬼、kimi=kimi娘、glm=噶啦嘛狐狸娘。</div>
+          <textarea id="form-map" rows="8" spellcheck="false" placeholder="- deepseek → 鲸鱼娘&#10;- claude → claude娘"></textarea>
+          <div class="row" style="margin-top:10px"><button class="primary" id="form-save">保存</button><span class="muted" id="form-hint"></span></div>
+          <div class="hint">「化形描述」小节留给 AI 自己写，这里只编辑上面的映射，不会覆盖它。</div>
+        </section>
       </main>
     </div>
   </div>
@@ -1056,6 +1069,52 @@ $("gw-save")?.addEventListener("click", async () => {
   if (r.ok) { $("gw-token").value = ""; $("gw-clear-token").checked = false; gwTouched = false; void loadGateway() }
 })
 
+let formsTouched = false
+let formsLoaded = false
+let formsSaving = false
+async function loadForms() {
+  if (formsSaving) return
+  const d = await getJson("/api/forms").catch(() => null)
+  if (!d) return
+  formsLoaded = true
+  if (document.activeElement !== $("form-enabled")) $("form-enabled").checked = !!d.enabled
+  if (!formsTouched) {
+    const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v }
+    set("form-free", d.free || "")
+    set("form-map", d.mapping || "")
+  }
+  const note = $("form-note")
+  if (note) note.textContent = d.enabled ? "已启用" : "未启用"
+}
+$("form-enabled")?.addEventListener("change", async () => {
+  const on = $("form-enabled").checked
+  const r = await postJson("/api/forms", { enabled: on }).catch(() => null)
+  const hint = $("form-hint")
+  if (r && r.ok) {
+    $("form-note").textContent = on ? "已启用" : "未启用"
+    if (hint) hint.textContent = on ? "已开启" : "已关闭（化形完全自由）"
+  } else {
+    $("form-enabled").checked = !on
+    if (hint) hint.textContent = (r && r.msg) || "保存失败，稍后再试"
+  }
+})
+for (const id of ["form-free", "form-map"]) $(id)?.addEventListener("input", () => { formsTouched = true })
+$("form-save")?.addEventListener("click", async () => {
+  const hint = $("form-hint")
+  // 没成功加载过就别保存：空 textarea 会把映射表清掉
+  if (!formsLoaded) { if (hint) hint.textContent = "还没加载到化形表，稍等再保存"; return }
+  if (hint) hint.textContent = "保存中…"
+  const body = { enabled: $("form-enabled").checked, free: $("form-free").value.trim() }
+  // 只有真的动过映射框才提交，避免把没加载出来的内容当空表覆盖
+  if (formsTouched) body.mapping = $("form-map").value
+  formsSaving = true
+  const r = await postJson("/api/forms", body).catch(() => null)
+  formsSaving = false
+  if (!r) { if (hint) hint.textContent = "保存失败，稍后再试"; return }
+  if (hint) hint.textContent = r.msg || (r.ok ? "已保存" : "保存失败")
+  if (r.ok) { formsTouched = false; void loadForms() }
+})
+
 async function loadDrawerFiles() {
   const box = $("dw-files")
   if (!box) return
@@ -1149,6 +1208,7 @@ async function loadOverview() {
     void loadDrawerFiles()
     void loadHa()
     void loadGateway()
+    void loadForms()
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
       $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`

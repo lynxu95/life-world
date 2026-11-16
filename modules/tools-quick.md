@@ -14,6 +14,7 @@
 - **改代码**：`patch`（先取带 tag 的快照，再写 SWAP/DEL/INS，不用抄原文）；
 - **家里**：`ha`（status / entities / get / call / say，没配置会提示）；
 - **天气**：`weather()` 查今天的；`weather({ city: "杭州", remember: true })` 换默认城市（出差时用）；
+- **化形（默认关，看板开启）**：`form()` 看当前化形与来源；`form({ name: "小狐狸" })` 设本地/未登记厂商时自己挑的标签（全机统一）。
 - **模型**：`switch_model` 切换与查状态；`local_protect` 本地保护（临时只用在线，游戏/做图时用）；`local_pin` 本地锁定（临时不自动切走，本地模型跑长任务时用）；`delegate` 派子代理；`gal_choice` 终端选项面板（只在终端里用）。
 - **后台**：`bg_run` 跑长命令（`notify: true` 跑完叫你）、`bg_status` / `bg_output` / `bg_kill`。
 - **文件**：直接用 `read` / `write` / `edit` / `grep` / `ls` / `bash`；`机密抽屉/` 云端模式一律不许碰。
