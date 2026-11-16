@@ -8,7 +8,7 @@
  * 提供：会话/模型、模型热切换、用量、记忆检索、日记、日志、快照。
  */
 import http from "node:http"
-import { chmodSync, existsSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
@@ -22,6 +22,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const WORLD = join(ROOT, "worlds/default")
 const CONFIG_FILE = join(ROOT, "life-world.json")
+const HA_SECRET_FILE = join(WORLD, "机密抽屉", "钥匙串", "homeassistant.json")
 const STATUS_DIR = join(ROOT, "status")
 const MEM_INDEX_FILE = join(ROOT, "memory-index.db")
 const boardCfg = (() => {
@@ -68,6 +69,30 @@ function readLocalLockStrict() {
       reason: typeof v.reason === "string" ? v.reason : undefined,
     }
   } catch { return { enabled: true, broken: true } }
+}
+
+// Home Assistant：地址/令牌藏在 机密抽屉/钥匙串，接口只回是否已配置，不回令牌
+function readHaSecret() {
+  try {
+    const d = JSON.parse(readFileSync(HA_SECRET_FILE, "utf8"))
+    return d && typeof d === "object" && !Array.isArray(d) ? d : null
+  } catch { return null }
+}
+let haBusy = false
+async function haProbe(sec) {
+  if (!sec?.baseUrl || !sec?.token) return { ok: false, error: "缺地址或令牌" }
+  const base = String(sec.baseUrl).replace(/\/+$/, "")
+  try {
+    const res = await fetch(base + "/api/config", { headers: { Authorization: `Bearer ${sec.token}` }, signal: AbortSignal.timeout(6000) })
+    if (res.status === 401) return { ok: false, error: "令牌不对或已失效（401）" }
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
+    const d = await res.json().catch(() => ({}))
+    const st = await fetch(base + "/api/states", { headers: { Authorization: `Bearer ${sec.token}` }, signal: AbortSignal.timeout(6000) }).then((r) => r.json()).catch(() => [])
+    return { ok: true, version: d?.version || "", name: d?.location_name || "", entities: Array.isArray(st) ? st.length : 0 }
+  } catch (e) {
+    const msg = String(e && e.message || e)
+    return { ok: false, error: /timeout|abort/i.test(msg) ? "连接超时（地址不通或 HA 没响应）" : msg }
+  }
 }
 
 // 本地锁定：和本地保护同构，开着时不自动切模型
@@ -591,6 +616,7 @@ const server = http.createServer(async (req, res) => {
         heartbeatEnabled: !(c.world && c.world.heartbeatEnabled === false),
         localLock: readLocalLockStrict(),
         localPin: readLocalPinStrict(),
+        drawer: { enabled: !(c.privacy && c.privacy.drawer === false) },
         session: {
           idleRefreshMinutes: (() => { const v = Number(c.session && c.session.idleRefreshMinutes); return Number.isFinite(v) && v > 0 ? Math.max(1, Math.min(1440, Math.round(v))) : 30 })(),
           refreshHome: !(c.session && c.session.refreshHome === false),
@@ -900,6 +926,106 @@ const server = http.createServer(async (req, res) => {
         try { appendCommand(ROOT, { target: "all", action: "model", model: "local", reason: "本地锁定" }) } catch { /* 命令下发失败不影响锁 */ }
       }
       return json(res, 200, { ok: true, localPin: { enabled, at: doc.at, reason: doc.reason }, msg: enabled ? "已锁定：正在把会话切到本地" : "已解除" })
+    }
+    if (req.method === "POST" && url.pathname === "/api/drawer") {
+      const data = await body(req)
+      if (typeof data.enabled !== "boolean") return json(res, 400, { ok: false, msg: "enabled 必须是 true/false" })
+      let cfg = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
+      cfg.privacy = cfg.privacy || {}
+      cfg.privacy.drawer = data.enabled === true
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) }
+      catch (e) { return json(res, 500, { ok: false, msg: `配置写不进去：${String(e)}` }) }
+      return json(res, 200, { ok: true, enabled: cfg.privacy.drawer })
+    }
+    if (req.method === "GET" && url.pathname === "/api/ha") {
+      const cfg = readJson(CONFIG_FILE, {})
+      const sec = readHaSecret()
+      const ha = cfg.homeAssistant || {}
+      return json(res, 200, {
+        ok: true,
+        enabled: ha.enabled === true,
+        baseUrl: sec?.baseUrl || "",
+        hasToken: !!sec?.token,
+        at: sec?.at || "",
+        sayService: ha.sayService || "",
+        sayEntity: ha.sayEntity || "",
+      })
+    }
+    if (req.method === "POST" && url.pathname === "/api/ha") {
+      if (haBusy) return json(res, 200, { ok: false, msg: "上一个请求还在测连接，稍等一下再点" })
+      haBusy = true
+      try {
+        const data = await body(req)
+        // 配置解析失败就别覆盖，照 /api/care 的规矩
+        let cfg = {}
+        if (existsSync(CONFIG_FILE)) {
+          try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+          catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+        }
+        if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
+        cfg.homeAssistant = cfg.homeAssistant || {}
+        const prev = readHaSecret() || {}
+        const cand = { ...prev }
+        if (typeof data.baseUrl === "string" && data.baseUrl.trim()) cand.baseUrl = data.baseUrl.trim().replace(/\/+$/, "")
+        if (typeof data.token === "string" && data.token.trim()) cand.token = data.token.trim()
+        const tokenChanged = typeof data.token === "string" && !!data.token.trim()
+        // 地址只收 http(s)，不许带账号密码
+        let u = null
+        try { u = cand.baseUrl ? new URL(cand.baseUrl) : null } catch { u = null }
+        if (cand.baseUrl && (!u || !/^https?:$/.test(u.protocol))) return json(res, 200, { ok: false, msg: "地址要写成 http:// 或 https:// 开头" })
+        if (u && (u.username || u.password)) return json(res, 200, { ok: false, msg: "地址里不要带账号密码" })
+        // 换主机必须同时给新令牌，免得把已存的令牌发到别的机器
+        let prevHost = ""
+        try { prevHost = prev.baseUrl ? new URL(prev.baseUrl).host : "" } catch { prevHost = "" }
+        const hostChanged = !!u && !!prevHost && u.host !== prevHost
+        if (hostChanged && !tokenChanged) return json(res, 200, { ok: false, msg: "换地址要重新填一次令牌，免得把旧令牌发到别的机器" })
+        // 磁盘上只有令牌没有地址（历史遗留）时同样不许不换令牌就指定新地址
+        if (u && !prevHost && prev.token && !tokenChanged) return json(res, 200, { ok: false, msg: "先重新填一次令牌，再改地址" })
+        const wantEnabled = typeof data.enabled === "boolean" ? data.enabled : cfg.homeAssistant.enabled === true
+        if (typeof data.sayService === "string") cfg.homeAssistant.sayService = data.sayService.trim()
+        if (typeof data.sayEntity === "string") cfg.homeAssistant.sayEntity = data.sayEntity.trim()
+        if (wantEnabled && (!cand.baseUrl || !cand.token)) return json(res, 200, { ok: false, msg: "启用前要填地址和令牌" })
+        const prevEnabled = cfg.homeAssistant.enabled === true
+        let probe = { ok: true, skipped: true }
+        // 关闭不探测：HA 离线时也得能关掉
+        if (data.enabled !== false) probe = await haProbe(cand)
+        // 探测成功、或用户刚敲了新令牌（那条令牌只会发往这个地址）时才落盘；复用旧令牌换地址必须探测成功
+        const canPersist = probe.ok || (tokenChanged && !!cand.baseUrl)
+        if (canPersist && (cand.baseUrl !== prev.baseUrl || cand.token !== prev.token)) {
+          try {
+            mkdirSync(dirname(HA_SECRET_FILE), { recursive: true, mode: 0o700 })
+            if (tokenChanged) cand.at = new Date().toISOString()
+            writeAtomic(HA_SECRET_FILE, JSON.stringify(cand, null, 2))
+            chmodSync(HA_SECRET_FILE, 0o600)
+          } catch (e) { return json(res, 500, { ok: false, msg: `令牌写不进去：${String(e)}` }) }
+        }
+        // 只有连上才允许启用；关掉永远生效；想开但连不上就保持原状态
+        cfg.homeAssistant.enabled = wantEnabled ? (probe.ok === true ? true : prevEnabled) : false
+        try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) }
+        catch (e) { return json(res, 500, { ok: false, msg: `配置写不进去：${String(e)}` }) }
+        const shown = readHaSecret() || {}
+        return json(res, 200, {
+          ok: probe.ok,
+          msg: data.enabled === false
+            ? "已停用"
+            : probe.ok
+              ? `已连接${probe.name ? "（" + probe.name + "）" : ""} · 版本 ${probe.version || "?"} · ${probe.entities} 个实体`
+              : `没连上：${probe.error}${canPersist ? "（地址和令牌已保存，等 HA 起来再启用）" : "；地址和令牌都没动"}`,
+          enabled: cfg.homeAssistant.enabled === true,
+          baseUrl: shown.baseUrl || "",
+          hasToken: !!shown.token,
+          at: shown.at || "",
+          sayService: cfg.homeAssistant.sayService || "",
+          sayEntity: cfg.homeAssistant.sayEntity || "",
+        })
+      } finally {
+        haBusy = false
+      }
     }
     if (req.method === "POST" && url.pathname === "/api/session-refresh") {
       const data = await body(req)

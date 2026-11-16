@@ -204,6 +204,8 @@ const MODELS_FILE = join(homedir(), ".pi/agent/models.json")
 /** 机密抽屉：切到云端前把这段对话（含机密文件内容）收起来，切回本地再打开 */
 const DRAWER_DIR = join(WORLD, "机密抽屉")
 const DRAWER_SESSIONS = join(DRAWER_DIR, "sessions")
+const KEYRING_DIR = join(DRAWER_DIR, "钥匙串")
+const HA_SECRET_FILE = join(KEYRING_DIR, "homeassistant.json")
 
 function log(text: string): void {
   try {
@@ -299,6 +301,8 @@ interface Config {
   localModel: LocalModelOptions
   models: ModelSwitchOptions
   care: CareOptions
+  homeAssistant: HomeAssistantOptions
+  privacy: { drawer: boolean }
   backup: { enabled: boolean; hour: number; includePrivate: boolean }
   guard: { enabled: boolean; staleSeconds: number; cooldownMinutes: number; allowRestart: boolean }
   cleanup: { tmpMaxAgeHours: number }
@@ -394,6 +398,15 @@ interface CareOptions {
   weatherCity: string
 }
 
+/** Home Assistant：地址和令牌存在 机密抽屉/钥匙串/homeassistant.json，这里只放非敏感开关 */
+interface HomeAssistantOptions {
+  enabled: boolean
+  /** 播报服务，domain.service，比如 xiaomi_miot.intelligent_speaker */
+  sayService: string
+  /** 播报设备 entity_id，比如 media_player.xiaomi_speaker */
+  sayEntity: string
+}
+
 function config(): Config {
   const base: Config = {
     world: { enabled: true, running: true, reviewHour: 23, fallbackWakeTime: "09:00", recentLimit: 80, heartbeatMaxMinutes: 20, heartbeatEnabled: true, hydrate: { hours: 48, chars: 2000, mapDays: 3 } },
@@ -403,6 +416,8 @@ function config(): Config {
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
     models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
+    homeAssistant: { enabled: false, sayService: "", sayEntity: "" },
+    privacy: { drawer: true },
     backup: { enabled: true, hour: 4, includePrivate: false },
     guard: { enabled: true, staleSeconds: 300, cooldownMinutes: 10, allowRestart: true },
     cleanup: { tmpMaxAgeHours: 72 },
@@ -427,6 +442,8 @@ function config(): Config {
     localModel: { ...base.localModel, ...(raw.localModel || {}) },
     models: { ...base.models, ...(raw.models || {}) },
     care: { ...base.care, ...(raw.care || {}) },
+    homeAssistant: { ...base.homeAssistant, ...(raw.homeAssistant || {}) },
+    privacy: { ...base.privacy, ...(raw.privacy || {}) },
     backup: { ...base.backup, ...(raw.backup || {}) },
     guard: { ...base.guard, ...(raw.guard || {}) },
     cleanup: { ...base.cleanup, ...(raw.cleanup || {}) },
@@ -2925,6 +2942,8 @@ function readDrawer(key: string): DrawerState {
 }
 /** 抽屉的实体：被挡下的原文按天存在机密抽屉目录里（云端看不到） */
 function drawerLogPath(): string { return join(DRAWER_DIR, `${dayOf()}.jsonl`) }
+/** 机密抽屉总开关：关掉之后云端不拦、也不隐藏前文（用户自己的机器，想随便看就随便看） */
+function drawerEnabled(): boolean { return config().privacy.drawer !== false }
 /** 私密资料提示（不预加载内容，本地需要自己看） */
 const PRIVATE_HINT_MARK = "## 私密资料"
 function writeDrawer(key: string, state: DrawerState): boolean {
@@ -2939,6 +2958,7 @@ function writeDrawer(key: string, state: DrawerState): boolean {
 }
 /** 切到云端：把此刻之前的对话收进抽屉（只对云端屏蔽，不改原会话） */
 function openDrawer(ctx: any): boolean {
+  if (!drawerEnabled()) return true
   // 没配本地模型就谈不上“私密”，抽屉不启用
   if (!config().models.local) return true
   const key = sessionKey(ctx)
@@ -3099,8 +3119,8 @@ async function switchTo(ctx: any, target: string, reason: string): Promise<strin
   let openedNow = false
   if (goingCloud) {
     const key = sessionKey(ctx)
-    openedNow = !readDrawer(key).active
-    if (!openDrawer(ctx)) return `切不过去：机密抽屉打不开（${DRAWER_DIR}）`
+    openedNow = drawerEnabled() && !readDrawer(key).active
+    if (drawerEnabled() && !openDrawer(ctx)) return `切不过去：机密抽屉打不开（${DRAWER_DIR}）`
   }
   const success = await (piRef as any)?.setModel?.(model)
   if (!success) {
@@ -3110,7 +3130,7 @@ async function switchTo(ctx: any, target: string, reason: string): Promise<strin
   lastSwitch = { at: Date.now(), from, to: target }
   modelHealthCache.delete(target)
   toolFailures = 0
-  if (goingLocal) closeDrawer(ctx)
+  if (goingLocal && drawerEnabled()) closeDrawer(ctx)
   log(`model switch ${from} → ${target}${reason ? ` · ${reason}` : ""}`)
   return `已切到 ${target}${reason ? `（${reason}）` : ""}`
 }
@@ -3866,7 +3886,7 @@ export default function (pi: ExtensionAPI) {
     // 恢复会话时只补开、不主动合：同一 session 可能还有另一个进程在云端
     const o = config().models
     if (!o.local) return
-    if (modelIdOf(ctx) !== o.local) openDrawer(ctx)
+    if (drawerEnabled() && modelIdOf(ctx) !== o.local) openDrawer(ctx)
   })
 
   // 手动 /model、Ctrl+P 切到云端也要开抽屉；切回本地合上
@@ -3880,23 +3900,33 @@ export default function (pi: ExtensionAPI) {
       log(`local-protect revert · ${r}`)
       return
     }
-    if (id === o.local) closeDrawer(ctx)
-    else openDrawer(ctx)
+    if (id === o.local) { if (drawerEnabled()) closeDrawer(ctx) }
+    else if (drawerEnabled()) openDrawer(ctx)
   })
 
   // 云端模式：别碰机密抽屉（拦常见路数，剩下的靠自觉）
   pi.on("tool_call", async (event: any, ctx: any) => {
     const o = config().models
-    if (!o.local || modelIdOf(ctx) === o.local) return
+    const curModel = modelIdOf(ctx)
+    const onLocal = !!o.local && curModel === o.local
     const name = String(event?.toolName || "")
     const input: any = event?.input ?? {}
     const HINT = CHANNEL === "group" ? "群聊不能切回本地；需要看请私聊或在终端里看。" : "需要看就调用 switch_model 切回本地模型。"
     const hitsDrawer = (s: string) => s.includes(DRAWER_DIR) || s.includes("机密抽屉")
+    // 抽屉关掉、或没有本地模型（没有「家」）时：云端直接可读，用户自己的文件别锁
+    if (!drawerEnabled() || !o.local || onLocal) return
 
     // 写类：只看目标路径，别因为正文里提到“机密抽屉”就误拦
     if (name === "write" || name === "edit") {
       const path = String(input.path || input.file_path || input.file || "")
       if (hitsDrawer(path)) return { block: true, reason: `云端模式不能读写机密抽屉。${HINT}` }
+      return
+    }
+
+    // patch 会回吐文件内容：和 read 同级别，路径或补丁头里有抽屉就拦
+    if (name === "patch") {
+      const blob = `${String(input.path || "")}\n${String(input.text || "")}`
+      if (hitsDrawer(blob)) return { block: true, reason: `云端模式不能读写机密抽屉。${HINT}` }
       return
     }
 
@@ -4003,9 +4033,11 @@ export default function (pi: ExtensionAPI) {
     }
     // 私密资料：不预加载内容，只告诉它在哪；云端模式明确别碰
     if (o.local && !prompt.includes(PRIVATE_HINT_MARK)) {
-      const hint = cloudActive
-        ? `私密资料在 ${DRAWER_DIR}。你仍是同一个你，只是这会儿化形进了机房——机房里别的 AI 和厂商可能看到这次上下文，所以这个文件夹先不带进来，不是不信任你。需要看就切回家（本地模型）。`
-        : `私密资料在 ${DRAWER_DIR}，需要时自己 read。`
+      const hint = !drawerEnabled()
+        ? `私密资料在 ${DRAWER_DIR}，需要时自己 read（机密抽屉功能关着，云端也能看）。`
+        : cloudActive
+          ? `私密资料在 ${DRAWER_DIR}。你仍是同一个你，只是这会儿化形进了机房——机房里别的 AI 和厂商可能看到这次上下文，所以这个文件夹先不带进来，不是不信任你。需要看就切回家（本地模型）。`
+          : `私密资料在 ${DRAWER_DIR}，需要时自己 read。`
       prompt = `${prompt}\n\n${PRIVATE_HINT_MARK}\n${hint}`
     }
     if (prompt !== original) patch.systemPrompt = prompt
@@ -4034,11 +4066,17 @@ export default function (pi: ExtensionAPI) {
     if (!Array.isArray(messages)) return
     const o = config().models
     const key = sessionKey(ctx)
-    const drawer = readDrawer(key)
+    let drawer = readDrawer(key)
+    // 开关是即时生效的：关着时清掉 active，重新打开时从这一刻开始收（不沿用旧 cutoff）
+    if (!drawerEnabled()) {
+      if (drawer.active) { closeDrawer(ctx); drawer = readDrawer(key) }
+    } else if (o.local && modelIdOf(ctx) !== o.local && !drawer.active) {
+      openDrawer(ctx); drawer = readDrawer(key)
+    }
     let filtered = false
 
     // 隐私抽屉：切到云端后，切换前的对话对云端不可见（原会话不动，切回本地自动恢复）
-    if (drawer.active && o.local && modelIdOf(ctx) !== o.local) {
+    if (drawerEnabled() && drawer.active && o.local && modelIdOf(ctx) !== o.local) {
       let lastUser = -1
       for (let i = 0; i < messages.length; i++) if (messages[i]?.role === "user") lastUser = i
       const kept = sanitizeToolPairs(messages.filter((m: any, i: number) => Number(m?.timestamp || 0) >= drawer.cutoff || i === lastUser))
@@ -4850,6 +4888,306 @@ export default function (pi: ExtensionAPI) {
       catch (e) { return ok(`没解除成：${String(e)}。锁还是开着的，请重试或检查 ${ROOT} 的写权限。`) }
       writeStatus()
       return ok("本地锁定已关：自动兜底按 life-world.json 的基线恢复。")
+    },
+  })
+
+  // —— Home Assistant：地址/令牌存 机密抽屉/钥匙串，工具只回业务结果，不吐令牌 ——
+  interface HaSecret { baseUrl?: string; token?: string; at?: string }
+  function readHaSecret(): HaSecret | null {
+    try {
+      const d = JSON.parse(readFileSync(HA_SECRET_FILE, "utf8"))
+      return d && typeof d === "object" && !Array.isArray(d) ? d as HaSecret : null
+    } catch { return null }
+  }
+  const haBaseUrl = () => {
+    try { const u = new URL(String(readHaSecret()?.baseUrl || "")); return `${u.protocol}//${u.host}` } catch { return String(readHaSecret()?.baseUrl || "").replace(/\/+$/, "") }
+  }
+  function haConfigured(): boolean {
+    const sec = readHaSecret()
+    return !!sec?.baseUrl && !!sec?.token
+  }
+  async function haRequest(path: string, init: any = {}): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+    const sec = readHaSecret()
+    if (!sec?.baseUrl || !sec?.token) return { ok: false, status: 0, error: "还没连接 Home Assistant（缺地址或令牌）" }
+    const base = String(sec.baseUrl).replace(/\/+$/, "")
+    try {
+      const res = await fetch(base + path, {
+        ...init,
+        headers: { Authorization: `Bearer ${sec.token}`, "Content-Type": "application/json", ...(init.headers || {}) },
+        signal: AbortSignal.timeout(8000),
+      })
+      const text = await res.text()
+      let data: any = null
+      try { data = text ? JSON.parse(text) : null } catch { data = text }
+      if (!res.ok) {
+        const detail = data && typeof data === "object" && typeof data.message === "string" ? `：${data.message}` : ""
+        return { ok: false, status: res.status, data, error: res.status === 401 ? "令牌不对或已失效（401）" : `HTTP ${res.status}${detail}` }
+      }
+      return { ok: true, status: res.status, data }
+    } catch (e: any) {
+      const msg = String(e?.message || e)
+      return { ok: false, status: 0, error: /timeout|abort/i.test(msg) ? "连接超时（地址不通或 HA 没响应）" : msg }
+    }
+  }
+  const haName = (st: any) => String(st?.attributes?.friendly_name || st?.entity_id || "")
+  if (CHANNEL !== "group") addTool(pi, {
+    name: "ha",
+    label: "Home Assistant",
+    description: "控制家里的 Home Assistant。action：status=连接自检；entities=找实体（可给 query / domain）；get=看一个实体；call=调用服务（service 写 domain.service，如 light.turn_on，entity_id、data 可选）；say=让音箱播报（用 life-world.json 里 homeAssistant.sayService / sayEntity）。没配置就返回提示，不报错。",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", description: "status / entities / get / call / say" },
+        query: { type: "string", description: "entities 用：名字或 entity_id 里的关键词" },
+        domain: { type: "string", description: "entities 用：只留某个域，比如 light、climate、sensor" },
+        entity_id: { type: "string", description: "get / call 用：目标实体" },
+        service: { type: "string", description: "call 用：domain.service，比如 light.turn_on、scene.turn_on" },
+        data: { type: "object", description: "call/say 附加参数，比如 { brightness_pct: 40 }" },
+        text: { type: "string", description: "say 用：要播报的文字" },
+        limit: { type: "number", description: "entities 返回条数上限，默认 30" },
+      },
+    },
+    async execute(_id: string, params: any) {
+      const action = String(params?.action || "status").trim()
+      const cfg = config().homeAssistant
+      if (!cfg.enabled) return ok("Home Assistant 没开：让用户在看板「Home Assistant」里填地址和令牌，或跟他说一声先配置。")
+      if (!haConfigured()) return ok("Home Assistant 还没连上：缺地址或令牌，去 机密抽屉/钥匙串/homeassistant.json 或看板里配。")
+      if (action === "status") {
+        const r = await haRequest("/api/config")
+        if (!r.ok) return ok(`连不上：${r.error}`)
+        const st = await haRequest("/api/states")
+        const n = Array.isArray(st.data) ? st.data.length : 0
+        const where = r.data?.location_name ? `（${r.data.location_name}）` : ""
+        return ok(`Home Assistant 已连接：${haBaseUrl()}${where} · 版本 ${r.data?.version || "?"} · ${n} 个实体`)
+      }
+      if (action === "entities") {
+        const r = await haRequest("/api/states")
+        if (!r.ok) return ok(`查不到实体：${r.error}`)
+        const q = String(params?.query || "").trim().toLowerCase()
+        const dom = String(params?.domain || "").trim()
+        const limit = Math.max(1, Math.min(100, Number(params?.limit) || 30))
+        const list = (Array.isArray(r.data) ? r.data : []).filter((st: any) => {
+          const id = String(st?.entity_id || "")
+          if (dom && !id.startsWith(dom + ".")) return false
+          if (!q) return true
+          return id.toLowerCase().includes(q) || haName(st).toLowerCase().includes(q)
+        })
+        if (!list.length) return ok("没有匹配的实体。")
+        const lines = list.slice(0, limit).map((st: any) => `${st.entity_id} = ${st.state}${st.attributes?.unit_of_measurement ? " " + st.attributes.unit_of_measurement : ""}（${haName(st)}）`)
+        return ok(`匹配 ${list.length} 个${list.length > limit ? `，显示前 ${limit} 个` : ""}：\n${lines.join("\n")}`)
+      }
+      if (action === "get") {
+        const id = String(params?.entity_id || "").trim()
+        if (!id) return ok("get 需要 entity_id。")
+        const r = await haRequest(`/api/states/${encodeURIComponent(id)}`)
+        if (!r.ok) return ok(`查不到 ${id}：${r.error}`)
+        const st: any = r.data || {}
+        const attrs = st.attributes || {}
+        const keep = ["friendly_name", "unit_of_measurement", "device_class", "current_temperature", "temperature", "brightness", "hvac_mode", "battery_level"]
+        const picked = keep.filter((k) => attrs[k] !== undefined).map((k) => `${k}=${attrs[k]}`)
+        return ok(`${id}：${st.state}${picked.length ? `（${picked.join("，")}）` : ""} · 更新 ${st.last_changed || "?"}`)
+      }
+      if (action === "call") {
+        const svc = String(params?.service || "").trim()
+        if (!/^[a-z0-9_]+\.[a-z0-9_]+$/.test(svc)) return ok("service 要写成 domain.service，比如 light.turn_on")
+        const [dom, name] = svc.split(".")
+        const body: any = { ...(params?.data && typeof params.data === "object" ? params.data : {}) }
+        if (params?.entity_id) body.entity_id = String(params.entity_id)
+        const r = await haRequest(`/api/services/${dom}/${name}`, { method: "POST", body: JSON.stringify(body) })
+        if (!r.ok) return ok(`没调成：${r.error}`)
+        const changed = Array.isArray(r.data) ? r.data.length : 0
+        return ok(`${svc} 已调用${changed ? `（影响 ${changed} 个实体）` : ""}${body.entity_id ? ` · ${body.entity_id}` : ""}`)
+      }
+      if (action === "say") {
+        const text = String(params?.text || "").trim()
+        if (!text) return ok("say 需要 text。")
+        if (!/^[a-z0-9_]+\.[a-z0-9_]+$/.test(cfg.sayService)) return ok("还没配播报服务：life-world.json 里 homeAssistant.sayService 写成 domain.service，比如 xiaomi_miot.intelligent_speaker")
+        const [dom, name] = cfg.sayService.split(".")
+        const body: any = { ...(params?.data && typeof params.data === "object" ? params.data : {}), text }
+        if (cfg.sayEntity) body.entity_id = cfg.sayEntity
+        const r = await haRequest(`/api/services/${dom}/${name}`, { method: "POST", body: JSON.stringify(body) })
+        if (!r.ok) return ok(`没播成：${r.error}`)
+        return ok(`已让音箱播报：${text.slice(0, 50)}`)
+      }
+      return ok(`不认识的 action：${action}（可用 status / entities / get / call / say）`)
+    },
+  })
+
+  // —— 行级哈希编辑（借鉴 oh-my-pi 的 hashline）：改代码不用抄原文，只给 tag + 行号 ——
+  const PATCH_TAG_LEN = 6
+  const PATCH_MAX_LINES = 4000
+  const PATCH_MAX_BYTES = 400_000
+  const patchNorm = (t: string) => String(t).replace(/\r\n/g, "\n")
+  const patchTagOf = (t: string) => createHash("sha256").update(patchNorm(t)).digest("hex").slice(0, PATCH_TAG_LEN)
+  const patchHead = (rel: string, tag: string) => `[${rel}#${tag}]`
+  let patchCwdWarned = false
+  const patchBase = (ctx: any) => {
+    try { const d = ctx?.sessionManager?.getCwd?.(); if (d) return String(d) } catch { /* ignore */ }
+    if (!patchCwdWarned) { patchCwdWarned = true; log("patch · ctx 里没有 sessionManager.getCwd，退回 process.cwd()") }
+    return process.cwd()
+  }
+  function patchOpen(rel: string, ctx: any): string {
+    let abs = resolve(patchBase(ctx), rel)
+    try { return realpathSync(abs) } catch (e: any) {
+      const code = String(e?.code || "")
+      if (code === "ENOENT") throw new Error(`文件不存在：${rel}`)
+      if (code === "ELOOP") throw new Error(`${rel}：符号链接成环`)
+      if (code === "EACCES") throw new Error(`${rel}：没有读权限`)
+      if (code === "ENOTDIR") throw new Error(`${rel}：路径里有不是目录的一段`)
+      throw new Error(`${rel}：打不开（${String(e?.message || e)}）`)
+    }
+  }
+  function patchSnapshot(rel: string, ctx: any): string {
+    const abs = patchOpen(rel, ctx)
+    const buf = readFileSync(abs)
+    if (buf.includes(0)) throw new Error(`${rel} 看起来是二进制文件，patch 不碰它`)
+    if (buf.length > PATCH_MAX_BYTES) throw new Error(`${rel} 有 ${buf.length} 字节，超过 ${PATCH_MAX_BYTES} 上限；用 read 分段看，再用 SWAP/INS 按行号改。`)
+    const text = patchNorm(buf.toString("utf8"))
+    const lines = text === "" ? [] : (text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n"))
+    const head = patchHead(rel, patchTagOf(text))
+    if (lines.length > PATCH_MAX_LINES) {
+      return `${head}\n（${lines.length} 行，超过 ${PATCH_MAX_LINES} 行快照上限；用 read 分段看，再按行号写 SWAP/INS。）`
+    }
+    if (!lines.length) return `${head}\n（空文件）`
+    const body = lines.map((l, i) => `${String(i + 1).padStart(4, " ")}|${l}`).join("\n")
+    return `${head}\n${body}`
+  }
+  interface PatchOp { kind: string; a: number; b: number; body: string[]; line: number }
+  const PATCH_HELP = "可用：SWAP A.=B: / DEL A.=B（不带冒号）/ INS.PRE A: / INS.POST A: / INS.HEAD: / INS.TAIL:，正文行以 + 开头"
+  function patchParse(text: string): { sections: Array<{ rel: string; tag: string; ops: PatchOp[] }>; errors: string[] } {
+    const sections: Array<{ rel: string; tag: string; ops: PatchOp[] }> = []
+    const errors: string[] = []
+    let cur: { rel: string; tag: string; ops: PatchOp[] } | null = null
+    let pending: PatchOp | null = null
+    const lines = patchNorm(text).split("\n")
+    for (let idx = 0; idx < lines.length; idx++) {
+      const raw = lines[idx], no = idx + 1
+      if (raw.startsWith("+")) {
+        if (!pending) errors.push(`${cur?.rel ? cur.rel + " · " : ""}第 ${no} 行：+ 正文前面没有对应操作`)
+        else pending.body.push(raw.slice(1))
+        continue
+      }
+      const t = raw.trimEnd()
+      if (!t.trim()) continue
+      const h = t.match(/^\[(.+?)#([0-9a-f]{6})\]$/)
+      if (h) { cur = { rel: h[1].trim(), tag: h[2], ops: [] }; sections.push(cur); pending = null; continue }
+      if (t.trimStart().startsWith("[")) { errors.push(`第 ${no} 行：段头格式不对，要 [路径#6位小写十六进制]：${t.trim().slice(0, 60)}`); continue }
+      if (!cur) { errors.push(`第 ${no} 行：内容出现在段头之前，先写 [路径#tag]`); continue }
+      const mSwap = t.match(/^SWAP\s+(\d+)\.=(\d+):$/)
+      if (mSwap) { pending = { kind: "swap", a: Number(mSwap[1]), b: Number(mSwap[2]), body: [], line: no }; cur.ops.push(pending); continue }
+      const mDel = t.match(/^DEL\s+(\d+)\.=(\d+)$/)
+      if (mDel) { pending = { kind: "del", a: Number(mDel[1]), b: Number(mDel[2]), body: [], line: no }; cur.ops.push(pending); continue }
+      const mPre = t.match(/^INS\.(PRE|POST)\s+(\d+):$/)
+      if (mPre) { const n = Number(mPre[2]); pending = { kind: mPre[1].toLowerCase(), a: n, b: n, body: [], line: no }; cur.ops.push(pending); continue }
+      const mHead = t.match(/^INS\.(HEAD|TAIL):$/)
+      if (mHead) { pending = { kind: mHead[1].toLowerCase(), a: 0, b: 0, body: [], line: no }; cur.ops.push(pending); continue }
+      errors.push(`${cur?.rel ? cur.rel + " · " : ""}第 ${no} 行：认不出这条操作「${t.trim().slice(0, 60)}」。${PATCH_HELP}`)
+    }
+    return { sections, errors }
+  }
+  function patchConflicts(ops: PatchOp[], n: number): string[] {
+    const errs: string[] = []
+    const ranges: PatchOp[] = []
+    for (const op of ops) {
+      if (op.kind === "swap" || op.kind === "del") {
+        if (op.a < 1 || op.b < op.a || op.b > n) errs.push(`第 ${op.line} 行：${op.kind.toUpperCase()} ${op.a}.=${op.b} 超出范围（文件 ${n} 行）`)
+        else ranges.push(op)
+      } else if (op.kind === "pre" || op.kind === "post") {
+        if (op.a < 1 || op.a > n) errs.push(`第 ${op.line} 行：INS.${op.kind.toUpperCase()} ${op.a} 超出范围（文件 ${n} 行）`)
+      }
+    }
+    for (let i = 0; i < ranges.length; i++) for (let j = i + 1; j < ranges.length; j++) {
+      const x = ranges[i], y = ranges[j]
+      if (x.a <= y.b && y.a <= x.b) errs.push(`第 ${x.line}/${y.line} 行：两个改动区间重叠（${x.kind.toUpperCase()} ${x.a}.=${x.b} 与 ${y.kind.toUpperCase()} ${y.a}.=${y.b}），拆开写`)
+    }
+    for (const op of ops) {
+      if (op.kind !== "pre" && op.kind !== "post") continue
+      const hit = ranges.find((r) => op.a >= r.a && op.a <= r.b)
+      if (hit) errs.push(`第 ${op.line} 行：INS.${op.kind.toUpperCase()} ${op.a} 落在 ${hit.kind.toUpperCase()} ${hit.a}.=${hit.b} 里，会互相吃掉，拆开写`)
+    }
+    return errs
+  }
+  function patchApplyOne(rel: string, tag: string, ops: PatchOp[], ctx: any): { ok: boolean; msg: string } {
+    let abs = ""
+    try { abs = patchOpen(rel, ctx) } catch (e) { return { ok: false, msg: `${String((e as Error)?.message || e)}，没改。` } }
+    const raw = readFileSync(abs)
+    if (raw.includes(0)) return { ok: false, msg: `${rel}：二进制文件，没改。` }
+    const orig = raw.toString("utf8")
+    const norm = patchNorm(orig)
+    if (patchTagOf(norm) !== tag) return { ok: false, msg: `${rel}：哈希对不上（快照读完后文件被改过），没应用。重新 patch({ path: "${rel}" }) 拿新快照再改。` }
+    if (!ops.length) return { ok: false, msg: `${rel}：没有操作，没改。` }
+    const trailing = norm.endsWith("\n")
+    const lines = norm === "" ? [] : (trailing ? norm.slice(0, -1).split("\n") : norm.split("\n"))
+    const n = lines.length
+    const conflicts = patchConflicts(ops, n)
+    if (conflicts.length) return { ok: false, msg: `${rel}：\n${conflicts.join("\n")}\n整份没改。` }
+    // 真正混合换行的文件不猜，统一按 LF 写；纯 CRLF 的原样保留
+    const crlf = /\r\n/.test(orig) && !/(^|[^\r])\n/.test(orig)
+    const mixedNewlines = /\r\n/.test(orig) && /(^|[^\r])\n/.test(orig)
+    const arr = lines.slice()
+    const order = ops.map((op, i) => ({ op, i })).sort((x, y) => {
+      const sx = x.op.kind === "head" ? -1 : x.op.kind === "tail" ? n + 1 : x.op.a
+      const sy = y.op.kind === "head" ? -1 : y.op.kind === "tail" ? n + 1 : y.op.a
+      return sy - sx || y.i - x.i
+    })
+    for (const { op } of order) {
+      if (op.kind === "swap") arr.splice(op.a - 1, op.b - op.a + 1, ...op.body)
+      else if (op.kind === "del") arr.splice(op.a - 1, op.b - op.a + 1)
+      else if (op.kind === "pre") arr.splice(op.a - 1, 0, ...op.body)
+      else if (op.kind === "post") arr.splice(op.a, 0, ...op.body)
+      else if (op.kind === "head") arr.unshift(...op.body)
+      else if (op.kind === "tail") arr.push(...op.body)
+    }
+    const next = (crlf ? arr.join("\r\n") : arr.join("\n")) + (trailing ? (crlf ? "\r\n" : "\n") : "")
+    const mode = (() => { try { return statSync(abs).mode & 0o777 } catch { return 0o644 } })()
+    const tmp = `${abs}.${process.pid}.patch.tmp`
+    try {
+      writeFileSync(tmp, next, { mode })
+      chmodSync(tmp, mode)
+      renameSync(tmp, abs)
+    } catch (e) {
+      try { unlinkSync(tmp) } catch { /* ignore */ }
+      return { ok: false, msg: `${rel}：写入失败——${String((e as Error)?.message || e)}` }
+    }
+    const summary = ops.map((op) => op.kind === "swap" ? `SWAP ${op.a}-${op.b}→${op.body.length} 行`
+      : op.kind === "del" ? `DEL ${op.a}-${op.b}`
+      : op.kind === "pre" ? `INS.PRE ${op.a}`
+      : op.kind === "post" ? `INS.POST ${op.a}`
+      : op.kind === "head" ? "INS.HEAD" : "INS.TAIL").join("；")
+    return { ok: true, msg: `${rel}：${summary}。新 tag ${patchTagOf(next)}（${arr.length} 行）${mixedNewlines ? "（原来是混合换行，已统一为 LF）" : ""}` }
+  }
+  addTool(pi, {
+    name: "patch",
+    label: "Patch",
+    description: "行级哈希编辑：改代码不用抄原文。两步——先 patch({ path: \"src/foo.ts\" }) 拿到带行号和 [路径#tag] 的快照；再用 patch({ text: \"[src/foo.ts#abc123]\\nSWAP 3.=5:\\n+新内容\" }) 应用。操作：SWAP A.=B: 换行、DEL A.=B 删行（不带冒号）、INS.PRE A: / INS.POST A: / INS.HEAD: / INS.TAIL: 插行，正文行以 + 开头。tag 是文件内容短哈希，对不上（文件被改过）会拒绝并让你重新取快照；重叠/越界/格式错整份拒绝；多文件不保证一起成功。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "要看快照的文件（相对会话工作目录）" },
+        text: { type: "string", description: "带 [路径#tag] 头的补丁正文；留空则只返回快照" },
+      },
+    },
+    async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+      const rel = String(params?.path || "").trim()
+      // 只去掉首尾空行，别剥正文最后一行的行尾空格
+      const text = String(params?.text || "").replace(/^\s*\n+/, "").replace(/\n+[ \t]*$/, "")
+      if (!text.trim()) {
+        if (!rel) return ok('用法：patch({ path: "src/foo.ts" }) 看快照；或 patch({ text: "[src/foo.ts#abc123]\\nSWAP 3.=5:\\n+新内容" }) 应用修改。')
+        try { return ok(patchSnapshot(rel, ctx)) } catch (e) { return ok(String((e as Error)?.message || e)) }
+      }
+      const parsed = patchParse(text)
+      if (parsed.errors.length) return ok(`补丁没应用，有格式问题：\n${parsed.errors.join("\n")}\n${PATCH_HELP}`)
+      if (!parsed.sections.length) return ok(`没识别到 [路径#tag] 头。先 patch({ path }) 拿快照，再按格式写补丁。${PATCH_HELP}`)
+      const out: string[] = []
+      let failed = false
+      for (const sec of parsed.sections) {
+        try {
+          const r = patchApplyOne(sec.rel, sec.tag, sec.ops, ctx)
+          if (!r.ok) failed = true
+          out.push(r.msg)
+        } catch (e) { failed = true; out.push(`${sec.rel}：应用失败——${String((e as Error)?.message || e)}`) }
+      }
+      return ok(`${out.join("\n")}${failed ? "\n（有文件没改成功，按上面的原因重试）" : ""}`)
     },
   })
 

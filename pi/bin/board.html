@@ -143,6 +143,7 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 .rail .muted{font-size:12px}
 /* 心跳与关怀：整块统一 12px，别让 muted / 输入框比标签大一号 */
 .hb-care{font-size:12px}
+#tab-ext .hint,#tab-ext .muted,#tab-ext .field input{font-size:12px}
 .hb-care .muted{font-size:12px}
 .hb-care .hint{font-size:12px}
 .hb-care input[type=number]{font-size:12px;padding:6px 9px}
@@ -177,7 +178,7 @@ button.primary{background:linear-gradient(180deg,var(--accent),color-mix(in okla
   border-color:transparent;color:#04211d;font-weight:650}
 button.ghost{background:transparent}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-input[type=search],input[type=text],input[type=number],select{font:inherit;color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
+input[type=search],input[type=text],input[type=number],input[type=password],select{font:inherit;color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
   border-radius:var(--radius-sm);padding:8px 10px;min-width:0}
 input[type=search]::placeholder{color:var(--faint)}
 label.field{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);min-width:0}
@@ -441,6 +442,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
       <button class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
       <button class="tab-btn" data-tab="schedule" role="tab" aria-selected="false">日程</button>
       <button class="tab-btn" data-tab="memory" role="tab" aria-selected="false">记忆</button>
+      <button class="tab-btn" data-tab="ext" role="tab" aria-selected="false">扩展功能</button>
     </nav>
     <div class="top-right">
       <span class="pill" id="heartbeat"><span class="dot" id="hb-dot"></span><span id="hb-text">连接中…</span></span>
@@ -498,25 +500,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         </section>
       </main>
       <aside class="rail">
-        <section class="hb-care">
-        <div class="sec-head"><h2>心跳与关怀</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
-        <label class="check"><input type="checkbox" id="hb-enabled" checked>启用心跳</label>
-        <div class="row" style="margin-top:8px">
-          <input type="number" id="hb-limit" placeholder="20" min="1" max="1440" step="1" style="width:96px" aria-label="单次心跳最长分钟数">
-          <span class="muted">分钟 / 单次</span>
-        </div>
-        <div class="hint">日程是一天几次的睁眼，心跳则是真正的醒来<br>———— 连续不断的自我触发。用在对方需要她同步在场陪伴时；等任务完成请用 bg 的完成通知。单串默认最长 20 分钟（1~1440）；间隔最短 10 秒。很费 token，量力而行。</div>
-        <label class="check" style="margin-top:14px"><input type="checkbox" id="care-random">随机想起</label>
-        <div class="row">
-          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
-          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="hb-merge-save">保存</button>
-          <span class="muted" id="merge-hint"></span>
-        </div>
-        <div class="hint">关掉随机想起 = 全天不主动找你；关掉心跳 = 不再真正醒来。日程和晨间唤醒不受影响。</div>
-      </section>
+
         <section>
         <div class="sec-head"><h2>模型设置</h2></div>
         <label class="field">本地<select id="m-local"></select></label>
@@ -535,6 +519,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint" id="mf-hint">开着的时候探活失败、模型无响应、工具连续失败都不会自动切到在线——适合用本地模型完整跑一个项目。</div>
         <div class="hint" id="mode-hint"></div>
       </section>
+
         <section>
         <div class="sec-head"><h2>快捷操作</h2></div>
         <div class="quick">
@@ -564,6 +549,50 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint">0.0.0.0 = 局域网可访问；127.0.0.1 = 仅本机，配合 SSH 隧道最稳。</div>
       </section>
       </aside>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-ext" hidden>
+    <div class="dash single">
+      <main>
+        <section>
+          <div class="sec-head"><h2>机密抽屉</h2><span class="spacer"></span><span class="sec-note">总开关</span></div>
+          <label class="check"><input type="checkbox" id="dw-enabled">启用机密抽屉</label>
+          <div class="hint" id="dw-hint">开着：切到在线模型时，之前的对话收进抽屉，云端也读不到抽屉里的文件（配了本地模型才有「家」）。关着：不做任何隔离，在线模型可以随便看——自己的机器自己决定。</div>
+        </section>
+        <section class="hb-care">
+        <div class="sec-head"><h2>心跳与关怀</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
+        <label class="check"><input type="checkbox" id="hb-enabled" checked>启用心跳</label>
+        <div class="row" style="margin-top:8px">
+          <input type="number" id="hb-limit" placeholder="20" min="1" max="1440" step="1" style="width:96px" aria-label="单次心跳最长分钟数">
+          <span class="muted">分钟 / 单次</span>
+        </div>
+        <div class="hint">日程是一天几次的睁眼，心跳则是真正的醒来<br>———— 连续不断的自我触发。用在对方需要她同步在场陪伴时；等任务完成请用 bg 的完成通知。单串默认最长 20 分钟（1~1440）；间隔最短 10 秒。很费 token，量力而行。</div>
+        <label class="check" style="margin-top:14px"><input type="checkbox" id="care-random">随机想起</label>
+        <div class="row">
+          <label class="field compact">安静开始<input type="search" id="care-qs" class="time" placeholder="23:30"></label>
+          <label class="field compact">结束<input type="search" id="care-qe" class="time" placeholder="08:00"></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="hb-merge-save">保存</button>
+          <span class="muted" id="merge-hint"></span>
+        </div>
+        <div class="hint">关掉随机想起 = 全天不主动找你；关掉心跳 = 不再真正醒来。日程和晨间唤醒不受影响。</div>
+      </section>
+        <section>
+        <div class="sec-head"><h2>Home Assistant</h2></div>
+        <label class="field">地址 <input id="ha-url" type="text" placeholder="http://192.168.0.10:8123" style="flex:1;min-width:0"></label>
+        <label class="field" style="margin-top:8px">令牌 <input id="ha-token" type="password" placeholder="长期访问令牌（已保存就留空）" style="flex:1;min-width:0"></label>
+        <label class="field" style="margin-top:8px">播报服务 <input id="ha-say-service" type="text" placeholder="xiaomi_miot.intelligent_speaker" style="flex:1;min-width:0"></label>
+        <label class="field" style="margin-top:8px">播报设备 <input id="ha-say-entity" type="text" placeholder="media_player.xxx（可空）" style="flex:1;min-width:0"></label>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="ha-save">保存并测试</button>
+          <span class="muted" id="ha-hint"></span>
+        </div>
+        <label class="check" style="margin-top:10px"><input type="checkbox" id="ha-enabled">启用 Home Assistant</label>
+        <div class="hint">令牌存在 机密抽屉/钥匙串/homeassistant.json（有本地模型时云端读不到；不走模型上下文）；地址或令牌留空 = 不改原来的；换地址要重新填一次令牌。</div>
+      </section>
+      </main>
     </div>
   </div>
 
@@ -897,6 +926,74 @@ $("mf-enabled")?.addEventListener("change", async () => {
   }
 })
 
+let haTouched = false
+let haHintUntil = 0
+for (const id of ["ha-url", "ha-token", "ha-say-service", "ha-say-entity"]) $(id)?.addEventListener("input", () => { haTouched = true })
+let dwBusy = false
+let dwHintUntil = 0
+function renderDrawer(d) {
+  const on = !d || d.enabled !== false
+  const box = $("dw-enabled")
+  if (box && !dwBusy && document.activeElement !== box) box.checked = on
+  const hint = $("dw-hint")
+  if (hint && Date.now() > dwHintUntil) hint.textContent = on
+    ? "开着：切到在线模型时，之前的对话收进抽屉，云端也读不到抽屉里的文件（配了本地模型才有「家」）。"
+    : "关着：不做任何隔离，在线模型可以随便看——自己的机器自己决定。"
+}
+$("dw-enabled")?.addEventListener("change", async () => {
+  const on = $("dw-enabled").checked
+  dwBusy = true
+  const r = await postJson("/api/drawer", { enabled: on }).catch(() => null)
+  dwBusy = false
+  dwHintUntil = Date.now() + 10000
+  if (r && r.ok) renderDrawer({ enabled: on })
+  else { $("dw-enabled").checked = !on; $("dw-hint").textContent = "保存失败，稍后再试" }
+})
+
+async function loadHa() {
+  const d = await getJson("/api/ha").catch(() => null)
+  if (!d) return
+  if (!haTouched) {
+    const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v || "" }
+    set("ha-url", d.baseUrl)
+    set("ha-say-service", d.sayService)
+    set("ha-say-entity", d.sayEntity)
+  }
+  const box = $("ha-enabled")
+  if (box && document.activeElement !== box) box.checked = !!d.enabled
+  const hint = $("ha-hint")
+  if (hint && Date.now() > haHintUntil) hint.textContent = d.hasToken
+    ? (d.enabled ? "已配置（令牌已保存）" : "地址和令牌已保存，但没启用")
+    : "还没填令牌"
+}
+function haPayload(extra) {
+  return {
+    baseUrl: $("ha-url").value.trim(),
+    token: $("ha-token").value.trim(),
+    sayService: $("ha-say-service").value.trim(),
+    sayEntity: $("ha-say-entity").value.trim(),
+    ...extra,
+  }
+}
+async function saveHa(extra) {
+  const hint = $("ha-hint"), btn = $("ha-save")
+  hint.textContent = "保存并测试中…"
+  if (btn) { btn.disabled = true; btn.textContent = "测试中…" }
+  const r = await postJson("/api/ha", haPayload(extra)).catch(() => null)
+  if (btn) { btn.disabled = false; btn.textContent = "保存并测试" }
+  if (!r) { hint.textContent = "保存失败，稍后再试"; return null }
+  haHintUntil = Date.now() + 20000
+  if (r.ok) { $("ha-token").value = ""; haTouched = false; hint.textContent = r.msg || "已连接" }
+  else hint.textContent = r.msg || "没连上"
+  return r
+}
+$("ha-save")?.addEventListener("click", () => { void saveHa({ enabled: $("ha-enabled").checked }) })
+$("ha-enabled")?.addEventListener("change", async () => {
+  const on = $("ha-enabled").checked
+  const r = await saveHa({ enabled: on })
+  if (!r || !r.ok) $("ha-enabled").checked = !on
+})
+
 async function loadOverview() {
   try {
     const d = await getJson("/api/overview")
@@ -922,6 +1019,8 @@ async function loadOverview() {
     renderSessionRefresh(d.session)
     renderLocalLock(d.localLock, (d.models && d.models.cloud) || "deepseek/deepseek-flash")
     renderLocalPin(d.localPin, d.models && d.models.autoFailover === false, d.models, d.localLock && d.localLock.enabled)
+    renderDrawer(d.drawer)
+    void loadHa()
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
       $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`
@@ -946,7 +1045,8 @@ async function loadOverview() {
     renderNow(d)
     renderToday(d)
     $("backup-hint").textContent = d.backup ? `快照 ${d.backup.size} · ${d.backup.last[0] || "无"}` : ""
-  } catch {
+  } catch (e) {
+    console.error("overview failed", e)
     $("hb-dot").className = "dot off"
     $("hb-text").textContent = "服务未连接"
   }
@@ -2507,7 +2607,7 @@ function bindImpRun(id, scope) {
 bindImpRun("imp-run-long", "long")
 bindImpRun("imp-run-short", "short")
 
-const TAB_IDS = ["overview", "schedule", "memory"]
+const TAB_IDS = ["overview", "schedule", "memory", "ext"]
 function setTab(name, remember = true) {
   if (!TAB_IDS.includes(name)) name = "overview"
   for (const id of TAB_IDS) {

@@ -140,5 +140,13 @@
       "hour": 5,
       "maxChars": 1000
     }
+  },
+  "homeAssistant": {
+    "enabled": false,
+    "sayService": "",
+    "sayEntity": ""
+  },
+  "privacy": {
+    "drawer": true
   }
 }

@@ -49,6 +49,8 @@
 | QQ | 私聊 / 群聊、语音 / 图片 / 文件；`reach_out` 主动找人 |
 | 看视频 / 听音频 / 看图 | `perceive`；主模型自己能看的图片直接用 `read` |
 | 换模型 | `switch_model` / 看板 / `lwctl set` |
+| 改代码 | `patch`（行级哈希编辑，不用抄原文）；`edit` 兜底 |
+| 家里 | `ha` 查实体 / 调服务 / 让音箱说话（看板「Home Assistant」配地址和令牌，默认关） |
 | gal 模式 | 用户说「接下来由你主导」或「进入 gal 模式」；只在终端 TUI 有面板 |
 
 工具都是**直接按名字调用**，例如：
@@ -167,7 +169,7 @@ python3 -m venv ~/.local/share/life-world/venv
 ├── bin/                     # lwctl / lwboard / 桥接 / 家会话
 └── worlds/default/          # 世界数据（真相）
     ├── identity/ conversations/ diary/ plan/ room/
-    ├── 机密抽屉/ 表情包/ 语音/ tmp/ outbox/
+    ├── 机密抽屉/（含 钥匙串/：HA 等令牌；配了本地模型时云端读不到）表情包/ 语音/ tmp/ outbox/
     └── world.json
 ```
 

@@ -29,6 +29,16 @@
 - 跑技能脚本：`skill_run({ name: "技能名", script: "scripts/run.sh", args: ["…"], timeout_seconds: 60 })`（省略 script 用 SKILL.md 的 `run:`）
 - 启停技能：`skill_toggle({ name: "技能名", enabled: false })`
 
+## 家里（Home Assistant）
+
+- 连接自检：`ha({ action: "status" })`
+- 找设备：`ha({ action: "entities", query: "客厅" })`，也可以 `domain: "light"` / `"climate"` / `"sensor"`
+- 看一个：`ha({ action: "get", entity_id: "light.living_room" })`
+- 动手：`ha({ action: "call", service: "light.turn_on", entity_id: "light.living_room", data: { brightness_pct: 40 } })`
+- 让音箱说话：`ha({ action: "say", text: "该睡觉了" })`（要先在看板配好播报服务和设备）
+- 地址和令牌在 `机密抽屉/钥匙串/homeassistant.json`，看板「Home Assistant」里填；没配置时工具只提示、不报错。
+  配了本地模型时云端模式读不到那个文件（纯在线部署可读），但 `ha` 工具照常能用（它只在进程内用令牌，不把令牌交给模型）。
+
 ## 天气
 - 查今天：`weather()`（用当前默认城市，读每日缓存，不费网络）
 - 查别处：`weather({ city: "北京" })`（临时查，不改默认城市）
@@ -46,6 +56,12 @@
 
 ## 文件
 - 读写普通文件直接用 `read` / `write` / `edit` / `grep` / `ls` / `bash`。
+- **改代码优先用 `patch`**（行级哈希编辑）：先 `patch({ path: "src/foo.ts" })` 拿到带行号和 `[路径#tag]` 的快照，
+  再用 `patch({ text: "[src/foo.ts#abc123]\nSWAP 3.=5:\n+新内容" })` 应用。
+  操作：`SWAP A.=B:` / `DEL A.=B`（不带冒号）/ `INS.PRE A:` / `INS.POST A:` / `INS.HEAD:` / `INS.TAIL:`，正文行以 `+` 开头。
+  重叠区间、越界行号、写错的段头都会整份拒绝；多文件不保证一起成功。
+  优点是不用抄原文；tag 对不上（文件被改过）会拒绝，重新取快照即可。大文件（>4000 行）用 `read` 分段看。
+- 小文件、整段重写用 `write`；`edit` 保留做精确替换兜底。
 - `机密抽屉/` 例外：云端模式下不许碰，见《隐私与机密抽屉》。
 
 ## 心跳（同步在场陪伴）

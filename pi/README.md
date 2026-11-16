@@ -126,6 +126,12 @@ pi          # TUI，已经带 life-world
 - **安静时段**：`quietStart ~ quietEnd`（可跨午夜）内不发随机消息；
 - **看板可开关**：`lwctl board` 页面里勾掉「随机想起」即全天安静；
 - **随机想起**：安静时段外，距上次至少 `randomMinGapHours` 小时，每个 tick（30 秒）以 `randomChancePerTick` 概率触发一次「想起你」，角色自己决定 `reach_out` 还是 `[SILENT]`；
+- **隐私总开关**：`privacy.drawer`（默认 true）。关掉后不收起前文、云端不拦抽屉，纯看用户自己决定；看板「扩展功能」页可切。
+- **Home Assistant（默认关）**：`homeAssistant.enabled` 打开后，角色可以用 `ha` 工具查实体、调服务、让音箱说话。
+  地址和令牌**不在 life-world.json 里**，存在 `机密抽屉/钥匙串/homeassistant.json`（600）；
+  配了本地模型时云端模式读不到（纯在线部署没有「家」，抽屉整套不启用），
+  最方便是看板「Home Assistant」卡片里填地址+长期令牌（令牌不走模型上下文）；`sayService` / `sayEntity` 配播报。
+  换地址要重新填一次令牌（防止旧令牌被发到别的机器）；HA 暂时连不上也能保存：新填的令牌会落盘（等 HA 起来再启用），但「复用旧令牌 + 换地址」必须探测成功；关闭永远生效。
 - **天气**：`bin/weather.mjs` 用 Open-Meteo 取 `weatherCity`，写成 `weather.json`（每天首次对话自动刷新，早上的后台任务也用这份）；
   当天有效的天气会进每轮的状态行（`天气：杭州 大致晴朗，今天 12~19°C`（要看此刻温度就 `weather()`））。
   角色可以用 `weather({ city: "北京", remember: true })` 换默认城市（出差时用），`weather({ city })` 只查不改；命令行 `lwctl weather [城市]` 手动刷新。
@@ -193,7 +199,7 @@ pi          # TUI，已经带 life-world
 
 切到云端前，扩展会把切换前的对话与工具读到的内容收进 `worlds/default/机密抽屉/`（按天 `${dayOf()}.jsonl`），云端请求只保留当前这条任务；切回本地自动恢复。抽屉按会话隔离（`sessions/<sessionId>.json`），一个会话合上不影响另一个；读不出来按“开着”处理（宁多挡不漏）。
 
-`机密抽屉/用户画像-私密.md` **不预加载**：本地模式只提示位置，需要时自己 `read`；云端模式下整个 `机密抽屉/` 禁止 `read / write / edit / grep / find / ls / bash`，递归翻 world 目录也会拦；碰到会提示切回本地。没配 `models.local` 时抽屉整体停用。
+`机密抽屉/用户画像-私密.md` **不预加载**：本地模式只提示位置，需要时自己 `read`；云端模式下整个 `机密抽屉/` 禁止 `read / write / edit / patch / grep / find / ls / bash`，递归翻 world 目录也会拦；碰到会提示切回本地。没配 `models.local` 时抽屉整体停用；看板「扩展功能」页还能用 `privacy.drawer` 一键关掉隔离。
 
 触发自动切换的规则：模型无响应（`stopReason=error`）立即切；工具连续失败两次，从本地切到云端看看情况；`/model` 手动切换由 `model_select` 同步开关抽屉。
 
@@ -245,7 +251,7 @@ lwctl board stop
 
 ### 世界快照
 
-`worlds/backup/` 是一个独立的 git 仓库，`lwctl backup` 把 `worlds/default` 的 identity / conversations / diary / plan / room / 表情包 / 语音 / world.json 同步进去再提交；`--private` 才带上 `机密抽屉/`。git 增量存储，重复内容不重复占空间。
+`worlds/backup/` 是一个独立的 git 仓库，`lwctl backup` 把 `worlds/default` 的 identity / conversations / diary / plan / room / 表情包 / 语音 / world.json 同步进去再提交；`--private` 才带上 `机密抽屉/`（注意：`钥匙串/` 里的 HA 令牌会明文进本地 git 历史，删不掉）。git 增量存储，重复内容不重复占空间。
 
 家会话每天 `backup.hour` 点后自动快照一次（`life-world.json` 的 `backup` 段，`includePrivate` 默认 false）；快照在子进程里跑，不阻塞主会话。**不做自动清理**：`lwctl backup --gc` 压缩、`lwctl backup --reset` 整个删除，由你决定。
 
