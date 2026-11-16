@@ -38,6 +38,8 @@ export const stopReason = (m) => messageOf(m)?.stopReason
 export const isToolUse = (m) => stopReason(m) === "toolUse"
 export const isError = (m) => stopReason(m) === "error"
 export const errorMessage = (m) => String(messageOf(m)?.errorMessage || "")
+/** 助手消息自带的用量（input/output/cacheRead/cost），没有就返回 null */
+export const usageOf = (m) => messageOf(m)?.usage || null
 
 const parts = (m) => {
   const content = messageOf(m)?.content

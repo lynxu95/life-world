@@ -702,6 +702,11 @@ function stripProfileHint(text: string): string {
 }
 function cleanUserText(text: string): string {
   return text
+    // 桥接加的渠道抬头不是用户原话：归档、时间线、记忆里统一剥掉
+    // 昵称里带 ] 的情况：先按尾部的「（QQ 数字）]」精确剥，再退回普通写法
+    .replace(/^\[私聊｜[^\n]*?（QQ \d+）\]\s*/, "")
+    .replace(/^\[私聊｜[^\]\n]*\]\s*/, "")
+    .replace(/^\[群聊｜群号[^\]\n]*\]\s*(?:最近消息：\s*)?/, "")
     .replace(/^\[本地时间 [^\]]*\]\s*/, "")
     .split("\n")
     .filter((line) => !line.startsWith("（模型：") && !line.startsWith("（心情：") && !line.startsWith("（OneBot 桥接：") && !line.startsWith("（本地保护：") && !line.startsWith("（本地锁定：") && !line.startsWith("（本地时间 "))
@@ -715,6 +720,7 @@ function cleanUserText(text: string): string {
       if (t.startsWith("（上一条 QQ 消息之后")) return false
       if (t.startsWith("（最近 10 分钟，别的窗口有对话")) return false
       if (t.startsWith("（这是 QQ 私聊")) return false
+      if (t.startsWith("（这是 QQ 群聊")) return false
       return true
     })
     .join("\n")
@@ -1404,6 +1410,50 @@ function selfCoreText(): string {
   return text
 }
 
+/** 一条记录是谁说的：群聊成员的话不能跟「对方」混在一起 */
+function recordWho(r: { role: string; src?: string }): string {
+  if (r.role !== "user") return "我"
+  const src = String(r.src || "")
+  return src.startsWith("group-") ? `群友（${src.slice(6)}）` : "对方"
+}
+
+/**
+ * hydration 按 sessionId 记账：同一会话只补一次。
+ * 之前是进程级布尔，靠 session_start 重置——newSession 不发事件时新会话永远补不到，
+ * 进程重启也会把老会话再喂一遍。落盘 + agent_settled 成功后提交，两条都解决。
+ */
+const HYDRATED_FILE = join(ROOT, ".memory-hydrated.json")
+const HYDRATED_KEEP_MS = 7 * 86_400_000
+function hydratedMap(): Record<string, number> {
+  const raw = readJson<unknown>(HYDRATED_FILE, {})
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, number> : {}
+}
+function hydrationDelivered(key: string): boolean {
+  const at = Number(hydratedMap()[key] || 0)
+  return at > 0 && Date.now() - at < HYDRATED_KEEP_MS
+}
+function markHydrationDelivered(key: string): void {
+  // 多个窗口可能同时 settle：读改写放进 world 锁里，别丢别的会话的记录
+  withWorldLock(() => {
+    const map = hydratedMap()
+    const now = Date.now()
+    map[key] = now
+    for (const [k, at] of Object.entries(map)) if (!(Number(at) >= now - HYDRATED_KEEP_MS)) delete map[k]
+    atomicWrite(HYDRATED_FILE, JSON.stringify(map, null, 2))
+    return true
+  })
+}
+/** 会话历史里已经有一份 bootstrap（比如上一轮被中止但消息已落盘）就别再塞第二份 */
+function sessionHasBootstrap(ctx: any): boolean {
+  try {
+    const branch = ctx?.sessionManager?.getBranch?.() || []
+    // 兼容两种落盘形态：custom_message 条目，或 message 上带 customType
+    return branch.some((e: any) =>
+      (e?.type === "custom_message" && e?.customType === "life-world-bootstrap") ||
+      e?.message?.customType === "life-world-bootstrap")
+  } catch { return false }
+}
+
 function memoryBlock(): string {
   const c = config()
   const h = c.world.hydrate
@@ -1420,12 +1470,7 @@ function memoryBlock(): string {
   // 本地小模型优化：限制注入的历史条数（0 = 不注入，-1 = 不限制）
   const keep = c.localModel.enabled ? c.localModel.keepRecent : -1
   if (keep >= 0 && picked.length > keep) picked.splice(0, picked.length - keep)
-  const whoOf = (r: Record_): string => {
-    if (r.role !== "user") return "我"
-    const src = String(r.src || "")
-    return src.startsWith("group-") ? `群友（${src.slice(6)}）` : "对方"
-  }
-  const lines = picked.map((r) => `[${shortStamp(r.t)}] ${whoOf(r)}：${r.text}`)
+  const lines = picked.map((r) => `[${shortStamp(r.t)}] ${recordWho(r)}：${r.text}`)
   const map: string[] = []
   const mapFrom = dayOf(new Date(Date.now() - Math.max(0, h.mapDays - 1) * 86_400_000))
   const counts = new Map<string, number>()
@@ -1566,7 +1611,7 @@ async function searchChat(query: string, from: string | undefined, to: string | 
     for (let i = Math.max(0, h.i - context); i <= Math.min(all.length - 1, h.i + context); i++) {
       const r = all[i]
       const body = i === h.i ? snippet(r.text, q) : r.text.slice(0, 120)
-      lines.push(`${i === h.i ? "▶" : " "} [${shortStamp(r.t)} ${r.role === "user" ? "对方" : "我"}] ${body}`)
+      lines.push(`${i === h.i ? "▶" : " "} [${shortStamp(r.t)} ${recordWho(r)}] ${body}`)
     }
     lines.push("")
   }
@@ -3748,9 +3793,37 @@ export default function (pi: ExtensionAPI) {
       updated: new Date().toISOString(),
     }
   }
+  // 只增不减的小状态文件：时间线游标（每个终端进程一个）、抽屉会话状态；按 mtime 清 7 天前
+  let ephemeralCleanedAt = 0
+  const cleanupEphemeral = () => {
+    if (Date.now() - ephemeralCleanedAt < 3_600_000) return
+    ephemeralCleanedAt = Date.now()
+    const cutoff = Date.now() - 7 * 86_400_000
+    const expire = (dir: string, keepActive: boolean) => {
+      try {
+        for (const f of readdirSync(dir)) {
+          if (!f.endsWith(".json")) continue
+          const p = join(dir, f)
+          try {
+            if (statSync(p).mtimeMs >= cutoff) continue
+            // 抽屉会话文件：还开着（或被读坏而 fail-closed）的不能删，否则会把前文重新藏一遍
+            if (keepActive) {
+              let s: any = null
+              try { s = JSON.parse(readFileSync(p, "utf8")) } catch { continue }
+              if (s?.active !== false) continue
+            }
+            unlinkSync(p)
+          } catch { /* ignore */ }
+        }
+      } catch { /* 目录不存在就算了 */ }
+    }
+    expire(join(ROOT, "timeline-seen"), false)
+    expire(join(DRAWER_DIR, "sessions"), true)
+  }
   const writeStatus = () => {
     try {
       mkdirSync(STATUS_DIR, { recursive: true, mode: 0o700 })
+      cleanupEphemeral()
       atomicWrite(join(STATUS_DIR, `${roleKey}-${process.pid}.json`), JSON.stringify(statusPayload(), null, 2))
       // 清理 10 分钟没心跳的
       const cutoff = Date.now() - 600_000
@@ -3910,11 +3983,11 @@ export default function (pi: ExtensionAPI) {
   ;(statusTimer as any).unref?.()
 
   let hydrated = false
-  let memoryHydrated = false
+  let pendingHydrationKey: string | null = null
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     hydrated = false
-    memoryHydrated = false
+    pendingHydrationKey = null
     lastCtx = ctx
     // 恢复会话时只补开、不主动合：同一 session 可能还有另一个进程在云端
     const o = config().models
@@ -4074,9 +4147,18 @@ export default function (pi: ExtensionAPI) {
       prompt = `${prompt}\n\n${PRIVATE_HINT_MARK}\n${hint}`
     }
     if (prompt !== original) patch.systemPrompt = prompt
-    // 记忆块只在第一次能安全给本地看时注入；云端开局、之后切回本地会补一次
-    const wantMemory = !memoryHydrated && !cloudActive && CHANNEL !== "group"
-    if (wantMemory) memoryHydrated = true
+    // 记忆块每个会话注入一次，且只在能安全给本地看时；云端开局、之后切回本地会补
+    const hydrateKey = sessionKey(ctx)
+    let haveBootstrap = hydrationDelivered(hydrateKey)
+    // 云端和群聊本来就不注入：不必每轮扫 branch（长会话是 O(n)）
+    if (!haveBootstrap && !cloudActive && CHANNEL !== "group" && sessionHasBootstrap(ctx)) {
+      // 历史里已经有（可能是在中止的回合里落下的）：就地记账，别再重复注入
+      haveBootstrap = true
+      try { markHydrationDelivered(hydrateKey) } catch { /* ignore */ }
+    }
+    const wantMemory = !haveBootstrap && !cloudActive && CHANNEL !== "group"
+    // 投递状态等这一轮成功收尾再提交（aborted/报错的下轮会重试）
+    pendingHydrationKey = wantMemory ? hydrateKey : null
     const memory = wantMemory ? memoryBlock() : ""
     const timeline = timelineInjection()
     const content = [stateText(!cloudActive && CHANNEL !== "group"), timeline, memory].filter(Boolean).join("\n\n")
@@ -4188,22 +4270,20 @@ export default function (pi: ExtensionAPI) {
     } catch { return [] }
   }
   function pruneTimeline(): void {
-    // 只让 home 负责重写，避免多进程同时截断文件；读的时候反正还会按 48h 过滤
-    if (ROLE !== "home") return
+    // 谁在写谁顺带清（home 不一定一直开着）；读的时候本来也按 48h 过滤。
+    // 追加和裁剪共用 world 锁：否则「读-过滤-重写」会覆盖掉同时写进来的新行
     if (Date.now() - timelinePrunedAt < 3_600_000) return
     timelinePrunedAt = Date.now()
-    try {
+    withWorldLock(() => {
       if (!existsSync(TIMELINE_FILE)) return
-      const before = statSync(TIMELINE_FILE).mtimeMs
       const cutoff = Date.now() - TIMELINE_KEEP_MS
       const keep = readFileSync(TIMELINE_FILE, "utf8").split("\n").filter((line) => {
         if (!line.trim()) return false
         try { const t = Date.parse(JSON.parse(line).t); return Number.isFinite(t) && t >= cutoff } catch { return false }
       })
-      // 读的这几毫秒里别的窗口又追加了：这轮放弃，下次再来，别把新行覆盖掉
-      if (statSync(TIMELINE_FILE).mtimeMs !== before) return
       atomicWrite(TIMELINE_FILE, keep.length ? keep.join("\n") + "\n" : "")
-    } catch { /* ignore */ }
+      return true
+    })
   }
   function appendTimeline(message: any, event?: any): void {
     if (CHANNEL === "group" || ROLE === "group") return
@@ -4221,9 +4301,14 @@ export default function (pi: ExtensionAPI) {
       t: new Date().toISOString(), roleKey: timelineKey, who: role === "user" ? "对方" : "我",
       text: Array.from(text).slice(0, 100).join(""),
     }
-    try {
+    const write = () => {
       mkdirSync(ROOT, { recursive: true })
       appendFileSync(TIMELINE_FILE, JSON.stringify(ev) + "\n", { mode: 0o600 })
+    }
+    try {
+      // 和 pruneTimeline 共用一把锁；锁等不到时也得写，宁可极小概率撞上裁剪也别丢事件
+      const locked = withWorldLock(() => { write(); return true })
+      if (locked !== true) write()
       pruneTimeline()
     } catch { /* ignore */ }
   }
@@ -4304,6 +4389,10 @@ export default function (pi: ExtensionAPI) {
       } catch { /* ignore */ }
     }
     pendingTimelineCursor = null
+    if (pendingHydrationKey && event?.aborted !== true && !lastTurnBad) {
+      try { markHydrationDelivered(pendingHydrationKey) } catch { /* ignore */ }
+    }
+    pendingHydrationKey = null
     // 连续在场：这一轮说完了，接下一跳（普通心跳不受影响）
     if (ROLE === "home" || ROLE === "qq") void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
     lastTurnEndAt = Date.now()
@@ -5748,7 +5837,7 @@ export default function (pi: ExtensionAPI) {
       const parts = [`【${date}】对话 ${records.length} 句`]
       let total = 0
       for (const r of records) {
-        const line = `[${shortStamp(r.t)}] ${r.role === "user" ? "对方" : "我"}：${r.text}`
+        const line = `[${shortStamp(r.t)}] ${recordWho(r)}：${r.text}`
         if (total + line.length > maxChars) { parts.push("（后面还有，超出字数上限）"); break }
         parts.push(line); total += line.length
       }

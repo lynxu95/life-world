@@ -20,7 +20,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import { spawn } from "node:child_process"
-import { isMessageEnd, isAgentSettled, isAssistant, isToolUse, isError, errorMessage, isExtensionUIRequest, isResponse, responseOk, responseError, settledAborted, textOf, reqPrompt, reqAbort, reqAbortBash, reqExtensionUIResponse } from "./rpc-adapter.mjs"
+import { isMessageEnd, isAgentSettled, isAssistant, isToolUse, isError, errorMessage, isExtensionUIRequest, isResponse, responseOk, responseError, settledAborted, textOf, usageOf, reqPrompt, reqAbort, reqAbortBash, reqExtensionUIResponse } from "./rpc-adapter.mjs"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
 const CONFIG_FILE = join(ROOT, "life-world.json")
@@ -188,6 +188,14 @@ function handleRpc(msg) {
   if (!pending || pending.gen !== gen) return
   if (isMessageEnd(msg) && isAssistant(msg)) {
     if (isError(msg)) { pending.error = errorMessage(msg) || "模型报错"; return }
+    // 工具轮也会收尾，用量按轮累加，别只算最后一段
+    const u = usageOf(msg)
+    if (u) {
+      for (const k of ["input", "output", "cacheRead", "cacheWrite"]) {
+        const n = Number(u[k])
+        if (Number.isFinite(n)) pending.usage[k] = (pending.usage[k] || 0) + n
+      }
+    }
     if (isToolUse(msg)) return
     const text = textOf(msg)
     if (text) pending.texts.push(text)
@@ -199,7 +207,7 @@ function handleRpc(msg) {
     if (p.timer) clearTimeout(p.timer)
     if (p.timedOut) p.reject(new Error("等太久了（超时）"))
     else if (p.error && !p.texts.length) p.reject(new Error(p.error))
-    else p.resolve(p.texts.join("\n").trim())
+    else p.resolve({ text: p.texts.join("\n").trim(), usage: p.usage })
     return
   }
   if (isExtensionUIRequest(msg)) {
@@ -242,7 +250,7 @@ function ask(text, scope, images = []) {
     return new Promise((resolve, reject) => {
       for (const c of [child]) if (!c || c.stdin.destroyed) return reject(new Error("会话没起来"))
       const id = `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      const p = { id, gen, scope, texts: [], error: "", resolve, reject, timer: null, timedOut: false }
+      const p = { id, gen, scope, texts: [], usage: {}, error: "", resolve, reject, timer: null, timedOut: false }
       pending = p
       if (TIMEOUT_ON) {
         p.timer = setTimeout(() => {
@@ -294,6 +302,28 @@ const cors = (req) => {
 }
 const err = (res, code, message, type = "invalid_request_error") =>
   json(res, code, { error: { message, type, param: null, code: null } })
+const STREAM_GRACE_MS = 3000
+/** 模型失败归类：超时 504，其余算上游 502 */
+function errInfo(e) {
+  const msg = String(e?.message || e)
+  const timeout = TIMEOUT_ON && /超时|等太久/.test(msg)
+  return { msg, type: timeout ? "timeout_error" : "upstream_error", code: timeout ? 504 : 502 }
+}
+/** OpenAI usage：只用 pi 报上来的真实用量；没有就不编（之前恒 0 / 字符数冒充 token） */
+function usagePayload(u) {
+  if (!u) return null
+  const input = Number(u.input || 0), output = Number(u.output || 0)
+  const read = Number(u.cacheRead || 0), write = Number(u.cacheWrite || 0)
+  if (![input, output, read, write].every(Number.isFinite)) return null
+  const prompt = input + read + write
+  if (prompt <= 0 && output <= 0) return null
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: output,
+    total_tokens: prompt + output,
+    prompt_tokens_details: { cached_tokens: read },
+  }
+}
 
 function authorized(req) {
   if (!TOKEN) return true
@@ -416,30 +446,44 @@ const server = http.createServer(async (req, res) => {
   const id = `chatcmpl-${Date.now().toString(36)}`
   const stream = payload.stream === true
   let send = null
+  // 客户端中途断开：只停自己这一轮（排队中的请求别误伤）
+  const scope = {}
+  res.on("close", () => { if (!res.writableEnded && pending && pending.scope === scope) { try { child?.stdin.write(JSON.stringify(reqAbort()) + "\n") } catch { /* ignore */ } } })
+  const started = ask(prompt, scope, user.images)
+  let early = null
   if (stream) {
-    // 先回声，客户端不用干等；生成完再分块吐内容
+    // 先给模型 3 秒：快速失败就回真正的 HTTP 错误，别用 200 包个 error chunk（有些客户端会当空回复）
+    let graceTimer = null
+    early = await Promise.race([
+      started.then((r) => ({ ok: true, r }), (e) => ({ ok: false, e })),
+      new Promise((r) => { graceTimer = setTimeout(() => r(null), STREAM_GRACE_MS) }),
+    ])
+    if (early) clearTimeout(graceTimer)
+    if (early && !early.ok) {
+      const { msg, type, code } = errInfo(early.e)
+      log("ask failed before stream", msg.slice(0, 120))
+      return err(res, code, msg, type)
+    }
+    // 超过 3 秒还在生成：先回声 + 保活，生成完再分块吐内容
     res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive", ...cors(req) })
     send = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`) } catch { /* client gone */ } }
     send({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: modelId, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })
   }
-  // 客户端中途断开：只停自己这一轮（排队中的请求别误伤）
-  const scope = {}
-  res.on("close", () => { if (!res.writableEnded && pending && pending.scope === scope) { try { child?.stdin.write(JSON.stringify(reqAbort()) + "\n") } catch { /* ignore */ } } })
   // 生成期间发 SSE 注释保活，别让客户端等太久先断
   const ping = stream ? setInterval(() => { try { res.write(": ping\n\n") } catch { /* ignore */ } }, 15000) : null
-  let reply = ""
-  try { reply = await ask(prompt, scope, user.images) }
+  let result = null
+  try { result = early && early.ok ? early.r : await started }
   catch (e) {
     if (ping) clearInterval(ping)
-    const msg = String(e?.message || e)
-    const timeout = TIMEOUT_ON && /超时|等太久/.test(msg)
-    const code = timeout ? 504 : 502
-    const type = timeout ? "timeout_error" : "upstream_error"
-    if (stream) { send({ error: { message: msg, type } }); try { res.write("data: [DONE]\n\n") } catch { /* ignore */ } return res.end() }
+    const { msg, type, code } = errInfo(e)
+    log("ask failed mid-stream", msg.slice(0, 120))
+    // 流已经开了：发 error 事件就结束，不发 [DONE]——否则客户端会把半截回复当成正常收尾
+    if (stream) { send({ error: { message: msg, type } }); return res.end() }
     return err(res, code, msg, type)
   }
   if (ping) clearInterval(ping)
-  if (!reply) reply = "（她这次没说出话）"
+  const reply = result?.text || "（她这次没说出话）"
+  const usage = usagePayload(result?.usage)
   if (stream) {
     const chars = Array.from(reply)
     for (let i = 0; i < chars.length; i += 12) {
@@ -447,14 +491,19 @@ const server = http.createServer(async (req, res) => {
       await new Promise((r) => setTimeout(r, 30))
     }
     send({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: modelId, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })
+    // 按 OpenAI 的约定：要了 stream_options.include_usage 才在最后补一条用量
+    if (usage && payload.stream_options?.include_usage) {
+      send({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: modelId, choices: [], usage })
+    }
     res.write("data: [DONE]\n\n")
     return res.end()
   }
-  return json(res, 200, {
+  const out = {
     id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: modelId,
     choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 0, completion_tokens: Array.from(reply).length, total_tokens: Array.from(reply).length },
-  })
+  }
+  if (usage) out.usage = usage
+  return json(res, 200, out)
   } catch (e) {
     log("handler error", String(e))
     try { if (!res.headersSent) err(res, 500, "网关内部错误") } catch { /* ignore */ }

@@ -15,6 +15,25 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.16.4] - 2026-11-16
+
+### 修复
+
+- **记忆 hydration 改成按会话记账**：状态落到 `.memory-hydrated.json`，`agent_settled` 且这一轮没报错才提交。
+  `newSession` 不发 `session_start` 也不会漏补，进程重启不会把同一会话再喂一遍；被中止/报错的回合下一轮重试。
+  会话历史里已经有 bootstrap（比如中止的回合但消息已落盘）时不再重复注入；状态文件损坏按「未投递」处理。
+- **小状态文件不再只增不减**：`timeline-seen/*.json`（每个终端进程一个）和 `机密抽屉/sessions/*.json`
+  按 mtime 清 7 天前的（抽屉状态 `active:true` 的保留）；时间线裁剪不再只由 home 负责，任何窗口写时间线时
+  顺带做，追加与裁剪共用 world 锁，避免「读-过滤-重写」覆盖同时写进来的新行。
+- **归档/记忆里的渠道抬头统一清洗**：QQ 的 `[私聊｜姓名（QQ 号）]`、`[群聊｜群号]` 与「（这是 QQ 群聊…）」
+  注记在归档、时间线、hydration 里都剥掉；`memory_search` / `memory_day` 的群聊记录改标「群友（群号）」，
+  不再混成「对方」。
+- **网关错误语义对齐 OpenAI**：流式请求先等 3 秒（首字节最多顺延 3 秒），快速失败直接回 HTTP 502/504 JSON；
+  流已开之后才失败的只发 `error` 事件、不再补 `[DONE]`，避免客户端把半截回复当成正常收尾。
+- **网关 usage 换成真实用量**：从 pi 的 assistant usage 累加 `input/output/cacheRead/cacheWrite`，映射成
+  `prompt_tokens` / `completion_tokens`（`prompt_tokens_details.cached_tokens` 只报缓存读）；没有数据就省略，
+  不再用字符数冒充 token。流式仅在 `stream_options.include_usage` 时补用量块。
+
 ## [1.16.3] - 2026-11-16
 
 ### 修复
