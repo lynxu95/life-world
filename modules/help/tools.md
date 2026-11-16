@@ -29,6 +29,12 @@
 - 跑技能脚本：`skill_run({ name: "技能名", script: "scripts/run.sh", args: ["…"], timeout_seconds: 60 })`（省略 script 用 SKILL.md 的 `run:`）
 - 启停技能：`skill_toggle({ name: "技能名", enabled: false })`
 
+## 天气
+- 查今天：`weather()`（用当前默认城市，读每日缓存，不费网络）
+- 查别处：`weather({ city: "北京" })`（临时查，不改默认城市）
+- 换默认城市：`weather({ city: "杭州", remember: true })`——出差、搬家、长期不在原城市时用；
+  换完缓存立刻刷新，状态行下一轮就变成新城市。
+
 ## 模型
 - 切换：`switch_model({ target: "local|cloud", reason: "为什么切" })`
 - 查状态：`switch_model()`，或 `switch_model({ target: "status" })`

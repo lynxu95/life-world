@@ -777,6 +777,11 @@ if (!cmd && stdin.isTTY) {
   process.exit(cmdTail(arg[0] || "qq", Number(arg[1]) || 30) ? 0 : 1)
 } else if (cmd === "usage" || cmd === "stats") {
   cmdUsage(Number(arg[0]) || 7)
+} else if (cmd === "weather") {
+  const script = join(ROOT, "bin", "weather.mjs")
+  if (!existsSync(script)) { console.error(`✗ 缺少 ${script}；先跑一次 pi/install.sh 把脚本装进 ${ROOT}/bin/`); process.exit(1) }
+  const r = spawnSync(process.execPath, [script, ...arg], { stdio: "inherit", env: { ...process.env, LIFE_WORLD_ROOT: ROOT } })
+  process.exit(r.status ?? 1)
 } else if (cmd === "board" || cmd === "web") {
   await cmdBoard(arg[0] || "start", arg.slice(1))
 } else if (cmd === "restart") {
@@ -809,6 +814,7 @@ if (!cmd && stdin.isTTY) {
   console.log(`lwctl · life-world 会话工具
 
   lwctl                              交互菜单（会话/看板/快照/日志/用量/重启）
+  lwctl weather [城市]               刷新天气缓存（不传城市用 care.weatherCity）
   lwctl status                       打印会话与模型
   lwctl targets                      列出可切换目标
   lwctl set <target> <model> [原因]  直接切换

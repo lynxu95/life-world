@@ -147,6 +147,8 @@ const ACK_DIR = join(ROOT, "control-acks")
 const MODEL_MODE_FILE = join(ROOT, "model-mode.json")
 const LOCAL_LOCK_FILE = join(ROOT, "local-lock.json")
 const LOCAL_PIN_FILE = join(ROOT, "local-pin.json")
+const WEATHER_FILE = join(ROOT, "weather.json")
+const WEATHER_SCRIPT = join(EXT_DIR, "../bin/weather.mjs")
 const safeRoleKey = (rk: string) => rk.replace(/[^A-Za-z0-9_.-]/g, "_")
 const controlAckFile = (id: string, rk: string) => join(ACK_DIR, `${id}-${safeRoleKey(rk)}.json`)
 const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.json")
@@ -652,7 +654,8 @@ function stateText(withMood = true): string {
     localLockOn() ? "本地保护：开（只能用在线）" : "",
     localPinOn() && !localLockOn() ? "本地锁定：开（不自动切走）" : "",
   ]
-  const parts = [currentModelLine(), ...modes, withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
+  const wx = weatherText()
+  const parts = [currentModelLine(), ...modes, wx ? `天气：${wx}` : "", withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
   return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）`
 }
 
@@ -1715,17 +1718,91 @@ function inQuietHours(now: Date, care: CareOptions): boolean {
   return a < b ? cur >= a && cur < b : cur >= a || cur < b
 }
 
-async function fetchWeather(city: string): Promise<string> {
-  if (!city) return ""
+interface WeatherDoc { city: string; date: string; at: string; ok: boolean; desc?: string; tempC?: string; feelsC?: string; humidity?: string; hi?: string; lo?: string; error?: string }
+/** 读当天天气缓存（weather.json 由 bin/weather.mjs 每天刷新） */
+function readWeather(): WeatherDoc | null {
   try {
-    const res = await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=j1`, { signal: AbortSignal.timeout(6000) })
-    if (!res.ok) return ""
-    const d: any = await res.json()
-    const cur = d?.current_condition?.[0]
-    if (!cur) return ""
-    const desc = cur.weatherDesc?.[0]?.value || ""
-    return `${desc}，${cur.temp_C}°C（体感 ${cur.FeelsLikeC}°C，湿度 ${cur.humidity}%）`
-  } catch { return "" }
+    const d = JSON.parse(readFileSync(WEATHER_FILE, "utf8"))
+    if (!d || typeof d !== "object" || Array.isArray(d)) return null
+    return d as WeatherDoc
+  } catch { return null }
+}
+/** 只返回「今天、且成功」的那条，别把昨天的天气注入进去 */
+function weatherText(): string {
+  const w = readWeather()
+  if (!w || !w.ok || w.date !== dayOf() || !w.city) return ""
+  // 只放当天概要：此刻的温度会过时，要现查就让 AI 自己调 weather
+  const desc = w.desc || ""
+  const range = w.lo && w.hi ? `，今天 ${w.lo}~${w.hi}°C` : ""
+  return `${w.city} ${desc}${range}`.replace(/\s+/g, " ").trim()
+}
+// WMO 天气代码 → 中文（Open-Meteo 只给代码）
+const WMO_TEXT: Record<number, string> = {
+  0: "晴", 1: "大致晴朗", 2: "多云", 3: "阴",
+  45: "有雾", 48: "冻雾",
+  51: "毛毛雨", 53: "毛毛雨", 55: "毛毛雨", 56: "冻毛毛雨", 57: "冻毛毛雨",
+  61: "小雨", 63: "中雨", 65: "大雨", 66: "冻雨", 67: "强冻雨",
+  71: "小雪", 73: "中雪", 75: "大雪", 77: "雪粒",
+  80: "阵雨", 81: "中阵雨", 82: "强阵雨", 85: "阵雪", 86: "强阵雪",
+  95: "雷阵雨", 96: "雷阵雨伴冰雹", 99: "强雷暴伴冰雹",
+}
+/** 查任意城市：先 geocode 再取当前 + 今日高低温（Open-Meteo，国内可直连） */
+async function fetchWeatherDetail(city: string): Promise<WeatherDoc | null> {
+  const c = String(city || "").trim()
+  if (!c) return null
+  try {
+    const gRes = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(c)}&count=1&language=zh&format=json`, { signal: AbortSignal.timeout(8000) })
+    if (!gRes.ok) return null
+    const g: any = await gRes.json()
+    const hit = g?.results?.[0]
+    if (!hit) return null
+    const fRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${hit.latitude}&longitude=${hit.longitude}`
+      + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code"
+      + "&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1", { signal: AbortSignal.timeout(8000) })
+    if (!fRes.ok) return null
+    const f: any = await fRes.json()
+    const cur = f?.current
+    if (!cur) return null
+    const daily = f?.daily || {}
+    const hi = Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max[0] : ""
+    const lo = Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min[0] : ""
+    const round = (v: any) => (v == null || v === "" ? "" : String(Math.round(Number(v))))
+    return {
+      city: hit.name + (hit.admin1 && hit.admin1 !== hit.name ? `（${hit.admin1}）` : ""),
+      date: dayOf(), at: new Date().toISOString(), ok: true,
+      desc: WMO_TEXT[Number(cur.weather_code)] || "", tempC: round(cur.temperature_2m),
+      feelsC: round(cur.apparent_temperature), humidity: round(cur.relative_humidity_2m),
+      hi: round(hi), lo: round(lo),
+    }
+  } catch { return null }
+}
+function writeWeather(doc: WeatherDoc): void {
+  try { atomicWrite(WEATHER_FILE, JSON.stringify(doc, null, 2)) } catch { /* ignore */ }
+}
+let lastWeatherTry = 0
+/** 今天还没有缓存（或换了城市）就跑一次脚本；后台跑，不挡这一轮 */
+function maybeRefreshWeather(): void {
+  const c = config().care
+  if (!c.enabled || !c.weatherEnabled || !c.weatherCity) return
+  const w = readWeather()
+  if (w && w.ok && w.date === dayOf() && w.city === String(c.weatherCity).trim()) return
+  if (Date.now() - lastWeatherTry < 10 * 60_000) return
+  lastWeatherTry = Date.now()
+  try {
+    const child = spawn(process.execPath, [WEATHER_SCRIPT], { detached: true, stdio: "ignore", env: { ...process.env, LIFE_WORLD_ROOT: ROOT } })
+    child.unref()
+  } catch (e) { log(`weather refresh failed · ${String(e)}`) }
+}
+/** 给后台任务用：有缓存就回缓存，没有就当场抓一次并落盘 */
+async function ensureWeatherToday(): Promise<string> {
+  const c = config().care
+  if (!c.enabled || !c.weatherEnabled || !c.weatherCity) return ""
+  const cached = weatherText()
+  if (cached) return cached
+  const d = await fetchWeatherDetail(String(c.weatherCity))
+  if (!d) return ""
+  writeWeather(d)
+  return `${d.city} ${d.desc} ${d.tempC}°C`
 }
 
 // ———————— 活动 / 子闹钟 ————————
@@ -2494,7 +2571,7 @@ async function tick(): Promise<void> {
     const [fh, fm] = c.world.fallbackWakeTime.split(":").map((x) => Number(x) || 0)
     const mins = hour * 60 + now.getMinutes()
     if (mins < fh * 60 + fm || mins >= fh * 60 + fm + 240) return
-    const weather = c.care.enabled && c.care.weatherEnabled ? await fetchWeather(c.care.weatherCity) : ""
+    const weather = await ensureWeatherToday()
     const wc = wakeSuffix()
     if (sendTime(`【后台任务·早上】新的一天。先看看今天的安排：${join(PLAN_DIR, `${today}.md`)}。没有就自己拟一份大概的；挑一件现在就做的，用 plan_next 排上时间。${weather ? `\n今天的天气：${weather}` : ""}` + wc.text) && wc.nextAt) {
       commitWakeContext(wc.nextAt)
@@ -3864,6 +3941,7 @@ export default function (pi: ExtensionAPI) {
     setAgentBusy(true)
     // 脚本级兜底：当前模型探活失败就自动切另一个（不依赖模型自己判断）
     await ensureModelAlive(ctx)
+    maybeRefreshWeather()
     const patch: any = {}
     const original = String(event?.systemPrompt || "")
     let prompt = original
@@ -4772,6 +4850,48 @@ export default function (pi: ExtensionAPI) {
       catch (e) { return ok(`没解除成：${String(e)}。锁还是开着的，请重试或检查 ${ROOT} 的写权限。`) }
       writeStatus()
       return ok("本地锁定已关：自动兜底按 life-world.json 的基线恢复。")
+    },
+  })
+
+  addTool(pi, {
+    name: "weather",
+    label: "Weather",
+    description: "查天气，也是换默认城市的入口。不传 city：返回当前默认城市今天的天气（缓存，每天自动更新）；传 city：当场查那个城市（临时查询，不改默认）；remember: true 配合 city：把它记成新的默认城市并刷新缓存——对方出差、换城市、搬去别处时用这个。",
+    parameters: {
+      type: "object",
+      properties: {
+        city: { type: "string", description: "城市名，比如 北京、杭州；省略则用当前默认城市" },
+        remember: { type: "boolean", description: "true = 把这个城市记成默认城市（写 life-world.json 的 care.weatherCity）" },
+      },
+    },
+    async execute(_id: string, params: any) {
+      const want = String(params?.city || "").trim()
+      const remember = params?.remember === true && !!want
+      const c = config().care
+      const city = want || String(c.weatherCity || "").trim()
+      if (!city) return ok('还没设城市：问清对方现在在哪个城市，再用 weather({ city: "北京", remember: true }) 设上。')
+      const cur = String(config().care.weatherCity || "").trim()
+      // 不带 city 就是「看一眼今天」：读缓存不打网络；带了 city（包括默认城市）就现查，拿此刻的温度
+      if (!want) {
+        const cached = weatherText()
+        if (cached) return ok(`缓存：${cached}。要此刻的温度就说一声，我 weather({ city: "${city}" }) 现查`)
+      }
+      const d = await fetchWeatherDetail(city)
+      if (!d) return ok(`没查到 ${city} 的天气（网络或地名问题），过会儿再试；默认城市和缓存都没动。`)
+      if (remember) {
+        try {
+          const raw = readJson<any>(CONFIG_FILE, {})
+          raw.care = raw.care || {}
+          raw.care.weatherCity = city
+          atomicWrite(CONFIG_FILE, JSON.stringify(raw, null, 2))
+        } catch (e) { return ok(`查到了，但默认城市没写成：${String(e)}`) }
+        writeWeather(d)
+      } else if (city === cur) {
+        writeWeather(d)
+      }
+      const range = d.lo && d.hi ? `，${d.lo}~${d.hi}°C` : ""
+      const tail = remember ? "。已设为默认城市" : city === cur ? "" : "（临时查询，没改默认城市）"
+      return ok(`${city} 今天：${d.desc} ${d.tempC}°C（体感 ${d.feelsC}°C${range}，湿度 ${d.humidity}%）${tail}。`)
     },
   })
 

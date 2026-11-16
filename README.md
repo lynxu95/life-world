@@ -401,7 +401,8 @@ Qwen3.8-Omni-Flash 官方限制：图片 URL 20MB/张、音频 2GB/3 小时、�
 
 - 安静时段外，距上次至少 `randomMinGapHours` 小时，每 tick 以 `randomChancePerTick` 概率触发一次「想起你」，角色自己决定 `reach_out` 还是 `[SILENT]`；
 - 关掉 `randomEnabled` = 全天安静（看板可一键开关）；
-- 早上兜底唤醒时用 `wttr.in` 取 `weatherCity` 的天气附在文本里。
+- 天气走 `bin/weather.mjs`（Open-Meteo，国内可直连）：每天首次对话自动刷新成 `weather.json`，当天有效的天气会进每轮状态行（只放天气和今天高低温，现查温度用 `weather`）；
+  角色可用 `weather({ city, remember })` 换默认城市（出差时用），`lwctl weather [城市]` 可手动刷新。
 
 ## QQ 桥接
 

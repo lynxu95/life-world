@@ -126,7 +126,9 @@ pi          # TUI，已经带 life-world
 - **安静时段**：`quietStart ~ quietEnd`（可跨午夜）内不发随机消息；
 - **看板可开关**：`lwctl board` 页面里勾掉「随机想起」即全天安静；
 - **随机想起**：安静时段外，距上次至少 `randomMinGapHours` 小时，每个 tick（30 秒）以 `randomChancePerTick` 概率触发一次「想起你」，角色自己决定 `reach_out` 还是 `[SILENT]`；
-- **天气**：早上兜底唤醒时用 `wttr.in` 取 `weatherCity` 的天气，附在唤醒文本里。
+- **天气**：`bin/weather.mjs` 用 Open-Meteo 取 `weatherCity`，写成 `weather.json`（每天首次对话自动刷新，早上的后台任务也用这份）；
+  当天有效的天气会进每轮的状态行（`天气：杭州 大致晴朗，今天 12~19°C`（要看此刻温度就 `weather()`））。
+  角色可以用 `weather({ city: "北京", remember: true })` 换默认城市（出差时用），`weather({ city })` 只查不改；命令行 `lwctl weather [城市]` 手动刷新。
 
 ## 守护与清理
 
