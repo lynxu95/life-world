@@ -71,6 +71,37 @@ function readLocalLockStrict() {
   } catch { return { enabled: true, broken: true } }
 }
 
+// 机密抽屉里的文件（跳过 sessions/ 和聊天记录 jsonl，那些是备份不是用户文件）
+function listDrawerFiles() {
+  const base = join(WORLD, "机密抽屉")
+  if (!existsSync(base)) return []
+  const out = []
+  const walk = (dir, rel, depth) => {
+    if (out.length >= 100 || depth > 2) return
+    let entries = []
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const ent of entries) {
+      const name = ent.name
+      if (name.startsWith(".")) continue
+      const childRel = rel ? `${rel}/${name}` : name
+      const full = join(dir, name)
+      if (ent.isDirectory()) {
+        if (name === "sessions") continue
+        walk(full, childRel, depth + 1)
+        continue
+      }
+      if (!ent.isFile()) continue
+      if (name.endsWith(".jsonl")) continue
+      let st = null
+      try { st = statSync(full) } catch { continue }
+      out.push({ path: childRel, size: st.size, mtime: new Date(st.mtimeMs).toISOString() })
+    }
+  }
+  walk(base, "", 0)
+  out.sort((a, b) => b.mtime.localeCompare(a.mtime))
+  return out
+}
+
 // Home Assistant：地址/令牌藏在 机密抽屉/钥匙串，接口只回是否已配置，不回令牌
 function readHaSecret() {
   try {
@@ -926,6 +957,14 @@ const server = http.createServer(async (req, res) => {
         try { appendCommand(ROOT, { target: "all", action: "model", model: "local", reason: "本地锁定" }) } catch { /* 命令下发失败不影响锁 */ }
       }
       return json(res, 200, { ok: true, localPin: { enabled, at: doc.at, reason: doc.reason }, msg: enabled ? "已锁定：正在把会话切到本地" : "已解除" })
+    }
+    if (req.method === "GET" && url.pathname === "/api/drawer") {
+      const cfg = readJson(CONFIG_FILE, {})
+      return json(res, 200, {
+        ok: true,
+        enabled: !(cfg.privacy && cfg.privacy.drawer === false),
+        files: listDrawerFiles(),
+      })
     }
     if (req.method === "POST" && url.pathname === "/api/drawer") {
       const data = await body(req)

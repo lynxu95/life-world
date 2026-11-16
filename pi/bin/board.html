@@ -107,6 +107,13 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 .dash{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
 .dash.memory{grid-template-columns:minmax(0,1fr)}
 .dash.single{grid-template-columns:minmax(0,1fr)}
+/* 扩展功能：模块内容不多，一行放两个；HA 字段多，占满一行 */
+#tab-ext .dash.single>main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
+#tab-ext .dash.single>main>section:nth-child(3){grid-column:1 / -1}
+@media (max-width:900px){
+  #tab-ext .dash.single>main{grid-template-columns:minmax(0,1fr)}
+  #tab-ext .dash.single>main>section:nth-child(3){grid-column:auto}
+}
 #tab-memory .star{--brain-h:clamp(460px,62vh,720px)}
 @media (max-width:1080px){
   .dash{grid-template-columns:1fr}
@@ -144,6 +151,10 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 /* 心跳与关怀：整块统一 12px，别让 muted / 输入框比标签大一号 */
 .hb-care{font-size:12px}
 #tab-ext .hint,#tab-ext .muted,#tab-ext .field input{font-size:12px}
+.dw-files{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.dw-files .row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);padding:3px 0}
+.dw-files .row b{font-weight:500;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dw-files .empty{font-size:12px;color:var(--faint)}
 .hb-care .muted{font-size:12px}
 .hb-care .hint{font-size:12px}
 .hb-care input[type=number]{font-size:12px;padding:6px 9px}
@@ -559,6 +570,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <div class="sec-head"><h2>机密抽屉</h2><span class="spacer"></span><span class="sec-note">总开关</span></div>
           <label class="check"><input type="checkbox" id="dw-enabled">启用机密抽屉</label>
           <div class="hint" id="dw-hint">开着：切到在线模型时，之前的对话收进抽屉，云端也读不到抽屉里的文件（配了本地模型才有「家」）。关着：不做任何隔离，在线模型可以随便看——自己的机器自己决定。</div>
+          <div class="dw-files" id="dw-files"></div>
         </section>
         <section class="hb-care">
         <div class="sec-head"><h2>心跳与关怀</h2><span class="spacer"></span><span class="sec-note" id="hb-limit-note">…</span></div>
@@ -950,6 +962,21 @@ $("dw-enabled")?.addEventListener("change", async () => {
   else { $("dw-enabled").checked = !on; $("dw-hint").textContent = "保存失败，稍后再试" }
 })
 
+async function loadDrawerFiles() {
+  const box = $("dw-files")
+  if (!box) return
+  const d = await getJson("/api/drawer").catch(() => null)
+  if (!d || !Array.isArray(d.files) || !d.files.length) {
+    box.innerHTML = '<div class="empty">抽屉里还没有文件</div>'
+    return
+  }
+  const fmt = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB"
+  box.innerHTML = d.files.map((f) => {
+    const date = String(f.mtime || "").slice(5, 16).replace("T", " ")
+    return `<div class="row"><b>${escAttr(f.path)}</b><span>${fmt(f.size)} · ${date}</span></div>`
+  }).join("")
+}
+
 async function loadHa() {
   const d = await getJson("/api/ha").catch(() => null)
   if (!d) return
@@ -1020,6 +1047,7 @@ async function loadOverview() {
     renderLocalLock(d.localLock, (d.models && d.models.cloud) || "deepseek/deepseek-flash")
     renderLocalPin(d.localPin, d.models && d.models.autoFailover === false, d.models, d.localLock && d.localLock.enabled)
     renderDrawer(d.drawer)
+    void loadDrawerFiles()
     void loadHa()
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
