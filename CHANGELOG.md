@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.16.2] - 2026-11-16
+
+### 改进
+
+- 看板网关卡片右侧加了「已适配终端 · 模型名怎么填」说明：AnimaVN 用 `life-world-vn`、
+  dsh-pet-indesktop 用 `life-world-pet`、其他聊天终端用 `life-world`；写明模型名只决定终端约定、不改变实际模型。
+  窄屏时说明自动落到表单下方。
+
 ## [1.16.1] - 2026-11-16
 
 ### 新增

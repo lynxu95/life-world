@@ -157,6 +157,17 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 .dw-files .row{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);padding:3px 0}
 .dw-files .row b{font-weight:500;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dw-files .empty{font-size:12px;color:var(--faint)}
+.gw-wrap{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:18px;align-items:start}
+.gw-note{border-left:1px solid var(--line);padding-left:14px;font-size:12px;color:var(--muted)}
+.gw-note-h{font-weight:650;color:var(--fg);margin-bottom:6px}
+.gw-note-row{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
+.gw-note-row b{font-weight:500;color:var(--fg)}
+.gw-note code{font-size:11px}
+.gw-note-p{margin-top:8px;line-height:1.65}
+@media (max-width:900px){
+  .gw-wrap{grid-template-columns:minmax(0,1fr)}
+  .gw-note{border-left:0;border-top:1px solid var(--line);padding:10px 0 0}
+}
 .hb-care .muted{font-size:12px}
 .hb-care .hint{font-size:12px}
 .hb-care input[type=number]{font-size:12px;padding:6px 9px}
@@ -608,19 +619,31 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
       </section>
         <section>
           <div class="sec-head"><h2>网关 · OpenAI 兼容</h2><span class="spacer"></span><span class="sec-note" id="gw-note"></span></div>
-          <label class="check"><input type="checkbox" id="gw-enabled">启用网关</label>
-          <div class="row" style="margin-top:8px">
-            <label class="field compact">监听 <input type="text" id="gw-host" placeholder="127.0.0.1"></label>
-            <label class="field compact">端口 <input type="number" id="gw-port" placeholder="8100" style="width:88px"></label>
+          <div class="gw-wrap">
+            <div class="gw-main">
+              <label class="check"><input type="checkbox" id="gw-enabled">启用网关</label>
+              <div class="row" style="margin-top:8px">
+                <label class="field compact">监听 <input type="text" id="gw-host" placeholder="127.0.0.1"></label>
+                <label class="field compact">端口 <input type="number" id="gw-port" placeholder="8100" style="width:88px"></label>
+              </div>
+              <label class="field" style="margin-top:8px">模型<select id="gw-model"></select></label>
+              <label class="field" style="margin-top:8px">Token <input type="password" id="gw-token" placeholder="可空；填了就要 Bearer" style="flex:1"></label>
+              <div class="hint" id="gw-token-note" style="margin-top:4px"></div>
+              <label class="check"><input type="checkbox" id="gw-clear-token">清除已保存的 Token</label>
+              <label class="check" style="margin-top:10px"><input type="checkbox" id="gw-timeout">单轮超时</label>
+              <label class="field" style="margin-left:10px">秒 <input type="number" id="gw-timeout-sec" min="10" max="3600" style="width:88px"></label>
+              <div class="row" style="margin-top:10px"><button class="primary" id="gw-save">保存并重启</button><span class="muted" id="gw-hint"></span></div>
+              <div class="hint">给只认 OpenAI 协议的客户端用：baseURL 统一填 <code>http://本机IP:端口/v1</code>。客户端发来的历史会被丢弃，只认最后一条 user；人格和记忆以 life-world 为准。模型默认在线，选本地会慢（单并发，网关排队）。</div>
+            </div>
+            <aside class="gw-note">
+              <div class="gw-note-h">已适配终端 · 模型名怎么填</div>
+              <div class="gw-note-row"><b>AnimaVN</b><span><code>life-world-vn</code></span></div>
+              <div class="gw-note-row"><b>dsh-pet-indesktop</b><span><code>life-world-pet</code></span></div>
+              <div class="gw-note-row"><b>其他聊天终端</b><span><code>life-world</code></span></div>
+              <p class="gw-note-p">模型名只决定「终端约定」（表情标签 / 短回复），<b>不影响实际模型</b>——实际模型用左边的下拉选。</p>
+              <p class="gw-note-p">AnimaVN 的视觉小说档会要求她一句一行、行首带 <code>[微笑]</code> 这类表情标签；桌宠档要求回复短。填错不会报错，只会不像。</p>
+            </aside>
           </div>
-          <label class="field" style="margin-top:8px">模型<select id="gw-model"></select></label>
-          <label class="field" style="margin-top:8px">Token <input type="password" id="gw-token" placeholder="可空；填了就要 Bearer" style="flex:1"></label>
-          <div class="hint" id="gw-token-note" style="margin-top:4px"></div>
-          <label class="check"><input type="checkbox" id="gw-clear-token">清除已保存的 Token</label>
-          <label class="check" style="margin-top:10px"><input type="checkbox" id="gw-timeout">单轮超时</label>
-          <label class="field" style="margin-left:10px">秒 <input type="number" id="gw-timeout-sec" min="10" max="3600" style="width:88px"></label>
-          <div class="row" style="margin-top:10px"><button class="primary" id="gw-save">保存并重启</button><span class="muted" id="gw-hint"></span></div>
-          <div class="hint">给 AnimaVN / 桌宠这类只认 OpenAI 协议的客户端用：baseURL 填 <code>http://本机IP:端口/v1</code>。客户端发来的历史会被丢弃，只认最后一条 user；人格和记忆以 life-world 为准。模型默认在线，选本地会慢（单并发，网关排队）。</div>
         </section>
       </main>
     </div>
