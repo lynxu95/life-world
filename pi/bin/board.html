@@ -108,7 +108,7 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 .dash.memory{grid-template-columns:minmax(0,1fr)}
 .dash.single{grid-template-columns:minmax(0,1fr)}
 /* 扩展功能：模块内容不多，一行放两个；HA 字段多，占满一行 */
-#tab-ext .dash.single>main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
+#tab-ext .dash.single>main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:stretch}
 #tab-ext .dash.single>main>section:nth-child(3){grid-column:1 / -1}
 @media (max-width:900px){
   #tab-ext .dash.single>main{grid-template-columns:minmax(0,1fr)}
