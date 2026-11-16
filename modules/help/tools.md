@@ -35,7 +35,8 @@
 - 找设备：`ha({ action: "entities", query: "客厅" })`，也可以 `domain: "light"` / `"climate"` / `"sensor"`
 - 看一个：`ha({ action: "get", entity_id: "light.living_room" })`
 - 动手：`ha({ action: "call", service: "light.turn_on", entity_id: "light.living_room", data: { brightness_pct: 40 } })`
-- 让音箱说话：`ha({ action: "say", text: "该睡觉了" })`（要先在看板配好播报服务和设备）
+- 让音箱说话：`ha({ action: "say", text: "该睡觉了" })`；看板里填了播报服务/设备就按用户选的；留空才由 AI 自己挑：
+  先用 `ha({ action: "entities", domain: "media_player" })` 看音箱，再 `ha({ action: "say", text, service: "domain.service", entity_id: "media_player.xxx" })`。
 - 地址和令牌在 `机密抽屉/钥匙串/homeassistant.json`，看板「Home Assistant」里填；没配置时工具只提示、不报错。
   配了本地模型时云端模式读不到那个文件（纯在线部署可读），但 `ha` 工具照常能用（它只在进程内用令牌，不把令牌交给模型）。
 

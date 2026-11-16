@@ -583,8 +583,8 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="sec-head"><h2>Home Assistant</h2></div>
         <label class="field">地址 <input id="ha-url" type="text" placeholder="http://192.168.0.10:8123" style="flex:1;min-width:0"></label>
         <label class="field" style="margin-top:8px">令牌 <input id="ha-token" type="password" placeholder="长期访问令牌（已保存就留空）" style="flex:1;min-width:0"></label>
-        <label class="field" style="margin-top:8px">播报服务 <input id="ha-say-service" type="text" placeholder="xiaomi_miot.intelligent_speaker" style="flex:1;min-width:0"></label>
-        <label class="field" style="margin-top:8px">播报设备 <input id="ha-say-entity" type="text" placeholder="media_player.xxx（可空）" style="flex:1;min-width:0"></label>
+        <label class="field" style="margin-top:8px">播报服务 <input id="ha-say-service" type="text" placeholder="可空；AI 自己挑（xiaomi_miot.intelligent_speaker）" style="flex:1;min-width:0"></label>
+        <label class="field" style="margin-top:8px">播报设备 <input id="ha-say-entity" type="text" placeholder="可空；AI 自己挑 media_player" style="flex:1;min-width:0"></label>
         <div class="row" style="margin-top:10px">
           <button class="primary" id="ha-save">保存并测试</button>
           <span class="muted" id="ha-hint"></span>

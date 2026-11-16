@@ -4933,7 +4933,7 @@ export default function (pi: ExtensionAPI) {
   if (CHANNEL !== "group") addTool(pi, {
     name: "ha",
     label: "Home Assistant",
-    description: "控制家里的 Home Assistant。action：status=连接自检；entities=找实体（可给 query / domain）；get=看一个实体；call=调用服务（service 写 domain.service，如 light.turn_on，entity_id、data 可选）；say=让音箱播报（用 life-world.json 里 homeAssistant.sayService / sayEntity）。没配置就返回提示，不报错。",
+    description: "控制家里的 Home Assistant。action：status=连接自检；entities=找实体（可给 query / domain）；get=看一个实体；call=调用服务（service 写 domain.service，如 light.turn_on，entity_id、data 可选）；say=让音箱播报（看板里填了播报服务和设备就用那套；留空时用调用参数 service / entity_id，再空就列出来自己挑）。没配置就返回提示，不报错。",
     parameters: {
       type: "object",
       properties: {
@@ -5001,13 +5001,23 @@ export default function (pi: ExtensionAPI) {
       if (action === "say") {
         const text = String(params?.text || "").trim()
         if (!text) return ok("say 需要 text。")
-        if (!/^[a-z0-9_]+\.[a-z0-9_]+$/.test(cfg.sayService)) return ok("还没配播报服务：life-world.json 里 homeAssistant.sayService 写成 domain.service，比如 xiaomi_miot.intelligent_speaker")
-        const [dom, name] = cfg.sayService.split(".")
+        // 看板里填了就以用户选的为准；留空时才用调用参数、再不行自己挑
+        const svc = String(cfg.sayService || params?.service || "").trim()
+        const entity = String(cfg.sayEntity || params?.entity_id || "").trim()
+        if (!/^[a-z0-9_]+\.[a-z0-9_]+$/.test(svc)) {
+          const cand = await haRequest("/api/states")
+          const players = (Array.isArray(cand.data) ? cand.data : [])
+            .filter((st: any) => String(st?.entity_id || "").startsWith("media_player."))
+            .slice(0, 10)
+            .map((st: any) => `${st.entity_id}（${haName(st)}）`)
+          return ok(`还没定播报服务和设备。可以先用 ha({ action: "entities", domain: "media_player" }) 看音箱，再调用 ha({ action: "say", text: "…", service: "domain.service", entity_id: "media_player.xxx" })。${players.length ? `\n现在的播放器：${players.join("、")}` : ""}`)
+        }
+        const [dom, name] = svc.split(".")
         const body: any = { ...(params?.data && typeof params.data === "object" ? params.data : {}), text }
-        if (cfg.sayEntity) body.entity_id = cfg.sayEntity
+        if (entity) body.entity_id = entity
         const r = await haRequest(`/api/services/${dom}/${name}`, { method: "POST", body: JSON.stringify(body) })
         if (!r.ok) return ok(`没播成：${r.error}`)
-        return ok(`已让音箱播报：${text.slice(0, 50)}`)
+        return ok(`已让 ${entity || "音箱"} 播报：${text.slice(0, 50)}（服务 ${svc}）`)
       }
       return ok(`不认识的 action：${action}（可用 status / entities / get / call / say）`)
     },

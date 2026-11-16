@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.15.10] - 2026-11-16
+
+### 改进
+
+- **HA 播报不用预先配置**：`homeAssistant.sayService / sayEntity` 可以留空。
+  看板里填了播报服务/设备就以用户选的为准；留空时用调用参数，再空就列出当前 `media_player` 让 AI 自己挑，
+  不再直接报"还没配播报服务"。看板里这两个框也标成可空。
+
 ## [1.15.9] - 2026-11-16
 
 ### 新增
