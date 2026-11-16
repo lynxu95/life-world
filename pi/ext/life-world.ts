@@ -757,7 +757,7 @@ function currentForm(): { line: string; label: string } | null {
   return { line: `化形：${free || "自由"}（在线 · 未登记，${free ? "自己挑的" : "自由决定"}）`, label: free || "自由" }
 }
 function currentFormLine(): string { return currentForm()?.line || "" }
-/** 当前化形在《化形描述》里写下的细节；群聊不带（可能是私密口味） */
+/** 当前化形在《化形描述》里写下的细节；只在 form() 里展示，状态行不每轮注入 */
 function currentFormDetail(form: { label: string } | null = currentForm()): string {
   if (CHANNEL === "group" || ROLE === "group" || !form) return ""
   const d = formDetailFor(form.label)
@@ -773,9 +773,8 @@ function stateText(withMood = true): string {
   const wx = weatherText()
   const form = currentForm()
   const parts = [currentModelLine(), form ? form.line : "", ...modes, wx ? `天气：${wx}` : "", withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
-  // 化形描述单独一行，不塞进括号组：正文里的括号/分号不会破坏状态行
-  const formDetail = currentFormDetail(form)
-  return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）${formDetail ? `\n${formDetail}` : ""}`
+  // 化形只报名字；外观描述留在《化形表》里，不每轮注入
+  return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）`
 }
 
 // ———————— 归档 / 记忆 ————————
