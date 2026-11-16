@@ -693,6 +693,13 @@ function loadArchived(): void {
   } catch { /* ignore */ }
 }
 
+/** 网关的终端约定不是用户原话：在归档/时间线里剥掉 */
+function stripProfileHint(text: string): string {
+  const t = String(text || "")
+  if (!t.startsWith("【终端约定")) return t
+  const i = t.indexOf("\n\n")
+  return i >= 0 ? t.slice(i + 2).trim() : ""
+}
 function cleanUserText(text: string): string {
   return text
     .replace(/^\[本地时间 [^\]]*\]\s*/, "")
@@ -864,7 +871,7 @@ function archive(message: any): void {
     if (role === "user") {
       if (isAfterglow(text)) return
       if (text.includes(WAKE_MARK)) return
-      text = cleanUserText(text)
+      text = cleanUserText(stripProfileHint(text))
     }
     if (!text) return
     const t = new Date(message?.timestamp || Date.now()).toISOString()
@@ -3906,6 +3913,13 @@ export default function (pi: ExtensionAPI) {
 
   // 云端模式：别碰机密抽屉（拦常见路数，剩下的靠自觉）
   pi.on("tool_call", async (event: any, ctx: any) => {
+    // 网关会话只聊天 + 查记忆：这里做运行时兜底，别只依赖 pi 的命令行过滤
+    if (ROLE === "api") {
+      const allow = new Set(["memory_search", "memory_day", "memory_timeline", "memory_write", "weather"])
+      const tool = String(event?.toolName || "")
+      if (!allow.has(tool)) return { block: true, reason: `网关会话（api）只能聊天和查记忆，不能用 ${tool || "这个工具"}。` }
+      return
+    }
     const o = config().models
     const curModel = modelIdOf(ctx)
     const onLocal = !!o.local && curModel === o.local
@@ -4045,7 +4059,8 @@ export default function (pi: ExtensionAPI) {
     const wantMemory = !memoryHydrated && !cloudActive
     if (wantMemory) memoryHydrated = true
     const memory = wantMemory ? memoryBlock() : ""
-    const content = [stateText(!cloudActive), memory].filter(Boolean).join("\n\n")
+    const timeline = timelineInjection()
+    const content = [stateText(!cloudActive), timeline, memory].filter(Boolean).join("\n\n")
     if (content) {
       patch.message = {
         customType: memory ? "life-world-bootstrap" : "life-world-state",
@@ -4119,9 +4134,123 @@ export default function (pi: ExtensionAPI) {
     if (a || b || filtered) return { messages: event.messages }
   })
 
+  // ———————— 多窗口时间线：谁在哪个窗口说了什么，交接班时对一下表 ————————
+  const TIMELINE_FILE = join(ROOT, "timeline.jsonl")
+  const TIMELINE_KEEP_MS = 48 * 3_600_000
+  const TIMELINE_SEEN_DIR = join(ROOT, "timeline-seen")
+  // 终端可以同时开好几个，cli 用 pid 区分；群聊不参与（公共场合不当交接班窗口）
+  const timelineKey = ROLE === "cli" ? `cli-${process.pid}` : roleKey
+  let timelinePrunedAt = 0
+  interface TimelineEvent { t: string; roleKey: string; who: string; text: string }
+  const timelineTextOf = (message: any): string => {
+    const c = message?.content
+    if (typeof c === "string") return c
+    if (Array.isArray(c)) return c.filter((p: any) => p && p.type === "text").map((p: any) => String(p.text || "")).join(" ")
+    return ""
+  }
+  function readTimeline(): TimelineEvent[] {
+    try {
+      if (!existsSync(TIMELINE_FILE)) return []
+      const cutoff = Date.now() - TIMELINE_KEEP_MS
+      const out: TimelineEvent[] = []
+      for (const line of readFileSync(TIMELINE_FILE, "utf8").split("\n")) {
+        if (!line.trim()) continue
+        try {
+          const e = JSON.parse(line) as TimelineEvent
+          if (!e?.t || !e.roleKey || !e.text) continue
+          e.text = Array.from(String(e.text)).slice(0, 100).join("")
+          const ts = Date.parse(e.t)
+          if (!Number.isFinite(ts) || ts < cutoff) continue
+          out.push(e)
+        } catch { /* 跳过坏行 */ }
+      }
+      return out.sort((a, b) => a.t.localeCompare(b.t))
+    } catch { return [] }
+  }
+  function pruneTimeline(): void {
+    // 只让 home 负责重写，避免多进程同时截断文件；读的时候反正还会按 48h 过滤
+    if (ROLE !== "home") return
+    if (Date.now() - timelinePrunedAt < 3_600_000) return
+    timelinePrunedAt = Date.now()
+    try {
+      if (!existsSync(TIMELINE_FILE)) return
+      const before = statSync(TIMELINE_FILE).mtimeMs
+      const cutoff = Date.now() - TIMELINE_KEEP_MS
+      const keep = readFileSync(TIMELINE_FILE, "utf8").split("\n").filter((line) => {
+        if (!line.trim()) return false
+        try { const t = Date.parse(JSON.parse(line).t); return Number.isFinite(t) && t >= cutoff } catch { return false }
+      })
+      // 读的这几毫秒里别的窗口又追加了：这轮放弃，下次再来，别把新行覆盖掉
+      if (statSync(TIMELINE_FILE).mtimeMs !== before) return
+      atomicWrite(TIMELINE_FILE, keep.length ? keep.join("\n") + "\n" : "")
+    } catch { /* ignore */ }
+  }
+  function appendTimeline(message: any, event?: any): void {
+    if (CHANNEL === "group" || ROLE === "group") return
+    const role = String(message?.role || "")
+    if (role !== "user" && role !== "assistant") return
+    // 内部注记不进时间线：隐藏状态/唤醒/余波/工具中间态
+    if (String(event?.customType || message?.customType || "").startsWith("life-world-")) return
+    if (role === "assistant" && (message?.stopReason === "toolUse" || message?.stopReason === "error")) return
+    let raw = timelineTextOf(message)
+    if (role === "user") raw = cleanUserText(stripProfileHint(raw))
+    if (raw.startsWith(WAKE_MARK) || /^【余波】/.test(raw)) return
+    let text = raw.replace(/\s+/g, " ").trim()
+    if (!text) return
+    const ev: TimelineEvent = {
+      t: new Date().toISOString(), roleKey: timelineKey, who: role === "user" ? "对方" : "我",
+      text: Array.from(text).slice(0, 100).join(""),
+    }
+    try {
+      mkdirSync(ROOT, { recursive: true })
+      appendFileSync(TIMELINE_FILE, JSON.stringify(ev) + "\n", { mode: 0o600 })
+      pruneTimeline()
+    } catch { /* ignore */ }
+  }
+  const hhmm = (iso: string): string => {
+    const d = new Date(iso)
+    if (!Number.isFinite(d.getTime())) return ""
+    const h = String(d.getHours()).padStart(2, "0"), m = String(d.getMinutes()).padStart(2, "0")
+    return dayOf(d) === dayOf() ? `${h}:${m}` : `${dayOf(d).slice(5)} ${h}:${m}`
+  }
+  interface TimelineCursor { t: string; n: number }
+  const cursorFile = () => join(TIMELINE_SEEN_DIR, `${safeRoleKey(timelineKey)}.json`)
+  function timelineInjection(): string {
+    try {
+      // 群聊是公共场合：不读别人的时间线，自己的事也不往里带
+      if (CHANNEL === "group" || ROLE === "group") return ""
+      const cursor = readJson<TimelineCursor | null>(cursorFile(), null)
+      const eligible = readTimeline().filter((e) => e.roleKey !== timelineKey && !String(e.roleKey).startsWith("group-"))
+      let rest = eligible
+      if (cursor?.t) {
+        const i = rest.findIndex((e) => e.t >= cursor.t)
+        rest = i < 0 ? [] : rest.slice(i)
+        let skipped = 0
+        while (skipped < (cursor.n || 0) && rest.length && rest[0].t === cursor.t) { rest.shift(); skipped++ }
+      }
+      if (!rest.length) return ""
+      const recent = rest.slice(-10)
+      const older = rest.slice(0, Math.max(0, rest.length - recent.length))
+      const byRole = new Map<string, number>()
+      for (const e of older) byRole.set(e.roleKey, (byRole.get(e.roleKey) || 0) + 1)
+      const lines = recent.map((e) => `- ${hhmm(e.t)} ${e.roleKey} · ${e.who}：${e.text}`)
+      const olderLine = older.length
+        ? `更早还有 ${older.length} 条（${[...byRole].map(([k, n]) => `${k} ${n}`).join("、")}），最早 ${hhmm(older[0].t)}`
+        : ""
+      const last = recent[recent.length - 1]
+      const n = eligible.filter((e) => e.t === last.t).length
+      try {
+        mkdirSync(TIMELINE_SEEN_DIR, { recursive: true, mode: 0o700 })
+        atomicWrite(cursorFile(), JSON.stringify({ t: last.t, n }, null, 2))
+      } catch { /* ignore */ }
+      return `【时间线】${cursor?.t ? `自你上次（${hhmm(cursor.t)}）之后` : "你离开这段时间"}：\n${lines.join("\n")}${olderLine ? "\n" + olderLine : ""}`
+    } catch { return "" }
+  }
+
   pi.on("message_end", async (event: any, ctx: any) => {
     const message = event?.message ?? event
     archive(message)
+    appendTimeline(message, event)
     if (message?.role !== "assistant") return
     const stop = String(message?.stopReason || "")
     // 工具轮只是中间态；正常收尾/出错才算这一轮结束
@@ -4149,7 +4278,7 @@ export default function (pi: ExtensionAPI) {
   // 上下文超限：本轮结束后自动开新会话（QQ/群聊由桥接层换会话并重发，不在这里做）
   pi.on("agent_settled", async (event: any, ctx: any) => {
     // 连续在场：这一轮说完了，接下一跳（普通心跳不受影响）
-    void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
+    if (ROLE === "home" || ROLE === "qq") void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
     lastTurnEndAt = Date.now()
     if (contextOverflowPending) {
       contextOverflowPending = false

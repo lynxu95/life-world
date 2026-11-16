@@ -51,6 +51,7 @@
 | 换模型 | `switch_model` / 看板 / `lwctl set` |
 | 改代码 | `patch`（行级哈希编辑，不用抄原文）；`edit` 兜底 |
 | 家里 | `ha` 查实体 / 调服务 / 让音箱说话（看板「Home Assistant」配地址和令牌，默认关） |
+| 接别的终端 | OpenAI 兼容网关 `/v1`（AnimaVN / 桌宠等），默认关；看板「扩展功能」页配置 |
 | gal 模式 | 用户说「接下来由你主导」或「进入 gal 模式」；只在终端 TUI 有面板 |
 
 工具都是**直接按名字调用**，例如：
@@ -178,7 +179,7 @@ lwctl status                 # 各会话当前模型
 lwctl tail qq|home|debug     # 看日志
 lwctl backup [--private]     # 世界快照
 lwctl usage [天数]            # token / 费用 / 切换次数
-lwctl restart [qq|home|all]  # 重启常驻窗口
+lwctl restart [qq|home|gateway|all]  # 重启常驻窗口
 lwctl start                  # 起全部常驻（看板 + tmux 里的 qq / home，按平台挑脚本）
 lwctl stop                   # 停全部常驻
 lwctl update [--no-restart]  # 拉代码 + 重装脚本/提示词；数据/配置不动

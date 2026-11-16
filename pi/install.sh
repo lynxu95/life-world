@@ -137,6 +137,7 @@ ensure_world() {
   cp "$SRC"/bin/board.html "$ROOT/bin/board.html" 2>/dev/null || true
   cp "$SRC"/bin/nebula.jpg "$ROOT/bin/nebula.jpg" 2>/dev/null || true
   cp "$SRC"/bin/weather.mjs "$ROOT/bin/weather.mjs" 2>/dev/null || true
+  cp "$SRC"/bin/lw-gateway.mjs "$ROOT/bin/lw-gateway.mjs" 2>/dev/null || true
   # 三平台的启动脚本（不注册开机项，自己决定什么时候跑）
   cp "$SRC"/bin/start-*.sh "$ROOT/bin/" 2>/dev/null || true
   chmod +x "$ROOT/bin"/start-*.sh 2>/dev/null || true

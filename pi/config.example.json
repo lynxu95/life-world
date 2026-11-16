@@ -148,5 +148,15 @@
   },
   "privacy": {
     "drawer": true
+  },
+  "gateway": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8100,
+    "token": "",
+    "model": "cloud",
+    "timeoutEnabled": true,
+    "timeoutSec": 120,
+    "allowOrigins": []
   }
 }

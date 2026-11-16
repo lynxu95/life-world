@@ -109,10 +109,12 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 .dash.single{grid-template-columns:minmax(0,1fr)}
 /* 扩展功能：模块内容不多，一行放两个；HA 字段多，占满一行 */
 #tab-ext .dash.single>main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:stretch}
-#tab-ext .dash.single>main>section:nth-child(3){grid-column:1 / -1}
+#tab-ext .dash.single>main>section:nth-child(3),
+#tab-ext .dash.single>main>section:nth-child(4){grid-column:1 / -1}
 @media (max-width:900px){
   #tab-ext .dash.single>main{grid-template-columns:minmax(0,1fr)}
-  #tab-ext .dash.single>main>section:nth-child(3){grid-column:auto}
+  #tab-ext .dash.single>main>section:nth-child(3),
+  #tab-ext .dash.single>main>section:nth-child(4){grid-column:auto}
 }
 #tab-memory .star{--brain-h:clamp(460px,62vh,720px)}
 @media (max-width:1080px){
@@ -604,6 +606,22 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <label class="check" style="margin-top:10px"><input type="checkbox" id="ha-enabled">启用 Home Assistant</label>
         <div class="hint">令牌存在 机密抽屉/钥匙串/homeassistant.json（有本地模型时云端读不到；不走模型上下文）；地址或令牌留空 = 不改原来的；换地址要重新填一次令牌。</div>
       </section>
+        <section>
+          <div class="sec-head"><h2>网关 · OpenAI 兼容</h2><span class="spacer"></span><span class="sec-note" id="gw-note"></span></div>
+          <label class="check"><input type="checkbox" id="gw-enabled">启用网关</label>
+          <div class="row" style="margin-top:8px">
+            <label class="field compact">监听 <input type="text" id="gw-host" placeholder="127.0.0.1"></label>
+            <label class="field compact">端口 <input type="number" id="gw-port" placeholder="8100" style="width:88px"></label>
+          </div>
+          <label class="field" style="margin-top:8px">模型 <input type="text" id="gw-model" placeholder="cloud / local / provider/model" style="flex:1"></label>
+          <label class="field" style="margin-top:8px">Token <input type="password" id="gw-token" placeholder="可空；填了就要 Bearer" style="flex:1"></label>
+          <div class="hint" id="gw-token-note" style="margin-top:4px"></div>
+          <label class="check"><input type="checkbox" id="gw-clear-token">清除已保存的 Token</label>
+          <label class="check" style="margin-top:10px"><input type="checkbox" id="gw-timeout">单轮超时</label>
+          <label class="field" style="margin-left:10px">秒 <input type="number" id="gw-timeout-sec" min="10" max="3600" style="width:88px"></label>
+          <div class="row" style="margin-top:10px"><button class="primary" id="gw-save">保存并重启</button><span class="muted" id="gw-hint"></span></div>
+          <div class="hint">给 AnimaVN / 桌宠这类只认 OpenAI 协议的客户端用：baseURL 填 <code>http://本机IP:端口/v1</code>。客户端发来的历史会被丢弃，只认最后一条 user；人格和记忆以 life-world 为准。模型默认在线，选本地会慢（单并发，网关排队）。</div>
+        </section>
       </main>
     </div>
   </div>
@@ -962,6 +980,45 @@ $("dw-enabled")?.addEventListener("change", async () => {
   else { $("dw-enabled").checked = !on; $("dw-hint").textContent = "保存失败，稍后再试" }
 })
 
+let gwTouched = false
+for (const id of ["gw-host", "gw-port", "gw-model", "gw-token", "gw-timeout-sec"]) $(id)?.addEventListener("input", () => { gwTouched = true })
+for (const id of ["gw-enabled", "gw-timeout", "gw-clear-token"]) $(id)?.addEventListener("change", () => { gwTouched = true })
+async function loadGateway() {
+  const d = await getJson("/api/gateway").catch(() => null)
+  if (!d) return
+  if (!gwTouched) {
+    if (document.activeElement !== $("gw-enabled")) $("gw-enabled").checked = !!d.enabled
+    const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v }
+    set("gw-host", d.host || "")
+    set("gw-port", d.port || "")
+    set("gw-model", d.model || "cloud")
+    set("gw-timeout-sec", d.timeoutSec || 120)
+    if (document.activeElement !== $("gw-timeout")) $("gw-timeout").checked = d.timeoutEnabled !== false
+  }
+  const tn = $("gw-token-note")
+  if (tn) tn.textContent = d.tokenSet ? "Token 已设置；留空不改，勾下面的清除才会删。" : "还没有 Token。"
+  const note = $("gw-note")
+  if (note) note.textContent = d.enabled ? `${d.host}:${d.port}` : "未启用"
+}
+$("gw-save")?.addEventListener("click", async () => {
+  const hint = $("gw-hint")
+  hint.textContent = "保存中…"
+  const body = {
+    enabled: $("gw-enabled").checked,
+    host: $("gw-host").value.trim(),
+    port: Number($("gw-port").value) || 0,
+    model: $("gw-model").value.trim(),
+    token: $("gw-token").value.trim(),
+    clearToken: $("gw-clear-token").checked,
+    timeoutEnabled: $("gw-timeout").checked,
+    timeoutSec: Number($("gw-timeout-sec").value) || 120,
+  }
+  const r = await postJson("/api/gateway", body).catch(() => null)
+  if (!r) { hint.textContent = "保存失败，稍后再试"; return }
+  hint.textContent = r.msg || (r.ok ? "已保存" : "保存失败")
+  if (r.ok) { $("gw-token").value = ""; $("gw-clear-token").checked = false; gwTouched = false; void loadGateway() }
+})
+
 async function loadDrawerFiles() {
   const box = $("dw-files")
   if (!box) return
@@ -1049,6 +1106,7 @@ async function loadOverview() {
     renderDrawer(d.drawer)
     void loadDrawerFiles()
     void loadHa()
+    void loadGateway()
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode
       $("mode-hint").textContent = `当前：${m === "local" ? "本地" : m === "cloud" ? "在线" : m === "none" ? "无会话" : "混合"}`

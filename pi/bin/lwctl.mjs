@@ -356,12 +356,14 @@ function cmdRestart(target) {
     }
     results.push({ name, ok: r.status === 0, err: String(r.stderr || "").trim() })
   }
-  if (target === "qq" || target === "all") run("qq", "pi-qq-bridge.mjs")
-  if (target === "home" || target === "all") run("home", "pi-home-rpc.mjs")
+  // 网关默认关着：只有配置里打开时才起
+  let gatewayOn = false
+  try { gatewayOn = JSON.parse(readFileSync(join(ROOT, "life-world.json"), "utf8")).gateway?.enabled === true } catch { /* ignore */ }
+  if (target === "gateway" || (target === "all" && gatewayOn)) run("gateway", "lw-gateway.mjs")
   for (const r of results) {
     console.log(`${r.ok ? "✓" : "✗"} ${r.name}${r.ok ? "" : "：" + (r.err || "tmux 执行失败")}`)
   }
-  if (!results.length) { console.log("目标只能是 qq / home / all"); return false }
+  if (!results.length) { console.log("目标只能是 qq / home / gateway / all（gateway 关闭时 all 不含它）"); return false }
   return results.every((r) => r.ok)
 }
 
@@ -555,7 +557,7 @@ function cmdUpdate(args = []) {
   console.log(`✓ 已更新到 ${neu.slice(0, 7)}；数据在 ${join(ROOT, "worlds/default")}，配置在 ${cfg}，均未改动。`)
   if (noRestart) { console.log("按 --no-restart 跳过重启；下次 pi / qq / home 启动时生效。"); return finish(true, `已更新到 ${neu.slice(0, 7)}（未重启）`) }
   const self = process.argv[1]
-  for (const sub of [["board", "restart"], ["restart", "qq"], ["restart", "home"]]) {
+  for (const sub of [["board", "restart"], ["restart", "qq"], ["restart", "home"], ["restart", "gateway"]]) {
     const r = spawnSync(process.execPath, [self, ...sub], { stdio: "inherit", env: process.env })
     if (r.status !== 0) console.warn(`⚠ lwctl ${sub.join(" ")} 失败（exit ${r.status}）`)
   }
@@ -822,7 +824,7 @@ if (!cmd && stdin.isTTY) {
   lwctl backup [--private]           打快照到 worlds/backup（git 增量）
   lwctl backups                      看最近快照
   lwctl tail [qq|home|debug] [行数]  看日志
-  lwctl restart [qq|home|all]        重启常驻窗口
+  lwctl restart [qq|home|gateway|all]  重启常驻窗口
   lwctl start                        起全部常驻（看板 + tmux 里的 qq / home，按平台挑脚本）
   lwctl stop                         停全部常驻
   lwctl check-update [--json] [--quiet] [--branch <分支>]

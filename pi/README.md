@@ -201,6 +201,31 @@ pi          # TUI，已经带 life-world
 
 `机密抽屉/用户画像-私密.md` **不预加载**：本地模式只提示位置，需要时自己 `read`；云端模式下整个 `机密抽屉/` 禁止 `read / write / edit / patch / grep / find / ls / bash`，递归翻 world 目录也会拦；碰到会提示切回本地。没配 `models.local` 时抽屉整体停用；看板「扩展功能」页还能用 `privacy.drawer` 一键关掉隔离。
 
+### 多窗口时间线
+
+每个窗口（home / qq / cli / api）在每轮结束时往 `timeline.jsonl` 追加一行 `{t, roleKey, who, text(100 字)}`，只保留 48 小时；群聊不参与。
+每次 `before_agent_start` 读游标（`timeline-seen/<窗口>.json`）之后、**别的窗口**的事件，最多注入最近 10 条，更早的压成一句「更早还有 N 条（home 4、qq 17），最早 18:20」。
+它只是交接班时对一下表，不是长期记忆；更早的靠 `memory_search`。
+
+### OpenAI 兼容网关（默认关）
+
+给 AnimaVN、桌宠这类只认 OpenAI 协议的客户端一个 baseURL：
+
+```json
+"gateway": { "enabled": false, "host": "127.0.0.1", "port": 8100, "token": "", "model": "cloud", "timeoutEnabled": true, "timeoutSec": 120 }
+```
+
+- `GET /v1/models`：`life-world` / `life-world-vn`（视觉小说）/ `life-world-pet`（桌宠）
+- `POST /v1/chat/completions`：stream / 非 stream 都支持；**客户端历史全部丢弃**，只认最后一条 user；
+  人格和记忆以 life-world 为准，客户端 system prompt 不生效
+- 跑一台专属 pi 会话（`role=api`），和 QQ/home 共用同一套世界数据；不跑后台任务
+- `model` 选 `local` / `cloud` / `provider/model`；本地单并发，网关排队，慢是正常的
+- `timeoutEnabled=false` 时无限等（本地模型用）；监听地址可与看板一样改成局域网地址，
+  但**监听非本机地址时必须设 token**，否则网关拒绝启动
+- 网关的 `api` 会话在运行时只放行 `memory_search / memory_day / memory_timeline / memory_write / weather`，
+  其余工具（含 shell、read/写文件、主动找人、家居、切模型、技能、后台任务）一律拦截
+- 开关和参数在看板「扩展功能」页的网关卡片里改，保存后自动重启网关
+
 触发自动切换的规则：模型无响应（`stopReason=error`）立即切；工具连续失败两次，从本地切到云端看看情况；`/model` 手动切换由 `model_select` 同步开关抽屉。
 
 ### 会话查看与热切换（lwctl）
@@ -220,7 +245,7 @@ lwctl backup --gc                  # 压缩快照仓库
 lwctl backup --reset               # 彻底删掉快照目录（手动清理用）
 lwctl backups                      # 看最近快照
 lwctl tail [qq|home|debug] [行数]   # 看日志
-lwctl restart [qq|home|all]        # 重启常驻窗口
+lwctl restart [qq|home|gateway|all]        # 重启常驻窗口
 lwctl start                        # 起全部常驻（按平台挑 start-*.sh）
 lwctl stop                         # 停全部常驻
 lwctl update [--no-restart] [--project] [--branch <分支>]

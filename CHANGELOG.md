@@ -15,6 +15,23 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.16.0] - 2026-11-16
+
+### 新增
+
+- **多窗口时间线**：home / QQ / 终端 / 网关共用一条 `timeline.jsonl`（每轮一行、截断 100 字、保留 48 小时）。
+  每个窗口用游标记录读到哪，下一轮只注入「别的窗口」的新事件：最近 10 条详细，更早的压成一句「更早还有 N 条」。
+  解决"home 干了啥 QQ 不知道、三个窗口各聊各的"，比原来的窗口计数/记忆检索更连续；不做隐私过滤、不与记忆注入去重。
+  群聊不参与（不读别人的时间线，自己的也不往里带）；内部注记/唤醒/余波/工具中间态不进时间线。
+- **OpenAI 兼容网关**（默认关）：给 AnimaVN、桌宠这类只认 OpenAI 协议的客户端一个 baseURL。
+  - `GET /v1/models`、`POST /v1/chat/completions`（stream / 非 stream）
+  - 客户端历史全部丢弃，只取最后一条 user；人格和客户端 system prompt 一律以 life-world 为准
+  - 专属 `role=api` 会话，与 QQ/home 共享同一套记忆和身份；不跑后台任务
+  - 模型可选 local / cloud / provider/model，默认在线；超时可关（本地模型）
+  - 监听地址/端口/token 可配；**监听非本机地址必须设 token**，否则拒绝启动；默认不发 CORS 头
+  - `role=api` 运行时只放行 memory_* 和 weather，其余工具（shell / read / 写文件 / 主动找人 / 家居 / 切模型…）一律拦截
+  - 看板「扩展功能」页有卡片（可清 token）；`lwctl restart gateway`、`lwctl update` 会一并重启
+
 ## [1.15.12] - 2026-11-16
 
 ### 修复

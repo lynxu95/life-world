@@ -47,6 +47,8 @@
 | 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换；`local_protect` 本地保护模式（临时只用在线） |
 | 代码编辑 | `patch` 行级哈希编辑：只给 tag + 行号，不用抄原文；`edit` 兜底 |
 | Home Assistant | 默认关；看板填地址+令牌（存 `机密抽屉/钥匙串`），`ha` 工具查实体/调服务/让音箱说话 |
+| 多窗口时间线 | 每个窗口每轮追加一行（48 小时），交接班时注入别的窗口最近 10 条 + 「更早还有 N 条」；群聊不参与 |
+| OpenAI 网关 | 默认关；给 AnimaVN / 桌宠这类客户端一个 baseURL（`/v1`），人格与记忆仍以 life-world 为准 |
 | 机密抽屉 | 切云端前收起前文、云端禁读，切回本地恢复；看板「扩展功能」页有总开关 |
 | 主动关怀 | 随机想起、安静时段、早晨天气 |
 | QQ 桥接 | 私聊 + 群聊；群聊优先在线模型；图片自动缩、文件不限大小；群会话闲置回收 |
@@ -253,6 +255,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "weatherEnabled": true, "weatherCity": "上海"
   },
   "homeAssistant": { "enabled": false, "sayService": "", "sayEntity": "" },
+  "gateway": { "enabled": false, "host": "127.0.0.1", "port": 8100, "token": "", "model": "cloud", "timeoutEnabled": true, "timeoutSec": 120, "allowOrigins": [] },
   "backup": { "enabled": true, "hour": 4, "includePrivate": false },
   "guard": { "enabled": true, "staleSeconds": 300, "cooldownMinutes": 10, "allowRestart": true },
   "cleanup": { "tmpMaxAgeHours": 72 },
@@ -528,7 +531,7 @@ lwctl backups               # 最近快照
 lwctl backup --gc           # 压缩快照仓库
 lwctl backup --reset        # 删除快照目录（手动清理）
 lwctl tail [qq|home|debug]  # 看日志
-lwctl restart [qq|home|all] # 重启常驻窗口
+lwctl restart [qq|home|gateway|all] # 重启常驻窗口
 lwctl start                 # 起全部常驻（看板 + tmux 里的 qq / home，按平台挑脚本）
 lwctl stop                  # 停全部常驻
 lwctl update [--no-restart] [--project] [--branch <分支>]
@@ -558,7 +561,7 @@ lwctl board stop                # 停止
 页面分「概览 / 日程 / 记忆 / 扩展功能」四个标签页：
 
 - **概览**：会话（含「正在忙 · 多久 · 工具」和「中断」按钮）、**模型设置**、快捷操作、健康、看板监听、7 天用量、**AI 日程**时间线。
-- **扩展功能**：**机密抽屉总开关**（含抽屉里的文件列表，跳过聊天备份）、**心跳与关怀**（心跳开关、单串时长、随机想起、安静时段）、**Home Assistant**（地址+令牌+播报）。
+- **扩展功能**：**机密抽屉总开关**（含抽屉里的文件列表，跳过聊天备份）、**心跳与关怀**（心跳开关、单串时长、随机想起、安静时段）、**Home Assistant**（地址+令牌+播报）、**OpenAI 网关**（监听/端口/模型/token/超时）。
 - 顶栏「检查更新」：发现新版本会变成「更新插件（N）」，点一下就更新并自动重启看板。
 - **记忆**：**记忆星图**（Canvas 3D + 跟随旋转的星云背景 + 中心浓/外侧薄的柔焦雾 + 上层分形云团；中心白色主星是自动注入的 identity 文档——我是谁/心情/用户画像/模型规范，主星之间是白色虚线、轻微呼吸发光；主星外还有一圈**辅助文档**（我是谁-待沉淀/我是谁-存档/心情-存档），比主星小一圈，画成空心虚线环 + 亮核、拖一段彗尾、脉冲式发光，像核外电子一样高速绕行（三颗各占一个倾斜的轨道面，转速约主星七倍；待沉淀暖珊瑚，存档冷灰蓝，各自一条极淡虚线连回父星）；长期印象环外推让出这层；内外圈差速旋转（内快外慢，平均速度不变）；印象是金色大星，金色虚线连真实来源；召回边随机跑神经电流，普通边快、金色/琥珀边慢；点击节点沿边放电；悬停降速并聚焦邻居，普通节点与主星悬停都显示标题，主星选中也显示；支持拖拽/缩放/全屏）、**印象墙**（含「立即整理」，不影响 05:00 的每日整理）、FTS5 记忆检索、日记/某天、日志、手动快照。
 

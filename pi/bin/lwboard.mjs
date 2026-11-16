@@ -958,6 +958,65 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, { ok: true, localPin: { enabled, at: doc.at, reason: doc.reason }, msg: enabled ? "已锁定：正在把会话切到本地" : "已解除" })
     }
+    if (req.method === "GET" && url.pathname === "/api/gateway") {
+      const cfg = readJson(CONFIG_FILE, {})
+      const gw = cfg.gateway || {}
+      return json(res, 200, {
+        ok: true,
+        enabled: gw.enabled === true,
+        host: gw.host || "127.0.0.1",
+        port: Number(gw.port) || 8100,
+        tokenSet: !!gw.token,
+        model: gw.model || "cloud",
+        timeoutEnabled: gw.timeoutEnabled !== false,
+        timeoutSec: Number(gw.timeoutSec) || 120,
+      })
+    }
+    if (req.method === "POST" && url.pathname === "/api/gateway") {
+      const data = await body(req)
+      const known = ["enabled", "host", "port", "model", "token", "clearToken", "timeoutEnabled", "timeoutSec"]
+      if (!known.some((k) => k in data)) return json(res, 400, { ok: false, msg: "没有可保存的字段（body 解析失败？）" })
+      let cfg = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
+      cfg.gateway = cfg.gateway && typeof cfg.gateway === "object" && !Array.isArray(cfg.gateway) ? cfg.gateway : {}
+      if (typeof data.enabled === "boolean") cfg.gateway.enabled = data.enabled
+      if (typeof data.host === "string" && data.host.trim()) {
+        const host = data.host.trim()
+        if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(host) && !/^\[?[0-9a-fA-F:]+\]?$/.test(host)) {
+          return json(res, 400, { ok: false, msg: "监听地址写错了（examples: 127.0.0.1 / 0.0.0.0 / 192.168.0.10）" })
+        }
+        cfg.gateway.host = host
+      }
+      if (typeof data.port === "number" && data.port > 0 && data.port < 65536) cfg.gateway.port = Math.round(data.port)
+      else if ("port" in data) return json(res, 400, { ok: false, msg: "端口要在 1~65535 之间" })
+      if (typeof data.model === "string" && data.model.trim()) cfg.gateway.model = data.model.trim()
+      if (data.clearToken === true || (typeof data.token === "string" && data.token.trim() === "" && data.clearToken === true)) delete cfg.gateway.token
+      else if (typeof data.token === "string" && data.token.trim()) cfg.gateway.token = data.token.trim()
+      if (typeof data.timeoutEnabled === "boolean") cfg.gateway.timeoutEnabled = data.timeoutEnabled
+      if (typeof data.timeoutSec === "number") {
+        if (data.timeoutSec < 10) return json(res, 400, { ok: false, msg: "超时至少 10 秒" })
+        cfg.gateway.timeoutSec = Math.min(3600, Math.round(data.timeoutSec))
+      }
+      if (cfg.gateway.enabled === true && !cfg.gateway.host) cfg.gateway.host = "127.0.0.1"
+      if (cfg.gateway.enabled === true && !["127.0.0.1", "localhost", "::1", "[::1]"].includes(cfg.gateway.host) && !cfg.gateway.token) {
+        return json(res, 200, { ok: false, msg: "监听非本机地址时必须设 token（局域网暴露）" })
+      }
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) }
+      catch (e) { return json(res, 500, { ok: false, msg: `配置写不进去：${String(e)}` }) }
+      // 改完重启网关（没开时脚本会自己退出）
+      try {
+        const lwctl = join(ROOT, "bin", "lwctl")
+        if (existsSync(lwctl)) {
+          const child = spawn(process.execPath, [lwctl, "restart", "gateway"], { detached: true, stdio: "ignore", env: { ...process.env, LIFE_WORLD_ROOT: ROOT } })
+          child.unref()
+        }
+      } catch { /* 重启失败不影响保存 */ }
+      return json(res, 200, { ok: true, enabled: cfg.gateway.enabled === true, msg: cfg.gateway.enabled === true ? "已保存，网关正在重启" : "已保存，网关已停" })
+    }
     if (req.method === "GET" && url.pathname === "/api/drawer") {
       const cfg = readJson(CONFIG_FILE, {})
       return json(res, 200, {
