@@ -218,8 +218,12 @@ pi          # TUI，已经带 life-world
 - `GET /v1/models`：`life-world` / `life-world-vn`（视觉小说）/ `life-world-pet`（桌宠）
 - `POST /v1/chat/completions`：stream / 非 stream 都支持；**客户端历史全部丢弃**，只认最后一条 user；
   人格和记忆以 life-world 为准，客户端 system prompt 不生效
-- 跑一台专属 pi 会话（`role=api`），和 QQ/home 共用同一套世界数据；不跑后台任务
-- `model` 选 `local` / `cloud` / `provider/model`；本地单并发，网关排队，慢是正常的
+- 接收图片：`image_url` 的 data URL（png/jpeg/webp/gif，单张 ≤8MB、最多 4 张），转成 pi 的图片输入；
+  同时落一份到 `worlds/default/tmp/api-*`（png/jpg/webp/gif）备查，24 小时/200 张自动清理。
+  **模型本身得支持看图**；不支持时图片会被忽略或报错，识屏请把视觉模型单独指到真视觉端点。
+- 跑一台专属 pi 会话（`role=api`），和 QQ/home 共用同一套世界数据；不跑后台任务。所有客户端共用这一个会话的上下文
+- `allowOrigins` 默认空：带 Origin 的浏览器/Electron 客户端会被 403，需要时在配置里加它的源（如 `app://...`、`http://localhost:5173`）
+- `model` 选 `local` / `cloud` / `provider/model`（看板里是下拉框，和概览的模型设置同一份列表）；本地单并发，网关排队，慢是正常的
 - `timeoutEnabled=false` 时无限等（本地模型用）；监听地址可与看板一样改成局域网地址，
   但**监听非本机地址时必须设 token**，否则网关拒绝启动
 - 网关的 `api` 会话在运行时只放行 `memory_search / memory_day / memory_timeline / memory_write / weather`，

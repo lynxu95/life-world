@@ -15,7 +15,7 @@
  * 用法：node lw-gateway.mjs
  */
 import http from "node:http"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
@@ -29,6 +29,9 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const PI = process.env.PI_BIN || "pi"
 const EXT = process.env.LIFE_WORLD_EXT || join(HERE, "../ext/life-world.ts")
 const SESSION_DIR = join(ROOT, "pi-sessions")
+const WORLD_TMP = join(ROOT, "worlds/default/tmp")
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_IMAGES = 4
 
 function readJson(file, fallback) {
   try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback }
@@ -52,6 +55,10 @@ if (g.enabled !== true && !process.env.LW_GATEWAY_FORCE) {
 }
 const HOST = String(process.env.LW_GATEWAY_HOST || g.host || "127.0.0.1")
 const PORT = Number(process.env.LW_GATEWAY_PORT || g.port || 8100)
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`gateway 端口不合法：${process.env.LW_GATEWAY_PORT || g.port}`)
+  process.exit(1)
+}
 const TOKEN = String(process.env.LW_GATEWAY_TOKEN || g.token || "")
 const TIMEOUT_ON = g.timeoutEnabled !== false
 const TIMEOUT_MS = Math.max(10, Math.min(3600, Number(g.timeoutSec) || 120)) * 1000
@@ -108,26 +115,15 @@ let startedAt = 0
 let chain = Promise.resolve()
 let gen = 0
 
-// 网关只负责聊天：命令行层先挡一道（扩展里还有运行时白名单兜底）
-const DENY_TOOLS = [
-  "bash", "write", "edit", "patch", "read", "grep", "find", "ls",
-  "bg_run", "bg_kill", "bg_list", "bg_output", "bg_status",
-  "reach_out", "send_media", "ha", "switch_model", "local_protect", "local_pin",
-  "delegate", "skill_run", "skill_toggle", "skill_install", "skill_remove",
-  "skill_list", "skill_read", "group_chat", "check_alarm", "check_proactive",
-  "plan_next", "cancel_alarm", "heartbeat", "heartbeat_stop", "gal_choice",
-].join(",")
-
 const args = ["--mode", "rpc", ...(MODEL ? ["--model", MODEL] : []),
   "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions",
-  "-xt", DENY_TOOLS,
   "-e", EXT, "--session-dir", SESSION_DIR, "--name", "api"]
 
 function startChild() {
   if (stopping) return
   buf = ""
   const myGen = ++gen
-  mkdirSync(SESSION_DIR, { recursive: true })
+  try { mkdirSync(SESSION_DIR, { recursive: true }) } catch (e) { log("session dir failed", String(e)) }
   const c = spawn(PI, args, {
     env: { ...process.env, TZ: process.env.TZ || "Asia/Shanghai", LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: "api", LIFE_WORLD_CHANNEL: "cli" },
     stdio: ["pipe", "pipe", "pipe"],
@@ -152,7 +148,7 @@ function startChild() {
   c.stdin.on("error", (e) => {
     if (c !== child || myGen !== gen) return
     log("stdin error", String(e))
-    failPending("会话管道断了，稍后再试")
+    resetSession("会话管道断了，稍后再试")
   })
   c.on("error", (e) => {
     if (c !== child || myGen !== gen) return
@@ -185,6 +181,7 @@ function handleRpc(msg) {
       pending = null
       if (p.timer) clearTimeout(p.timer)
       p.reject(new Error(responseError(msg)))
+      resetSession("模型请求失败，会话已重置")
     }
     return
   }
@@ -210,6 +207,15 @@ function handleRpc(msg) {
   }
 }
 
+function resetSession(reason) {
+  failPending(reason)
+  const dying = child
+  child = null
+  gen++
+  try { dying?.kill("SIGTERM") } catch { /* ignore */ }
+  setTimeout(() => { if (!child && !stopping) startChild() }, 500)
+}
+
 function failPending(reason) {
   if (!pending) return
   const p = pending
@@ -226,8 +232,12 @@ function waitForChild(ms) {
   })
 }
 
-function ask(text, scope) {
+let queued = 0
+function ask(text, scope, images = []) {
+  if (queued >= 20) return Promise.reject(new Error("网关排队太多（20 个），稍后再试"))
+  queued++
   const run = async () => {
+    try {
     if (!child && !(await waitForChild(8000))) throw new Error("会话还没起来，稍后再试")
     return new Promise((resolve, reject) => {
       for (const c of [child]) if (!c || c.stdin.destroyed) return reject(new Error("会话没起来"))
@@ -256,9 +266,10 @@ function ask(text, scope) {
       }
       try {
         if (!child || child.stdin.destroyed) throw new Error("会话没起来")
-        child.stdin.write(JSON.stringify(reqPrompt(id, text)) + "\n")
-      } catch (e) { failPending(String(e)) }
+        child.stdin.write(JSON.stringify(reqPrompt(id, text, images)) + "\n")
+      } catch (e) { resetSession(String(e)) }
     })
+    } finally { queued-- }
   }
   chain = chain.then(run, run)
   return chain
@@ -289,17 +300,70 @@ function authorized(req) {
   return String(req.headers.authorization || "") === `Bearer ${TOKEN}`
 }
 
-function lastUserText(messages) {
-  if (!Array.isArray(messages)) return ""
+const MIME_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif" }
+/** 只认 data URL；远程 image_url 不代下（避免被当 SSRF 跳板） */
+let lastTmpClean = 0
+function cleanupTmp() {
+  if (Date.now() - lastTmpClean < 3600_000) return
+  lastTmpClean = Date.now()
+  try {
+    if (!existsSync(WORLD_TMP)) return
+    const cutoff = Date.now() - 24 * 3600_000
+    const files = readdirSync(WORLD_TMP).filter((f) => f.startsWith("api-")).map((f) => {
+      try { const st = statSync(join(WORLD_TMP, f)); return { f, mtime: st.mtimeMs, size: st.size } } catch { return null }
+    }).filter(Boolean).sort((a, b) => b.mtime - a.mtime)  // 新 → 旧
+    const keep = new Set()
+    let total = 0
+    for (const x of files) {
+      if (x.mtime < cutoff || keep.size >= 200 || total + x.size > 200 * 1024 * 1024) continue
+      keep.add(x.f); total += x.size
+    }
+    for (const x of files) if (!keep.has(x.f)) { try { unlinkSync(join(WORLD_TMP, x.f)) } catch { /* ignore */ } }
+  } catch { /* ignore */ }
+}
+
+function parseDataUrl(url) {
+  // 客户端可能把 base64 换行包裹：先去掉所有空白再匹配
+  const m = String(url || "").replace(/\s+/g, "").match(/^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i)
+  if (!m) return null
+  const mimeType = m[1].toLowerCase()
+  const ext = MIME_EXT[mimeType]
+  if (!ext) return null
+  const data = m[2]
+  const bytes = Math.floor((data.length * 3) / 4)
+  if (bytes > MAX_IMAGE_BYTES) return { tooLarge: true }
+  return { mimeType, ext, data, bytes }
+}
+function extractUser(messages) {
+  if (!Array.isArray(messages)) return { text: "", images: [], saved: [], skipped: 0 }
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (!m || m.role !== "user") continue
     const c = m.content
-    if (typeof c === "string") return c.trim()
-    if (Array.isArray(c)) return c.filter((p) => p && p.type === "text").map((p) => String(p.text || "")).join(" ").trim()
-    return ""
+    if (typeof c === "string") return { text: c.trim(), images: [], saved: [], skipped: 0 }
+    if (!Array.isArray(c)) return { text: "", images: [], saved: [], skipped: 0 }
+    const text = c.filter((p) => p && p.type === "text").map((p) => String(p.text || "")).join(" ").trim()
+    cleanupTmp()
+    const images = [], saved = []
+    let skipped = 0
+    for (const part of c) {
+      if (!part || part.type !== "image_url") continue
+      if (images.length >= MAX_IMAGES) { skipped++; continue }
+      const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url
+      const got = parseDataUrl(url)
+      if (!got || got.tooLarge) { skipped++; continue }
+      images.push({ type: "image", data: got.data, mimeType: got.mimeType })
+      // 同时落一份到 tmp，方便缺视觉的模型用 read/perceive 再看
+      try {
+        mkdirSync(WORLD_TMP, { recursive: true, mode: 0o700 })
+        const file = join(WORLD_TMP, `api-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${got.ext}`)
+        writeFileSync(file, Buffer.from(got.data, "base64"), { mode: 0o600 })
+        saved.push(`worlds/default/tmp/${file.split("/").pop()}`)
+      } catch { /* 落盘失败不影响把图发给模型 */ }
+    }
+    return { text, images, saved, skipped }
   }
-  return ""
+  return { text: "", images: [], saved: [], skipped: 0 }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -310,6 +374,15 @@ const server = http.createServer(async (req, res) => {
   try { url = new URL(req.url, `http://${req.headers.host || "localhost"}`) }
   catch { return err(res, 400, "URL 不合法", "invalid_request_error") }
   if (!authorized(req)) return err(res, 401, "未授权：token 不对", "authentication_error")
+  // 回环绑定时校验 Host（防 DNS rebinding）；带 Origin 且不在白名单的一律 403（即使不发 CORS 头）
+  const reqHost = String(req.headers.host || "")
+  if (LOOPBACK && !/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) return err(res, 403, "Host 不被接受")
+  const reqOrigin = String(req.headers.origin || "")
+  if (reqOrigin && !ALLOW_ORIGINS.length) return err(res, 403, "浏览器跨源请求被拒绝；需要就配置 gateway.allowOrigins")
+  if (reqOrigin && !ALLOW_ORIGINS.includes("*") && !ALLOW_ORIGINS.includes(reqOrigin)) return err(res, 403, "Origin 不在 allowOrigins 里")
+  if (req.method === "POST" && !String(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")) {
+    return err(res, 415, "Content-Type 必须是 application/json")
+  }
   if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, model: MODEL, child: !!child, busy: !!pending })
   if (req.method === "GET" && url.pathname === "/v1/models") {
     return json(res, 200, {
@@ -325,17 +398,21 @@ const server = http.createServer(async (req, res) => {
   let body = ""
   for await (const chunk of req) {
     body += chunk
-    if (body.length > 2 * 1024 * 1024) return err(res, 413, "请求太大")
+    if (body.length > 48 * 1024 * 1024) return err(res, 413, "请求太大（上限 48MB；单张图片 ≤8MB，最多 4 张）")
   }
   let payload = {}
   try { payload = JSON.parse(body || "{}") } catch { return err(res, 400, "body 不是合法 JSON") }
-  const userText = lastUserText(payload.messages)
-  if (!userText) return err(res, 400, "没有 user 消息；这个网关只认最后一条 user，客户端历史会被丢弃")
+  const user = extractUser(payload.messages)
+  if (!user.text && !user.images.length) return err(res, 400, "没有 user 消息（或图片格式不支持）；这个网关只认最后一条 user，客户端历史会被丢弃")
   const modelId = String(payload.model || "life-world")
   const profile = String(req.headers["x-lw-profile"] || (modelId.includes("-vn") ? "vn" : modelId.includes("-pet") ? "pet" : "default"))
   const hint = Object.hasOwn(PROFILES, profile) ? PROFILES[profile] : ""
-  const prompt = hint ? `${hint}\n\n${userText}` : userText
-  log("ask", profile, userText.slice(0, 60))
+  const note = user.saved.length
+    ? `\n（图片已存到 ${user.saved.join("、")}，备查。）`
+    : user.skipped ? `\n（有 ${user.skipped} 张图片没接收：只收 data URL，单张 ≤8MB，最多 4 张。）` : ""
+  const bodyText = (user.text || (user.images.length ? "（对方发来一张图片）" : "")) + note
+  const prompt = hint ? `${hint}\n\n${bodyText}` : bodyText
+  log("ask", profile, (user.text || "[image]").slice(0, 60), `imgs=${user.images.length}`)
   const id = `chatcmpl-${Date.now().toString(36)}`
   const stream = payload.stream === true
   let send = null
@@ -348,12 +425,20 @@ const server = http.createServer(async (req, res) => {
   // 客户端中途断开：只停自己这一轮（排队中的请求别误伤）
   const scope = {}
   res.on("close", () => { if (!res.writableEnded && pending && pending.scope === scope) { try { child?.stdin.write(JSON.stringify(reqAbort()) + "\n") } catch { /* ignore */ } } })
+  // 生成期间发 SSE 注释保活，别让客户端等太久先断
+  const ping = stream ? setInterval(() => { try { res.write(": ping\n\n") } catch { /* ignore */ } }, 15000) : null
   let reply = ""
-  try { reply = await ask(prompt, scope) }
+  try { reply = await ask(prompt, scope, user.images) }
   catch (e) {
-    if (stream) { send({ error: { message: String(e?.message || e), type: "timeout_error" } }); try { res.write("data: [DONE]\n\n") } catch { /* ignore */ } return res.end() }
-    return err(res, 504, String(e?.message || e), "timeout_error")
+    if (ping) clearInterval(ping)
+    const msg = String(e?.message || e)
+    const timeout = TIMEOUT_ON && /超时|等太久/.test(msg)
+    const code = timeout ? 504 : 502
+    const type = timeout ? "timeout_error" : "upstream_error"
+    if (stream) { send({ error: { message: msg, type } }); try { res.write("data: [DONE]\n\n") } catch { /* ignore */ } return res.end() }
+    return err(res, code, msg, type)
   }
+  if (ping) clearInterval(ping)
   if (!reply) reply = "（她这次没说出话）"
   if (stream) {
     const chars = Array.from(reply)
@@ -377,7 +462,7 @@ const server = http.createServer(async (req, res) => {
 })
 server.on("error", (e) => { log("server error", String(e)); console.error(`gateway listen 失败：${String(e)}`); process.exit(1) })
 process.on("unhandledRejection", (e) => log("unhandledRejection", String(e)))
-process.on("uncaughtException", (e) => log("uncaughtException", String(e)))
+process.on("uncaughtException", (e) => { log("uncaughtException", String(e)); process.exit(1) })
 
 server.listen(PORT, HOST, () => log(`gateway on http://${HOST}:${PORT}`, `model=${MODEL || "(default)"}`, `timeout=${TIMEOUT_ON ? TIMEOUT_MS + "ms" : "off"}`))
 

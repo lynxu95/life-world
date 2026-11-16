@@ -15,6 +15,21 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.16.1] - 2026-11-16
+
+### 新增
+
+- **网关接收图片**：OpenAI 格式的 `image_url` data URL（png / jpeg / webp / gif，单张 ≤8MB、最多 4 张），
+  转成 pi 的图片输入；同时落一份到 `worlds/default/tmp/api-*` 备查（24 小时/200 张自动清理）。
+  模型本身要支持看图；不支持时图片会被忽略或报错。远程 URL 不代下（避免 SSRF）。
+- **看板网关卡片的模型改成下拉**：和概览「模型设置」同一份已安装模型列表，另有 `cloud` / `local` 两个别名。
+
+### 修复
+
+- 网关安全与稳定性：校验 `Host` / `Origin` / `Content-Type`（防 DNS rebinding 与网页 CSRF）、
+  失败后作废进程代际避免串请求、排队上限 20、SSE 每 15 秒保活、端口校验、tmp 图片配额（24 小时 / 200 张）。
+- `lwctl restart qq|home|all` 恢复（之前接网关时误删了这两行）；`restart gateway` 在未启用时明确提示跳过。
+
 ## [1.16.0] - 2026-11-16
 
 ### 新增

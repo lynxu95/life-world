@@ -613,7 +613,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <label class="field compact">监听 <input type="text" id="gw-host" placeholder="127.0.0.1"></label>
             <label class="field compact">端口 <input type="number" id="gw-port" placeholder="8100" style="width:88px"></label>
           </div>
-          <label class="field" style="margin-top:8px">模型 <input type="text" id="gw-model" placeholder="cloud / local / provider/model" style="flex:1"></label>
+          <label class="field" style="margin-top:8px">模型<select id="gw-model"></select></label>
           <label class="field" style="margin-top:8px">Token <input type="password" id="gw-token" placeholder="可空；填了就要 Bearer" style="flex:1"></label>
           <div class="hint" id="gw-token-note" style="margin-top:4px"></div>
           <label class="check"><input type="checkbox" id="gw-clear-token">清除已保存的 Token</label>
@@ -981,7 +981,21 @@ $("dw-enabled")?.addEventListener("change", async () => {
 })
 
 let gwTouched = false
-for (const id of ["gw-host", "gw-port", "gw-model", "gw-token", "gw-timeout-sec"]) $(id)?.addEventListener("input", () => { gwTouched = true })
+let AVAILABLE_MODELS = []
+function fillGatewayModel(current) {
+  const el = $("gw-model")
+  if (!el) return
+  const opts = [
+    { value: "cloud", label: "cloud（默认在线模型）" },
+    { value: "local", label: "local（本地模型）" },
+  ]
+  for (const m of AVAILABLE_MODELS) opts.push({ value: m.ref, label: m.ref })
+  if (current && !opts.some((o) => o.value === current)) opts.push({ value: current, label: current + "（当前）" })
+  el.innerHTML = opts.map((o) => `<option value="${escAttr(o.value)}">${escAttr(o.label)}</option>`).join("")
+  el.value = current || "cloud"
+}
+for (const id of ["gw-host", "gw-port", "gw-token", "gw-timeout-sec"]) $(id)?.addEventListener("input", () => { gwTouched = true })
+$("gw-model")?.addEventListener("change", () => { gwTouched = true })
 for (const id of ["gw-enabled", "gw-timeout", "gw-clear-token"]) $(id)?.addEventListener("change", () => { gwTouched = true })
 async function loadGateway() {
   const d = await getJson("/api/gateway").catch(() => null)
@@ -991,7 +1005,7 @@ async function loadGateway() {
     const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v }
     set("gw-host", d.host || "")
     set("gw-port", d.port || "")
-    set("gw-model", d.model || "cloud")
+    if (document.activeElement !== $("gw-model")) fillGatewayModel(d.model || "cloud")
     set("gw-timeout-sec", d.timeoutSec || 120)
     if (document.activeElement !== $("gw-timeout")) $("gw-timeout").checked = d.timeoutEnabled !== false
   }
@@ -1007,7 +1021,7 @@ $("gw-save")?.addEventListener("click", async () => {
     enabled: $("gw-enabled").checked,
     host: $("gw-host").value.trim(),
     port: Number($("gw-port").value) || 0,
-    model: $("gw-model").value.trim(),
+    model: $("gw-model").value || "cloud",
     token: $("gw-token").value.trim(),
     clearToken: $("gw-clear-token").checked,
     timeoutEnabled: $("gw-timeout").checked,
@@ -1099,7 +1113,12 @@ async function loadOverview() {
       fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
       fillSelect($("m-vision"), (d.multimodal && d.multimodal.model) || "", d.available || [], "（不启用）")
     }
-    if (Array.isArray(d.available)) mLoaded = true
+    if (Array.isArray(d.available)) {
+      mLoaded = true
+      AVAILABLE_MODELS = d.available
+      const gw = $("gw-model")
+      if (gw && document.activeElement !== gw) fillGatewayModel(gw.value || "cloud")
+    }
     renderSessionRefresh(d.session)
     renderLocalLock(d.localLock, (d.models && d.models.cloud) || "deepseek/deepseek-flash")
     renderLocalPin(d.localPin, d.models && d.models.autoFailover === false, d.models, d.localLock && d.localLock.enabled)

@@ -1007,15 +1007,22 @@ const server = http.createServer(async (req, res) => {
       }
       try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) }
       catch (e) { return json(res, 500, { ok: false, msg: `配置写不进去：${String(e)}` }) }
-      // 改完重启网关（没开时脚本会自己退出）
+      // 改完重启网关（没开时 lwctl 会跳过并说一声）
+      let restarted = false
       try {
-        const lwctl = join(ROOT, "bin", "lwctl")
-        if (existsSync(lwctl)) {
-          const child = spawn(process.execPath, [lwctl, "restart", "gateway"], { detached: true, stdio: "ignore", env: { ...process.env, LIFE_WORLD_ROOT: ROOT } })
+        if (existsSync(LWCTL)) {
+          const child = spawn(process.execPath, [LWCTL, "restart", "gateway"], { detached: true, stdio: "ignore", cwd: ROOT, env: { ...process.env, LIFE_WORLD_ROOT: ROOT } })
           child.unref()
+          restarted = true
         }
       } catch { /* 重启失败不影响保存 */ }
-      return json(res, 200, { ok: true, enabled: cfg.gateway.enabled === true, msg: cfg.gateway.enabled === true ? "已保存，网关正在重启" : "已保存，网关已停" })
+      return json(res, 200, {
+        ok: true,
+        enabled: cfg.gateway.enabled === true,
+        restarted,
+        msg: !restarted ? "已保存（没找到 lwctl，需要手动重启网关）"
+          : cfg.gateway.enabled === true ? "已保存，网关正在重启" : "已保存，网关已停",
+      })
     }
     if (req.method === "GET" && url.pathname === "/api/drawer") {
       const cfg = readJson(CONFIG_FILE, {})

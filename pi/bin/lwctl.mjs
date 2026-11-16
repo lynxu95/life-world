@@ -356,10 +356,13 @@ function cmdRestart(target) {
     }
     results.push({ name, ok: r.status === 0, err: String(r.stderr || "").trim() })
   }
-  // 网关默认关着：只有配置里打开时才起
+  if (target === "qq" || target === "all") run("qq", "pi-qq-bridge.mjs")
+  if (target === "home" || target === "all") run("home", "pi-home-rpc.mjs")
+  // 网关默认关着：只有配置里打开时才起；显式 restart gateway 但没开时直接说一声
   let gatewayOn = false
   try { gatewayOn = JSON.parse(readFileSync(join(ROOT, "life-world.json"), "utf8")).gateway?.enabled === true } catch { /* ignore */ }
-  if (target === "gateway" || (target === "all" && gatewayOn)) run("gateway", "lw-gateway.mjs")
+  if (gatewayOn && (target === "gateway" || target === "all")) run("gateway", "lw-gateway.mjs")
+  else if (target === "gateway") console.log("· gateway 没开（life-world.json 的 gateway.enabled=false），跳过")
   for (const r of results) {
     console.log(`${r.ok ? "✓" : "✗"} ${r.name}${r.ok ? "" : "：" + (r.err || "tmux 执行失败")}`)
   }
