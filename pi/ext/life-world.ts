@@ -677,7 +677,7 @@ function stateText(withMood = true): string {
 }
 
 // ———————— 归档 / 记忆 ————————
-interface Record_ { id: string; t: string; role: "user" | "assistant"; text: string }
+interface Record_ { id: string; t: string; role: "user" | "assistant"; text: string; src?: string }
 let archived = new Set<string>()
 
 function loadArchived(): void {
@@ -861,29 +861,37 @@ function readProactive(hours = 24, limit = 20, includeGroup = false): Array<{ t:
   } catch { return [] }
 }
 
-function archive(message: any): void {
+const recentArchived: Array<{ role: string; text: string; at: number }> = []
+function archive(message: any): boolean {
   try {
-    if (typeof message?.customType === "string" && message.customType.startsWith("life-world-")) return
+    if (typeof message?.customType === "string" && message.customType.startsWith("life-world-")) return false
     const role = message?.role
-    if (role !== "user" && role !== "assistant") return
+    if (role !== "user" && role !== "assistant") return false
     let text = messageText(message).trim()
-    if (!text) return
+    if (!text) return false
     if (role === "user") {
-      if (isAfterglow(text)) return
-      if (text.includes(WAKE_MARK)) return
+      if (isAfterglow(text)) return false
+      if (text.includes(WAKE_MARK)) return false
       text = cleanUserText(stripProfileHint(text))
     }
-    if (!text) return
+    if (!text) return false
+    // 超限重发：桥接会把同一条重发一次，10 秒内同角色同长文本只归档一次
+    const now = Date.now()
+    while (recentArchived.length && now - recentArchived[0].at > 10_000) recentArchived.shift()
+    if (text.length > 20 && recentArchived.some((x) => x.role === role && x.text === text)) return false
     const t = new Date(message?.timestamp || Date.now()).toISOString()
     const id = String(message?.id || createHash("sha1").update(`${role}|${t}|${text}`).digest("hex"))
-    if (archived.has(id)) return
+    if (archived.has(id)) return false
     archived.add(id)
     mkdirSync(CONV_DIR, { recursive: true, mode: 0o700 })
     // src 标明这句话来自哪个窗口：qq / home / group-xxx
     const src = ROLE === "group" ? `group-${process.env.LIFE_WORLD_GROUP_ID || "?"}` : ROLE
     appendFileSync(join(CONV_DIR, `${dayOf(new Date(t))}.jsonl`), `${JSON.stringify({ id, t, role, text, src })}\n`, { mode: 0o600 })
-    indexRecord({ id, t, role, text })
+    indexRecord({ id, t, role, text, src })
+    recentArchived.push({ role, text, at: now })
+    return true
   } catch (e) { log(`archive failed ${String(e)}`) }
+  return false
 }
 
 function messageText(message: any): string {
@@ -979,21 +987,21 @@ function allRecordsCached(): Record_[] {
 }
 
 function allRecordsFast(): Record_[] {
-  return dbQuery("SELECT id,t,role,text FROM msg ORDER BY t ASC, rowid ASC") || allRecordsCached()
+  return dbQuery("SELECT id,t,role,text,src FROM msg ORDER BY t ASC, rowid ASC") || allRecordsCached()
 }
 
 function recordsSince(iso: string): Record_[] {
-  return dbQuery("SELECT id,t,role,text FROM msg WHERE t >= ? ORDER BY t ASC, rowid ASC", iso)
+  return dbQuery("SELECT id,t,role,text,src FROM msg WHERE t >= ? ORDER BY t ASC, rowid ASC", iso)
     || allRecordsCached().filter((r) => r.t >= iso)
 }
 
 function recordsInRange(from: string, to: string): Record_[] {
-  return dbQuery("SELECT id,t,role,text FROM msg WHERE day >= ? AND day <= ? ORDER BY t ASC, rowid ASC", from, to)
+  return dbQuery("SELECT id,t,role,text,src FROM msg WHERE day >= ? AND day <= ? ORDER BY t ASC, rowid ASC", from, to)
     || allRecordsCached().filter((r) => { const d = dayOf(new Date(r.t)); return d >= from && d <= to })
 }
 
 function recordsOnDay(day: string): Record_[] {
-  return dbQuery("SELECT id,t,role,text FROM msg WHERE day = ? ORDER BY t ASC, rowid ASC", day)
+  return dbQuery("SELECT id,t,role,text,src FROM msg WHERE day = ? ORDER BY t ASC, rowid ASC", day)
     || allRecordsCached().filter((r) => dayOf(new Date(r.t)) === day)
 }
 
@@ -1012,6 +1020,11 @@ function openMemIndex(): any {
     try { memDb.exec("PRAGMA synchronous=NORMAL") } catch { /* ignore */ }
     try { chmodSync(MEM_INDEX_FILE, 0o600) } catch { /* ignore */ }
     memDb.exec("CREATE TABLE IF NOT EXISTS msg (id TEXT PRIMARY KEY, day TEXT, t TEXT, role TEXT, text TEXT)")
+    // 老库补 src 列：群聊/网关/终端的来源不能再丢了
+    try {
+      const cols = memDb.prepare("PRAGMA table_info(msg)").all().map((c: any) => String(c.name))
+      if (!cols.includes("src")) memDb.exec("ALTER TABLE msg ADD COLUMN src TEXT")
+    } catch { /* ignore */ }
     memDb.exec("CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(id UNINDEXED, text, tokenize=trigram)")
     memDb.exec("CREATE TABLE IF NOT EXISTS mem (id TEXT PRIMARY KEY, strength REAL DEFAULT 1, uses INTEGER DEFAULT 0, last_used TEXT)")
     memDb.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -1240,7 +1253,7 @@ function indexRecord(r: Record_): void {
     if (!db) return
     db.exec("BEGIN IMMEDIATE")
     try {
-      const info = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)").run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+      const info = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text, src) VALUES (?,?,?,?,?,?)").run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text, r.src || "")
       if (Number(info?.changes || 0) > 0) {
         db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
         db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)").run(r.id)
@@ -1401,13 +1414,18 @@ function memoryBlock(): string {
   let total = 0
   for (let i = recent.length - 1; i >= 0; i--) {
     const cost = recent[i].text.length + 24
-    if (total + cost > h.chars) break
+    if (total + cost > h.chars) continue
     picked.unshift(recent[i]); total += cost
   }
   // 本地小模型优化：限制注入的历史条数（0 = 不注入，-1 = 不限制）
   const keep = c.localModel.enabled ? c.localModel.keepRecent : -1
   if (keep >= 0 && picked.length > keep) picked.splice(0, picked.length - keep)
-  const lines = picked.map((r) => `[${shortStamp(r.t)}] ${r.role === "user" ? "对方" : "我"}：${r.text}`)
+  const whoOf = (r: Record_): string => {
+    if (r.role !== "user") return "我"
+    const src = String(r.src || "")
+    return src.startsWith("group-") ? `群友（${src.slice(6)}）` : "对方"
+  }
+  const lines = picked.map((r) => `[${shortStamp(r.t)}] ${whoOf(r)}：${r.text}`)
   const map: string[] = []
   const mapFrom = dayOf(new Date(Date.now() - Math.max(0, h.mapDays - 1) * 86_400_000))
   const counts = new Map<string, number>()
@@ -3662,6 +3680,14 @@ async function auxPerceiveModel(): Promise<{ id: string; url: string; headers: R
 }
 
 export default function (pi: ExtensionAPI) {
+  // 网关会话的运行时白名单：必须注册在 world.enabled 早退之前，否则扩展被停用时这道防线就没了
+  if (ROLE === "api") {
+    const allow = new Set(["memory_search", "memory_day", "memory_timeline", "memory_write", "weather"])
+    pi.on("tool_call", async (event: any) => {
+      const tool = String(event?.toolName || "")
+      if (!allow.has(tool)) return { block: true, reason: `网关会话（api）只能聊天和查记忆，不能用 ${tool || "这个工具"}。` }
+    })
+  }
   piRef = pi
   if (JUDGE) return // 判官：不注入、不注册工具
   if (!config().world.enabled) { log("life-world disabled · world.enabled=false"); return }
@@ -3913,13 +3939,6 @@ export default function (pi: ExtensionAPI) {
 
   // 云端模式：别碰机密抽屉（拦常见路数，剩下的靠自觉）
   pi.on("tool_call", async (event: any, ctx: any) => {
-    // 网关会话只聊天 + 查记忆：这里做运行时兜底，别只依赖 pi 的命令行过滤
-    if (ROLE === "api") {
-      const allow = new Set(["memory_search", "memory_day", "memory_timeline", "memory_write", "weather"])
-      const tool = String(event?.toolName || "")
-      if (!allow.has(tool)) return { block: true, reason: `网关会话（api）只能聊天和查记忆，不能用 ${tool || "这个工具"}。` }
-      return
-    }
     const o = config().models
     const curModel = modelIdOf(ctx)
     const onLocal = !!o.local && curModel === o.local
@@ -4056,16 +4075,17 @@ export default function (pi: ExtensionAPI) {
     }
     if (prompt !== original) patch.systemPrompt = prompt
     // 记忆块只在第一次能安全给本地看时注入；云端开局、之后切回本地会补一次
-    const wantMemory = !memoryHydrated && !cloudActive
+    const wantMemory = !memoryHydrated && !cloudActive && CHANNEL !== "group"
     if (wantMemory) memoryHydrated = true
     const memory = wantMemory ? memoryBlock() : ""
     const timeline = timelineInjection()
-    const content = [stateText(!cloudActive), timeline, memory].filter(Boolean).join("\n\n")
+    const content = [stateText(!cloudActive && CHANNEL !== "group"), timeline, memory].filter(Boolean).join("\n\n")
     if (content) {
       patch.message = {
         customType: memory ? "life-world-bootstrap" : "life-world-state",
         content,
         display: false,
+        timestamp: Date.now(),
       }
     }
     if (patch.systemPrompt || patch.message) return patch
@@ -4094,7 +4114,7 @@ export default function (pi: ExtensionAPI) {
     if (drawerEnabled() && drawer.active && o.local && modelIdOf(ctx) !== o.local) {
       let lastUser = -1
       for (let i = 0; i < messages.length; i++) if (messages[i]?.role === "user") lastUser = i
-      const kept = sanitizeToolPairs(messages.filter((m: any, i: number) => Number(m?.timestamp || 0) >= drawer.cutoff || i === lastUser))
+      const kept = sanitizeToolPairs(messages.filter((m: any, i: number) => String(m?.customType || "").startsWith("life-world-") || Number(m?.timestamp || 0) >= drawer.cutoff || i === lastUser))
       if (kept.length !== messages.length) {
         const hidden = messages.length - kept.length
         if (!drawer.stashed) {
@@ -4196,7 +4216,7 @@ export default function (pi: ExtensionAPI) {
     if (role === "user") raw = cleanUserText(stripProfileHint(raw))
     if (raw.startsWith(WAKE_MARK) || /^【余波】/.test(raw)) return
     let text = raw.replace(/\s+/g, " ").trim()
-    if (!text) return
+    if (!text || /^\[SILENT\]$/i.test(text)) return
     const ev: TimelineEvent = {
       t: new Date().toISOString(), roleKey: timelineKey, who: role === "user" ? "对方" : "我",
       text: Array.from(text).slice(0, 100).join(""),
@@ -4207,6 +4227,8 @@ export default function (pi: ExtensionAPI) {
       pruneTimeline()
     } catch { /* ignore */ }
   }
+  let pendingTimelineCursor: { t: string; n: number } | null = null
+  const timelineLabel = (k: string): string => (k.startsWith("cli-") ? "终端" : k)
   const hhmm = (iso: string): string => {
     const d = new Date(iso)
     if (!Number.isFinite(d.getTime())) return ""
@@ -4233,29 +4255,27 @@ export default function (pi: ExtensionAPI) {
       const older = rest.slice(0, Math.max(0, rest.length - recent.length))
       const byRole = new Map<string, number>()
       for (const e of older) byRole.set(e.roleKey, (byRole.get(e.roleKey) || 0) + 1)
-      const lines = recent.map((e) => `- ${hhmm(e.t)} ${e.roleKey} · ${e.who}：${e.text}`)
+      const lines = recent.map((e) => `- ${hhmm(e.t)} ${timelineLabel(e.roleKey)} · ${e.who}：${e.text}`)
       const olderLine = older.length
-        ? `更早还有 ${older.length} 条（${[...byRole].map(([k, n]) => `${k} ${n}`).join("、")}），最早 ${hhmm(older[0].t)}`
+        ? `更早还有 ${older.length} 条（${[...byRole].map(([k, n]) => `${timelineLabel(k)} ${n}`).join("、")}），最早 ${hhmm(older[0].t)}`
         : ""
       const last = recent[recent.length - 1]
-      const n = eligible.filter((e) => e.t === last.t).length
-      try {
-        mkdirSync(TIMELINE_SEEN_DIR, { recursive: true, mode: 0o700 })
-        atomicWrite(cursorFile(), JSON.stringify({ t: last.t, n }, null, 2))
-      } catch { /* ignore */ }
+      const n = rest.filter((e) => e.t === last.t).length
+      // 只记下来，等这一轮真的成功收尾再落盘（agent_settled 里提交）
+      pendingTimelineCursor = { t: last.t, n }
       return `【时间线】${cursor?.t ? `自你上次（${hhmm(cursor.t)}）之后` : "你离开这段时间"}：\n${lines.join("\n")}${olderLine ? "\n" + olderLine : ""}`
     } catch { return "" }
   }
 
   pi.on("message_end", async (event: any, ctx: any) => {
     const message = event?.message ?? event
-    archive(message)
-    appendTimeline(message, event)
+    if (archive(message)) appendTimeline(message, event)
     if (message?.role !== "assistant") return
     const stop = String(message?.stopReason || "")
     // 工具轮只是中间态；正常收尾/出错才算这一轮结束
     if (stop !== "toolUse") setAgentBusy(false)
     if (stop === "error") {
+      lastTurnBad = true
       const errText = String(message?.errorMessage || "")
       log(`model error · ${modelIdOf(ctx)} · ${errText.slice(0, 200)}`)
       if (isContextOverflow(errText)) {
@@ -4277,6 +4297,13 @@ export default function (pi: ExtensionAPI) {
 
   // 上下文超限：本轮结束后自动开新会话（QQ/群聊由桥接层换会话并重发，不在这里做）
   pi.on("agent_settled", async (event: any, ctx: any) => {
+    if (pendingTimelineCursor && event?.aborted !== true && !lastTurnBad) {
+      try {
+        mkdirSync(TIMELINE_SEEN_DIR, { recursive: true, mode: 0o700 })
+        atomicWrite(cursorFile(), JSON.stringify(pendingTimelineCursor, null, 2))
+      } catch { /* ignore */ }
+    }
+    pendingTimelineCursor = null
     // 连续在场：这一轮说完了，接下一跳（普通心跳不受影响）
     if (ROLE === "home" || ROLE === "qq") void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
     lastTurnEndAt = Date.now()
