@@ -1258,10 +1258,15 @@ async function loadOverview() {
   }
 }
 
+let afSaving = false
+let afOptimistic = null
+
 function renderAutoFailover(models) {
   const el = $("af-roles")
-  if (!el) return
-  const roles = Array.isArray(models?.autoFailoverRoles) ? models.autoFailoverRoles.map(String) : ["qq", "home"]
+  if (!el || afSaving) return
+  const src = afOptimistic || (Array.isArray(models?.autoFailoverRoles) ? models.autoFailoverRoles : null)
+  afOptimistic = null
+  const roles = Array.isArray(src) ? src.map(String) : ["qq", "home"]
   const known = ["qq", "home", "cli", "api"]
   const all = [...new Set([...known, ...roles])]
   el.innerHTML = ""
@@ -1272,14 +1277,18 @@ function renderAutoFailover(models) {
     cb.type = "checkbox"
     cb.checked = roles.includes(r)
     cb.onchange = async () => {
+      afSaving = true
       cb.disabled = true
       try {
-        await postJson("/api/auto-failover", { roleKey: r, enabled: cb.checked })
+        const res = await postJson("/api/auto-failover", { roleKey: r, enabled: cb.checked })
+        if (Array.isArray(res?.roles)) afOptimistic = res.roles
       } catch (e) {
         cb.checked = !cb.checked
         console.error("auto-failover save failed", e)
       } finally {
+        afSaving = false
         cb.disabled = false
+        renderAutoFailover(models)
       }
     }
     lab.append(cb, document.createTextNode(` ${r}`))

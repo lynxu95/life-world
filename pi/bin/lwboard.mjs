@@ -898,16 +898,24 @@ const server = http.createServer(async (req, res) => {
     // 会话级自动切换：勾/取勾某个 roleKey（默认名单 qq / home）
     if (req.method === "POST" && url.pathname === "/api/auto-failover") {
       const data = await body(req)
+      if (!data || typeof data !== "object" || Array.isArray(data)) return json(res, 400, { ok: false, msg: "body 要是 JSON 对象" })
+      if (typeof data.enabled !== "boolean") return json(res, 400, { ok: false, msg: "enabled 必须是 true / false" })
       const role = String(data.roleKey || "").trim()
-      if (!role) return json(res, 400, { ok: false, msg: "roleKey 必填" })
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(role)) return json(res, 400, { ok: false, msg: "roleKey 不合法（字母数字 _ -，1~64 个字符）" })
       let cfg = {}
       if (existsSync(CONFIG_FILE)) {
         try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
         catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
       }
       if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
+      if (cfg.models !== undefined && (!cfg.models || typeof cfg.models !== "object" || Array.isArray(cfg.models))) {
+        return json(res, 400, { ok: false, msg: "models 不是对象，拒绝写入" })
+      }
       cfg.models = cfg.models || {}
-      const cur = Array.isArray(cfg.models.autoFailoverRoles) ? cfg.models.autoFailoverRoles.map((x) => String(x)) : ["qq", "home"]
+      // 与扩展同一套语义：非数组（缺失/手写错）按默认名单，数组逐项转字符串
+      const cur = Array.isArray(cfg.models.autoFailoverRoles)
+        ? cfg.models.autoFailoverRoles.map((x) => String(x))
+        : ["qq", "home"]
       const set = new Set(cur)
       if (data.enabled) set.add(role)
       else set.delete(role)

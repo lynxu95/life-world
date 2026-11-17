@@ -3460,14 +3460,27 @@ function autoFailoverOn(): boolean {
 
 /**
  * 会话级判定：总开关开着，且当前会话（ROLE）在 autoFailoverRoles 名单里。
- * 名单外的会话（默认 cli / api / subagent / group）只认手动切换——写代码时工具报错是常态，
+ * 名单外的会话（默认 cli / api）只认手动切换——写代码时工具报错是常态，
  * 连着两次就换模型会把原版 TUI 搅得没法用。
+ * 群聊（group）在下面两条兜底里另有硬拦；子代理进程不加载本扩展，压根到不了这里。
  */
+function autoFailoverRoles(): string[] {
+  const v = config().models.autoFailoverRoles
+  if (!Array.isArray(v)) {
+    // 缺失或手写成字符串/对象：按默认名单走，并提醒一次（看板和扩展保持同一套语义）
+    if (v !== undefined && !warnedBadRoles) {
+      warnedBadRoles = true
+      log(`autoFailoverRoles 不是数组（${typeof v}），按默认 ["qq","home"] 处理 · 请检查 life-world.json`)
+    }
+    return ["qq", "home"]
+  }
+  return v.map((x) => String(x))
+}
+let warnedBadRoles = false
+
 function autoFailoverRoleOn(): boolean {
   if (!autoFailoverOn()) return false
-  const list = config().models.autoFailoverRoles
-  if (!Array.isArray(list)) return false
-  return list.map((x) => String(x)).includes(ROLE)
+  return autoFailoverRoles().includes(ROLE)
 }
 
 let lastModeText = ""

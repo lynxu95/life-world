@@ -13,7 +13,7 @@
 
 - **工具**：`plan_next` / `check_alarm` / `check_proactive` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `perceive` / `delegate` / `gal_choice` / `switch_model` / `local_protect` / `form` / `weather` / `ha` / `patch` / `web_search` / `bg_run` / `bg_status` / `bg_output` / `bg_kill`
 - **后台任务**：`bg_run` 把生图、转码、长脚本扔到 detached 进程，立刻返回 job id；`bg_status` / `bg_output` 查状态和输出，`bg_kill` 停掉。同时最多 3 个，日志 7 天清理、超 20MB 截断
-- **模型热切换**：`switch_model` 让角色自己决定本地 / 在线；模型无响应立即切、工具连续失败两次切云端，另有脚本探活兜底；`local_protect` 可临时锁在在线
+- **模型热切换**：`switch_model` 让角色自己决定本地 / 在线；模型无响应或工具连续失败两次会兜底切换，但**只在 `models.autoFailoverRoles` 名单里的会话生效**（默认 `["qq","home"]`，`cli` / `api` 只认手动切换）；另有脚本探活兜底；`local_protect` 可临时锁在在线
 - **化形（可选，默认关）**：看板「扩展功能 · 化形」开启后每轮状态行带 `化形：`；在线按当前模型自动匹配（deepseek=鲸鱼娘、claude=claude娘、qwen=千问大小姐…），本地或认不出的厂商用 `form` 工具自己挑。映射可在看板编辑，或写 `identity/化形表.md` 的 `- 关键词 → 标签` 行覆盖内置表；描述区 `## 化形描述` 留给 AI 自己维护
 - **机密抽屉**：切云端前把之前的对话与机密文件收进 `worlds/default/机密抽屉/`，`用户画像-私密.md` 不预加载、本地需要时自己读，云端禁止打开该目录；没配本地模型则整个抽屉不启用
 - **闹钟带模型**：`plan_next` 可指定到点用 `local` / `cloud`，定时器触发前先切过去
@@ -194,7 +194,7 @@ pi          # TUI，已经带 life-world
 
 本地模型实测与推荐的优化参数见仓库根 README《本地模型实测》（RTX 5060 Ti + Basalt + Qwen3.8-Flash-Next IQ3_XXS 搭配 DeepSeek Flash）。
 
-`models.local` 留空则不启用热切换（机密抽屉也随之停用）；`autoFailover` 是自动兜底的基线开关：打开时，扩展在每轮开始前探活当前模型，模型无响应或工具连续失败两次也会自动切到另一个（冷却 `cooldownMs`，防止来回抖）。想临时完全不自动切（用本地模型完整跑一个项目），打开「本地锁定」——看板「模型设置」里有复选框，AI 用 `local_pin({ enabled: true })`，状态存在 `local-pin.json`（带时间/理由，读坏时按锁定处理），解除后回到 `autoFailover` 基线。
+`models.local` 留空则不启用热切换（机密抽屉也随之停用）；`autoFailover` 是自动兜底的基线开关，`autoFailoverRoles` 再按会话过滤（默认 `["qq","home"]`，写 `[]` = 全手动）：打开时，扩展在每轮开始前探活当前模型，`models.autoFailoverRoles` 名单里的会话在模型无响应或工具连续失败两次时才会切到另一个（冷却 `cooldownMs`，防止来回抖）。名单外的会话（`cli` 终端、`api` 网关）只认手动切换——写代码时工具报错是常态，不能连着两次就换模型。群聊固定不参与；子代理进程不加载本扩展。想临时完全不自动切（用本地模型完整跑一个项目），打开「本地锁定」——看板「模型设置」里有复选框，AI 用 `local_pin({ enabled: true })`，状态存在 `local-pin.json`（带时间/理由，读坏时按锁定处理），解除后回到 `autoFailover` 基线。优先级：本地锁定 > 本地保护 > 会话名单 > 基线开关。
 
 ### 机密抽屉
 
@@ -231,7 +231,7 @@ pi          # TUI，已经带 life-world
   其余工具（含 shell、read/写文件、主动找人、家居、切模型、技能、后台任务）一律拦截
 - 开关和参数在看板「扩展功能」页的网关卡片里改，保存后自动重启网关
 
-触发自动切换的规则：模型无响应（`stopReason=error`）立即切；工具连续失败两次，从本地切到云端看看情况；`/model` 手动切换由 `model_select` 同步开关抽屉。
+触发自动切换的规则：模型无响应（`stopReason=error`）立即切；工具连续失败两次，从本地切到云端看看情况。**这两条都只在 `models.autoFailoverRoles` 名单里的会话触发**（默认 `["qq","home"]`；`cli` / `api` 不在名单，只认手动）。`/model` 手动切换由 `model_select` 同步开关抽屉。
 
 ### 会话查看与热切换（lwctl）
 
