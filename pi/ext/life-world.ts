@@ -345,7 +345,7 @@ interface ModelSwitchOptions {
   cloud: string
   /** 当前模型不可用时，脚本自动切到另一个 */
   autoFailover: boolean
-  /** 允许自动切换的会话（roleKey）；不在名单里的会话只认手动切换。默认 qq / home */
+  /** 允许自动切换（及本地保护/锁定）的会话角色；比的是 ROLE（qq/home/cli/api），群聊/子代理用不到。默认 qq / home */
   autoFailoverRoles: string[]
   /** 本地健康检查地址 */
   localHealthUrl: string
@@ -3458,7 +3458,7 @@ function writeLocalPin(enabled: boolean, reason = "", by = ROLE): void {
     reason: String(reason || "").slice(0, 200),
   }, null, 2))
 }
-/** 自动兜底总判定：本地锁定优先，其次看 life-world.json 的基线开关 */
+/** 自动兜底总判定：本地锁定优先，其次看 life-world.json 的基线开关（注意：localPinOn 已按会话收窄，结果随调用会话变化） */
 function autoFailoverOn(): boolean {
   if (localPinOn()) return false
   return config().models.autoFailover !== false
