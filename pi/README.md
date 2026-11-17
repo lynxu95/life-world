@@ -171,6 +171,7 @@ pi          # TUI，已经带 life-world
     "local": "basalt/abliterated-iq3_xxs",
     "cloud": "deepseek/deepseek-flash",
     "autoFailover": true,
+    "autoFailoverRoles": ["qq", "home"],
     "localHealthUrl": "",
     "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,

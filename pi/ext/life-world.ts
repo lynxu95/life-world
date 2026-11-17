@@ -1793,8 +1793,8 @@ function delegate(task: string, model?: string): Promise<string> {
   return new Promise((resolvePromise) => {
     if (DEPTH >= 1) { resolvePromise("子代理不能再开子代理。"); return }
     let m = model || config().subagent.model || "deepseek-flash"
-    // 本地保护模式：子代理也不许跑本地，默认分身在本地就强制换在线
-    if (localLockOn()) {
+    // 本地保护模式：子代理也不许跑本地，默认分身在本地就强制换在线（整机资源锁，不看会话名单）
+    if (localLockRaw()) {
       const c = config().models
       if (c.local && m === c.local) {
         if (!c.cloud) { resolvePromise("本地保护模式开着，但没配在线模型，子代理跑不了。"); return }
@@ -2296,6 +2296,8 @@ function skippedLine(skipped?: Array<{ scheduled: string; note: string }>, max =
 /** 闹钟到点前，先切到任务指定的模型（local / cloud） */
 async function switchForAlarm(alarm: Alarm): Promise<void> {
   if (!alarm.model) return
+  // 名单外的会话只认手动切换：闹钟上的 model 标签也不再自动执行
+  if (!roleManaged()) { log("alarm model · skip (本会话不在生效名单)"); return }
   // 回私聊醒的闹钟：切的是 home 的模型，没用；私聊那一轮沿用自己当前的模型
   if (wakeTarget(alarm) === "qq") return
   const c = config().models
@@ -2710,7 +2712,7 @@ async function tick(): Promise<void> {
     // 短期印象：每天 shortHour 点整份重写（先于长期，让长期能参考新短期）
     if (impCfg.enabled && state.lastShortImpression !== today && hour >= impCfg.shortHour) {
       const o = c.models
-      if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
+      if (o.local && roleManaged() && lastCtx && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "短期印象整理")
         log(`short impression · switch model · ${r}`)
         if (!r.startsWith("已切到")) log(`short impression · 没切成本地，按当前模型继续（${r}）`)
@@ -2728,7 +2730,7 @@ async function tick(): Promise<void> {
     }
     if (impCfg.enabled && state.lastImpression !== today && hour >= impCfg.hour) {
       const o = c.models
-      if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
+      if (o.local && roleManaged() && lastCtx && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "每日印象整理")
         log(`impression · switch model · ${r}`)
         if (!r.startsWith("已切到")) log(`impression · 没切成本地，按当前模型继续（${r}）`)
@@ -2740,7 +2742,7 @@ async function tick(): Promise<void> {
     const idCfg = c.memory.identity
     if (idCfg.enabled && state.lastSelfReview !== today && hour >= idCfg.hour) {
       const o = c.models
-      if (o.local && lastCtx && modelIdOf(lastCtx) !== o.local) {
+      if (o.local && roleManaged() && lastCtx && modelIdOf(lastCtx) !== o.local) {
         const r = await switchTo(lastCtx, o.local, "我是谁·沉淀")
         log(`self review · switch model · ${r}`)
       }
@@ -3418,7 +3420,7 @@ function readLocalLock(): LocalLockState {
   } catch { return { enabled: true, broken: true } }
 }
 /** 本会话是否受「自动模型策略」管辖（名单见 models.autoFailoverRoles，默认 qq/home） */
-function roleManaged(): boolean { return autoFailoverRoles().includes(ROLE) }
+function roleManaged(): boolean { return ROLE !== "group" && autoFailoverRoles().includes(ROLE) }
 /** 本地保护的整机开关（文件里存的），是否生效还要看本会话在不在名单里 */
 function localLockRaw(): boolean { return readLocalLock().enabled }
 function localLockOn(): boolean { return localLockRaw() && roleManaged() }
@@ -3844,8 +3846,8 @@ async function mediaDataUrl(path: string, kind: MediaKind, outDir: string): Prom
 async function auxPerceiveModel(): Promise<{ id: string; url: string; headers: Record<string, string> } | null> {
   const mm = config().multimodal
   if (!mm.enabled || !mm.model) return null
-  // 本地保护模式：辅助感知也别打本地模型（会抢显存）
-  if (localLockOn()) {
+  // 本地保护模式：辅助感知也别打本地模型（会抢显存，整机资源锁，不看会话名单）
+  if (localLockRaw()) {
     const local = config().models.local
     if (local && mm.model === local) return null
   }
@@ -4561,6 +4563,8 @@ export default function (pi: ExtensionAPI) {
 
   // 工具连续失败两次（参数错 / 调用不了）→ 切到另一个模型看看情况
   pi.on("tool_execution_end", async (event: any, ctx: any) => {
+    // 名单外的会话根本不参与兜底：不计数、不写日志，免得写代码时 debug.log 被刷
+    if (!autoFailoverRoleOn()) { toolFailures = 0; return }
     if (event?.isError) {
       toolFailures++
       log(`tool failure ${toolFailures}/2 · ${String(event?.toolName || "?")}`)
@@ -5220,7 +5224,9 @@ export default function (pi: ExtensionAPI) {
           catch (e) { log(`解除本地锁定失败 · ${String(e)}`) }
         }
         writeStatus(); writeModelMode()
-        const scope = roleManaged() ? "" : `\n（本会话 ${ROLE} 不在生效名单，保护只约束名单内的会话；你自己仍可切回本地。）`
+        const scope = autoFailoverRoles().length === 0
+          ? "\n（生效会话名单为空：锁已写入，但当前没有任何会话受它约束。）"
+          : roleManaged() ? "" : `\n（本会话 ${ROLE} 不在生效名单，保护只约束名单内的会话；你自己仍可切回本地。）`
         return ok(`本地保护模式已开：现在只能用在线模型，闹钟里写着 local 的也会改走在线（标签不变）。${hadPin ? "\n顺带解除了本地锁定。" : ""}${scope}`)
       }
       try { writeLocalLock(false, String(params.reason || ""), roleKey) }
@@ -5234,7 +5240,7 @@ export default function (pi: ExtensionAPI) {
   if (CHANNEL !== "group") addTool(pi, {
     name: "local_pin",
     label: "Local pin",
-    description: "本地锁定：临时「只用本地、不自动切走」的开关，和本地保护（只用在线）正好一对。开着的时候探活失败、模型无响应、工具连续失败两次都不会自动切到在线，适合用本地模型完整跑一个项目；打开时会先把当前会话切到本地，切不过去就不锁。不传 enabled 就是查状态。",
+    description: "本地锁定：临时「只用本地、不自动切走」的开关，和本地保护（只用在线）正好一对。开着的时候探活失败、模型无响应、工具连续失败两次都不会自动切到在线，适合用本地模型完整跑一个项目；打开时会先把当前会话切到本地，切不过去就不锁。只对「生效会话」名单（models.autoFailoverRoles，默认 qq/home）里的会话起作用。不传 enabled 就是查状态。",
     parameters: {
       type: "object",
       properties: {
@@ -5252,7 +5258,7 @@ export default function (pi: ExtensionAPI) {
         const eff = autoFailoverOn()
         const broken = p.enabled && p.broken ? "（状态文件读不出来，按锁定处理）" : ""
         const scope = p.enabled && !roleManaged() ? "（本会话不在生效名单，实际不受影响）" : ""
-        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}${scope}\n自动兜底：${eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}（本会话 ${ROLE}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
+        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}${scope}\n自动兜底：${!roleManaged() ? "只手动（本会话不在生效名单）" : eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
       }
       const on = params.enabled === true
       if (on) {
@@ -5266,7 +5272,10 @@ export default function (pi: ExtensionAPI) {
         try { writeLocalPin(true, String(params.reason || ""), roleKey) }
         catch (e) { return ok(`已切到本地，但锁没写上：${String(e)}。请重试或检查 ${ROOT} 的写权限。`) }
         writeStatus()
-        return ok(`本地锁定已开：探活失败、模型无响应、工具连续失败都不会自动切走了；要换模型还是可以手动 switch_model。${roleManaged() ? "" : `\n（本会话 ${ROLE} 不在生效名单，锁定只约束名单内的会话。）`}`)
+        const scope = autoFailoverRoles().length === 0
+          ? "\n（生效会话名单为空：锁已写入，但当前没有任何会话受它约束。）"
+          : roleManaged() ? "" : `\n（本会话 ${ROLE} 不在生效名单，锁定只约束名单内的会话。）`
+        return ok(`本地锁定已开：探活失败、模型无响应、工具连续失败都不会自动切走了；要换模型还是可以手动 switch_model。${scope}`)
       }
       try { writeLocalPin(false, String(params.reason || ""), roleKey) }
       catch (e) { return ok(`没解除成：${String(e)}。锁还是开着的，请重试或检查 ${ROOT} 的写权限。`) }
@@ -5698,7 +5707,7 @@ export default function (pi: ExtensionAPI) {
           : "（没有活跃会话）"
       }
       if (!raw || raw === "status") {
-        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}（本会话 ${roleKey}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n本地保护：${localLockRaw() ? `开（只能用在线）${roleManaged() ? "" : "（本会话不受影响）"}` : "关"}\n本地锁定：${localPinRaw() ? `开（不会自动切走）${roleManaged() ? "" : "（本会话不受影响）"}` : "关"}`)
+        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${!roleManaged() ? "只手动（本会话不在生效名单）" : autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}\n本地保护：${localLockRaw() ? `开（只能用在线）${roleManaged() ? "" : "（本会话不受影响）"}` : "关"}\n本地锁定：${localPinRaw() ? `开（不会自动切走）${roleManaged() ? "" : "（本会话不受影响）"}` : "关"}`)
       }
       if (!o.local && !o.cloud) return ok("还没配 models.local / models.cloud，先在 life-world.json 里配好。")
       const target = raw === "local" ? o.local : raw === "cloud" ? o.cloud : raw
@@ -5921,7 +5930,7 @@ export default function (pi: ExtensionAPI) {
             mediaUrl = r.url || ""
             warning = r.warning || ""
           }
-          if (localLockOn() && config().multimodal.model && config().models.local && config().multimodal.model === config().models.local) {
+          if (localLockRaw() && config().multimodal.model && config().models.local && config().multimodal.model === config().models.local) {
             return ok("本地保护模式开着：辅助感知配的是本地模型。要用它先 local_protect({ enabled: false })，或把 multimodal.model 换成在线模型。")
           }
           const aux = await auxPerceiveModel()

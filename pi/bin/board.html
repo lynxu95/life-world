@@ -1270,7 +1270,12 @@ function renderAutoFailover(models) {
   const known = ["qq", "home", "cli", "api"]
   const all = [...new Set([...known, ...roles])]
   const note = $("af-note")
-  if (note) note.textContent = roles.length ? "" : "（名单为空：两个锁也不会生效）"
+  if (note) {
+    const bits = []
+    if (!roles.length) bits.push("（名单为空：自动切换与两个锁都不会生效）")
+    if (models && models.autoFailover === false) bits.push("（自动兜底基线已关：名单只影响两个锁）")
+    note.textContent = bits.join(" ")
+  }
   el.innerHTML = ""
   for (const r of all) {
     const lab = document.createElement("label")
@@ -1286,6 +1291,11 @@ function renderAutoFailover(models) {
         if (Array.isArray(res?.roles)) afOptimistic = res.roles
       } catch (e) {
         cb.checked = !cb.checked
+        const n = $("af-note")
+        if (n) {
+          n.textContent = "保存失败：" + String(e?.message || e).slice(0, 80)
+          setTimeout(() => { if (String(n.textContent).startsWith("保存失败")) n.textContent = "" }, 4000)
+        }
         console.error("auto-failover save failed", e)
       } finally {
         afSaving = false

@@ -72,7 +72,7 @@ const pickModel = () => {
 function modelWithLocks() {
   const pick = pickModel()
   // 两个锁只对「生效会话」名单里的会话生效；网关的 role 是 api，不在名单里就别吃锁
-  const roles = Array.isArray(MODELS.autoFailoverRoles) ? MODELS.autoFailoverRoles.map((x) => String(x).trim()) : ["qq", "home"]
+  const roles = Array.isArray(MODELS.autoFailoverRoles) ? MODELS.autoFailoverRoles.map((x) => String(x).trim()).filter(Boolean) : ["qq", "home"]
   if (!roles.includes("api")) return pick
   const readLock = (file) => {
     const p = join(ROOT, file)
@@ -86,7 +86,7 @@ function modelWithLocks() {
   if (pin.on) return MODELS.local || pick
   return pick
 }
-const MODEL = modelWithLocks()
+let MODEL = modelWithLocks()
 const LOOPBACK = /^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(HOST)
 if (!LOOPBACK && !TOKEN) {
   console.error(`gateway 监听 ${HOST} 但没有设 token；局域网暴露前先在看板里填一个 token。`)
@@ -119,12 +119,15 @@ let startedAt = 0
 let chain = Promise.resolve()
 let gen = 0
 
-const args = ["--mode", "rpc", ...(MODEL ? ["--model", MODEL] : []),
+const buildArgs = () => ["--mode", "rpc", ...(MODEL ? ["--model", MODEL] : []),
   "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions",
   "-e", EXT, "--session-dir", SESSION_DIR, "--name", "api"]
 
 function startChild() {
   if (stopping) return
+  // 每次拉起都按当前配置和「生效会话」名单重算一次：改了名单不必重启网关
+  MODEL = modelWithLocks()
+  const args = buildArgs()
   buf = ""
   const myGen = ++gen
   try { mkdirSync(SESSION_DIR, { recursive: true }) } catch (e) { log("session dir failed", String(e)) }

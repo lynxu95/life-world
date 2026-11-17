@@ -78,7 +78,7 @@ perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })
 - 辅助感知：`multimodal.model`（推荐 `dashscope/qwen3.8-omni-flash`），留空即停用；只补主模型缺的能力（视频 / 音频，或主模型不支持图片时的图片）。
 
 ```json
-"models": { "local": "basalt/abliterated-iq3_xxs", "cloud": "deepseek/deepseek-flash", "autoFailover": true },
+"models": { "local": "basalt/abliterated-iq3_xxs", "cloud": "deepseek/deepseek-flash", "autoFailover": true, "autoFailoverRoles": ["qq", "home"] },
 "multimodal": { "enabled": true, "model": "dashscope/qwen3.8-omni-flash", "timeoutMs": 300000 }
 ```
 

@@ -804,7 +804,9 @@ const server = http.createServer(async (req, res) => {
       const m = c.models || {}
       const resolved = value === "local" ? m.local : value === "cloud" ? m.cloud : value
       if (!resolved) return json(res, 400, { ok: false, msg: `${value} 没配置` })
-      if (resolved === m.local && readLocalLockStrict().enabled === true) {
+      // 本地保护只约束「生效会话」名单里的窗口：名单外的手动切换照旧放行
+      const managedForLock = target === "all" ? autoFailoverRolesOf(c).length > 0 : autoFailoverRolesOf(c).includes(target)
+      if (resolved === m.local && managedForLock && readLocalLockStrict().enabled === true) {
         return json(res, 400, { ok: false, msg: "本地保护模式开着：只能用在线模型，先关掉它" })
       }
       const cmd = appendCommand(ROOT, { target, action: "model", model: value, reason: "lwboard 手动切换" })
@@ -920,9 +922,7 @@ const server = http.createServer(async (req, res) => {
       }
       cfg.models = cfg.models || {}
       // 与扩展同一套语义：非数组（缺失/手写错）按默认名单，数组逐项转字符串
-      const cur = Array.isArray(cfg.models.autoFailoverRoles)
-        ? cfg.models.autoFailoverRoles.map((x) => String(x))
-        : ["qq", "home"]
+      const cur = autoFailoverRolesOf(cfg)
       const set = new Set(cur)
       if (data.enabled) set.add(role)
       else set.delete(role)
