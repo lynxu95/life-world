@@ -221,10 +221,14 @@ label.check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--m
 input[type=checkbox]{accent-color:var(--accent)}
 
 /* —— 会话 —— */
-.sess-wrap{display:flex;gap:16px;align-items:flex-start}
-.sessions{flex:1;min-width:0}
+.sess-wrap{display:flex;gap:16px;align-items:flex-start}.sessions{flex:1;min-width:0}
 .sr-side{width:210px;flex:none;display:flex;flex-direction:column;gap:8px;margin-left:auto;font-size:12px;color:var(--muted)}
 .sr-side .hint{margin-top:2px}
+.af-block{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.af-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;color:var(--muted)}
+.af-head b{color:var(--fg);font-weight:650;font-size:13px}
+.af-roles{display:flex;gap:18px;flex-wrap:wrap}
+.af-roles label.check{margin-bottom:0}
 @media (max-width:1080px){.sess-wrap{flex-direction:column}.sr-side{width:100%;margin-left:0}}
 .sessions{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
 .card{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 11px;background:var(--panel-2);min-width:0}
@@ -509,6 +513,11 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <label class="check"><input type="checkbox" id="sr-qq">QQ 私聊</label>
             <div class="hint" id="sr-hint">闲下来超过这个时长，下一次回合结束就换新会话（这一轮仍用旧上下文）。</div>
           </div>
+        </div>
+        <div class="af-block">
+          <div class="af-head"><b>自动切换</b><span>工具连续失败两次 / 模型无响应时，是否允许这个会话自动换模型</span></div>
+          <div class="af-roles" id="af-roles"><span class="muted">…</span></div>
+          <div class="hint">默认只开 <code>qq</code> 和 <code>home</code>；<code>cli</code>（原版 TUI）和 <code>api</code>（网关）开着容易被工具报错误伤。关掉后只认手动切换，「本地锁定」仍然优先。</div>
         </div>
       </section>
         <section>
@@ -1192,6 +1201,7 @@ async function loadOverview() {
     $("hb-dot").className = "dot"
     $("hb-text").textContent = `在线 · ${d.sessions.length} 个会话`
     renderSessions(d.sessions, d.models)
+    renderAutoFailover(d.models)
     if (!careTouched) {
       $("care-random").checked = d.care?.randomEnabled !== false
       $("care-qs").value = d.care?.quietStart || ""
@@ -1245,6 +1255,35 @@ async function loadOverview() {
     console.error("overview failed", e)
     $("hb-dot").className = "dot off"
     $("hb-text").textContent = "服务未连接"
+  }
+}
+
+function renderAutoFailover(models) {
+  const el = $("af-roles")
+  if (!el) return
+  const roles = Array.isArray(models?.autoFailoverRoles) ? models.autoFailoverRoles.map(String) : ["qq", "home"]
+  const known = ["qq", "home", "cli", "api"]
+  const all = [...new Set([...known, ...roles])]
+  el.innerHTML = ""
+  for (const r of all) {
+    const lab = document.createElement("label")
+    lab.className = "check"
+    const cb = document.createElement("input")
+    cb.type = "checkbox"
+    cb.checked = roles.includes(r)
+    cb.onchange = async () => {
+      cb.disabled = true
+      try {
+        await postJson("/api/auto-failover", { roleKey: r, enabled: cb.checked })
+      } catch (e) {
+        cb.checked = !cb.checked
+        console.error("auto-failover save failed", e)
+      } finally {
+        cb.disabled = false
+      }
+    }
+    lab.append(cb, document.createTextNode(` ${r}`))
+    el.append(lab)
   }
 }
 

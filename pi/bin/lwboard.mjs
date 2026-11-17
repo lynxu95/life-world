@@ -895,6 +895,26 @@ const server = http.createServer(async (req, res) => {
       writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
       return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud }, subagent: cfg.subagent || {}, multimodal: cfg.multimodal || {} })
     }
+    // 会话级自动切换：勾/取勾某个 roleKey（默认名单 qq / home）
+    if (req.method === "POST" && url.pathname === "/api/auto-failover") {
+      const data = await body(req)
+      const role = String(data.roleKey || "").trim()
+      if (!role) return json(res, 400, { ok: false, msg: "roleKey 必填" })
+      let cfg = {}
+      if (existsSync(CONFIG_FILE)) {
+        try { cfg = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+        catch { return json(res, 400, { ok: false, msg: "life-world.json 解析失败，拒绝覆盖" }) }
+      }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return json(res, 400, { ok: false, msg: "配置不是对象，拒绝写入" })
+      cfg.models = cfg.models || {}
+      const cur = Array.isArray(cfg.models.autoFailoverRoles) ? cfg.models.autoFailoverRoles.map((x) => String(x)) : ["qq", "home"]
+      const set = new Set(cur)
+      if (data.enabled) set.add(role)
+      else set.delete(role)
+      cfg.models.autoFailoverRoles = [...set]
+      writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
+      return json(res, 200, { ok: true, roles: cfg.models.autoFailoverRoles })
+    }
     if (req.method === "POST" && url.pathname === "/api/backup") {
       const ok = await new Promise((resolve) => {
         const child = spawn(process.execPath, [join(HERE, "world-backup.mjs")], {

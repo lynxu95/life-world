@@ -345,6 +345,8 @@ interface ModelSwitchOptions {
   cloud: string
   /** 当前模型不可用时，脚本自动切到另一个 */
   autoFailover: boolean
+  /** 允许自动切换的会话（roleKey）；不在名单里的会话只认手动切换。默认 qq / home */
+  autoFailoverRoles: string[]
   /** 本地健康检查地址 */
   localHealthUrl: string
   /** 在线健康检查地址 */
@@ -488,7 +490,7 @@ function config(): Config {
     subagent: { model: "deepseek-flash" },
     multimodal: { enabled: false, model: "", timeoutMs: 300_000, warnImageBytes: 8 * 1024 * 1024, warnVideoBytes: 200 * 1024 * 1024 },
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
-    models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
+    models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, autoFailoverRoles: ["qq", "home"], localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
     forms: { enabled: false, free: "" },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
     homeAssistant: { enabled: false, sayService: "", sayEntity: "" },
@@ -3325,7 +3327,7 @@ async function ensureModelAlive(ctx: any): Promise<void> {
     }
     return
   }
-  if (!autoFailoverOn()) return
+  if (!autoFailoverRoleOn()) return
   if (failingOver) return
   if (Date.now() - lastSwitch.at < o.cooldownMs) return
   failingOver = true
@@ -3350,9 +3352,10 @@ async function failoverToOther(ctx: any, reason: string, opts: { onlyToCloud?: b
   if (CHANNEL === "group") return false
   const o = config().models
   if (!o.local || !o.cloud) return false
-  // 总开关关掉（或本地锁定开着）就完全不自动切，模型无响应也一样：宁可报错，也别把本地长任务踢回在线
-  if (!autoFailoverOn()) {
-    log(`failover off · skip (${reason})`)
+  // 总开关关掉（或本地锁定开着、或这个会话不在名单里）就完全不自动切，模型无响应也一样：
+  // 宁可报错，也别把本地长任务踢回在线，更别把正在写代码的 TUI 拽走
+  if (!autoFailoverRoleOn()) {
+    log(`failover off · skip (${reason}, role=${ROLE})`)
     return false
   }
   const cur = modelIdOf(ctx)
@@ -3453,6 +3456,18 @@ function writeLocalPin(enabled: boolean, reason = "", by = ROLE): void {
 function autoFailoverOn(): boolean {
   if (localPinOn()) return false
   return config().models.autoFailover !== false
+}
+
+/**
+ * 会话级判定：总开关开着，且当前会话（ROLE）在 autoFailoverRoles 名单里。
+ * 名单外的会话（默认 cli / api / subagent / group）只认手动切换——写代码时工具报错是常态，
+ * 连着两次就换模型会把原版 TUI 搅得没法用。
+ */
+function autoFailoverRoleOn(): boolean {
+  if (!autoFailoverOn()) return false
+  const list = config().models.autoFailoverRoles
+  if (!Array.isArray(list)) return false
+  return list.map((x) => String(x)).includes(ROLE)
 }
 
 let lastModeText = ""
@@ -5215,7 +5230,7 @@ export default function (pi: ExtensionAPI) {
         const when = p.at && Number.isFinite(Date.parse(p.at)) ? `${isoLocal(new Date(p.at))} 开启` : ""
         const eff = autoFailoverOn()
         const broken = p.enabled && p.broken ? "（状态文件读不出来，按锁定处理）" : ""
-        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}\n自动兜底：${eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
+        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}\n自动兜底：${eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}（本会话 ${ROLE}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
       }
       const on = params.enabled === true
       if (on) {
@@ -5661,7 +5676,7 @@ export default function (pi: ExtensionAPI) {
           : "（没有活跃会话）"
       }
       if (!raw || raw === "status") {
-        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}\n本地保护：${localLockOn() ? "开（只能用在线）" : "关"}\n本地锁定：${localPinOn() ? "开（不会自动切走）" : "关"}`)
+        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}（本会话 ${roleKey}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n本地保护：${localLockOn() ? "开（只能用在线）" : "关"}\n本地锁定：${localPinOn() ? "开（不会自动切走）" : "关"}`)
       }
       if (!o.local && !o.cloud) return ok("还没配 models.local / models.cloud，先在 life-world.json 里配好。")
       const target = raw === "local" ? o.local : raw === "cloud" ? o.cloud : raw
