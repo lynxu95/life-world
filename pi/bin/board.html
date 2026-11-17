@@ -167,6 +167,11 @@ section{position:relative;background:var(--panel);border:1px solid var(--line);b
 .gw-note-row b{font-weight:500;color:var(--fg)}
 .gw-note code{font-size:11px}
 .gw-note-p{margin-top:8px;line-height:1.65}
+.gw-baseurl{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.gw-baseurl-h{font-weight:650;color:var(--fg);margin-right:2px}
+.gw-baseurl code{font-family:var(--mono);font-size:12px;color:var(--fg);opacity:.9}
+.gw-baseurl input{padding:6px 8px;font-family:var(--mono);font-size:12px;width:126px}
+.gw-baseurl input[type=number]{width:84px}
 @media (max-width:900px){
   .gw-wrap{grid-template-columns:minmax(0,1fr)}
   .gw-note{border-left:0;border-top:1px solid var(--line);padding:10px 0 0}
@@ -625,10 +630,13 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           <div class="gw-wrap">
             <div class="gw-main">
               <label class="check"><input type="checkbox" id="gw-enabled">启用网关</label>
-              <div class="row" style="margin-top:8px">
-                <label class="field compact">监听 <input type="text" id="gw-host" placeholder="127.0.0.1"></label>
-                <label class="field compact">端口 <input type="number" id="gw-port" placeholder="8100" style="width:88px"></label>
+              <div class="gw-baseurl" style="margin-top:8px">
+                <span class="gw-baseurl-h">BaseURL</span>
+                <code>http://</code><input type="text" id="gw-host" placeholder="0.0.0.0" aria-label="监听地址">
+                <code>:</code><input type="number" id="gw-port" placeholder="8100" aria-label="端口">
+                <code>/v1</code>
               </div>
+              <div class="hint" style="margin-top:6px">方框里依次是 <b>监听地址</b> 和 <b>端口</b>：<code>0.0.0.0</code> 局域网都能连，<code>127.0.0.1</code> 只本机；这一行拼出来就是客户端要填的 BaseURL。</div>
               <label class="field" style="margin-top:8px">模型<select id="gw-model"></select></label>
               <label class="field" style="margin-top:8px">Token <input type="password" id="gw-token" placeholder="可空；填了就要 Bearer" style="flex:1"></label>
               <div class="hint" id="gw-token-note" style="margin-top:4px"></div>
@@ -636,7 +644,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
               <label class="check" style="margin-top:10px"><input type="checkbox" id="gw-timeout">单轮超时</label>
               <label class="field" style="margin-left:10px">秒 <input type="number" id="gw-timeout-sec" min="10" max="3600" style="width:88px"></label>
               <div class="row" style="margin-top:10px"><button class="primary" id="gw-save">保存并重启</button><span class="muted" id="gw-hint"></span></div>
-              <div class="hint">给只认 OpenAI 协议的客户端用：baseURL 统一填 <code>http://本机IP:端口/v1</code>。客户端发来的历史会被丢弃，只认最后一条 user；人格和记忆以 life-world 为准。模型默认在线，选本地会慢（单并发，网关排队）。</div>
+              <div class="hint">给只认 OpenAI 协议的客户端用：baseURL 照上面那行填（<code>http://地址:端口/v1</code>），客户端在别的机器上就把地址设成 <code>0.0.0.0</code>。客户端发来的历史会被丢弃，只认最后一条 user；人格和记忆以 life-world 为准。模型默认在线，选本地会慢（单并发，网关排队）。</div>
             </div>
             <aside class="gw-note">
               <div class="gw-note-h">已适配终端 · 模型名怎么填</div>
@@ -644,7 +652,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
               <div class="gw-note-row"><b>dsh-pet-indesktop</b><span><code>life-world-pet</code></span></div>
               <div class="gw-note-row"><b>其他聊天终端</b><span><code>life-world</code></span></div>
               <p class="gw-note-p">模型名只决定「终端约定」（表情标签 / 短回复），<b>不影响实际模型</b>——实际模型用左边的下拉选。</p>
-              <p class="gw-note-p">AnimaVN 的视觉小说档会要求她一句一行、行首带 <code>[微笑]</code> 这类表情标签；桌宠档要求回复短。填错不会报错，只会不像。</p>
+              <p class="gw-note-p">AnimaVN 的视觉小说档会要求她一句一行、行首带 <code>&lt;sprite:微笑&gt;</code> 这类表情标签；桌宠档要求回复短。填错不会报错，只会不像。</p>
             </aside>
           </div>
         </section>
