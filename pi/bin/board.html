@@ -514,11 +514,6 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
             <div class="hint" id="sr-hint">闲下来超过这个时长，下一次回合结束就换新会话（这一轮仍用旧上下文）。</div>
           </div>
         </div>
-        <div class="af-block">
-          <div class="af-head"><b>自动切换</b><span>工具连续失败两次 / 模型无响应时，是否允许这个会话自动换模型</span></div>
-          <div class="af-roles" id="af-roles"><span class="muted">…</span></div>
-          <div class="hint">默认只开 <code>qq</code> 和 <code>home</code>；<code>cli</code>（原版 TUI）和 <code>api</code>（网关）开着容易被工具报错误伤。关掉后只认手动切换，「本地锁定」仍然优先。</div>
-        </div>
       </section>
         <section>
           <div class="sec-head"><h2>今日</h2><span class="spacer"></span><span class="sec-note" id="today-note">…</span></div>
@@ -555,9 +550,14 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <div class="hint">改完保存，重启或切一次模型后生效。分身建议用在线模型：本地单并发，会和主会话抢算力。</div>
         <div class="hint">辅助感知只补主模型缺的能力（视频/音频，或主模型不支持图片时）；留空即停用，推荐 qwen3.8-omni-flash。</div>
         <label class="check" style="margin-top:10px"><input type="checkbox" id="lp-enabled">本地保护（只用在线）</label>
-        <div class="hint" id="lp-hint">开着的时候不会切回本地，写着 local 的闹钟执行时也改走在线。</div>
+        <div class="hint" id="lp-hint">开着的时候不会切回本地，写着 local 的闹钟执行时也改走在线。只对下面「生效会话」里勾选的会话起作用。</div>
         <label class="check" style="margin-top:10px"><input type="checkbox" id="mf-enabled">本地锁定（不自动切走）</label>
-        <div class="hint" id="mf-hint">开着的时候探活失败、模型无响应、工具连续失败都不会自动切到在线——适合用本地模型完整跑一个项目。</div>
+        <div class="hint" id="mf-hint">开着的时候探活失败、模型无响应、工具连续失败都不会自动切到在线——适合用本地模型完整跑一个项目。同样只对勾选的会话起作用。</div>
+        <div class="af-block">
+          <div class="af-head"><b>生效会话</b><span>勾上的会话才受「自动切换 / 本地保护 / 本地锁定」约束</span></div>
+          <div class="af-roles" id="af-roles"><span class="muted">…</span></div>
+          <div class="hint">默认只勾 <code>qq</code> 和 <code>home</code>；<code>cli</code>（原版 TUI）和 <code>api</code>（网关）留空，就是纯手动换模型、也不吃保护/锁定。群聊固定不参与，子代理不加载扩展。</div>
+        </div>
         <div class="hint" id="mode-hint"></div>
       </section>
 
@@ -951,7 +951,7 @@ function renderLocalLock(l, cloudModel) {
   if (!hint) return
   if (on) {
     const at = l.at && Number.isFinite(Date.parse(l.at)) ? new Date(l.at).toLocaleString("zh-CN", { hour12: false }) : ""
-    hint.textContent = `已开启${at ? ` · ${at}` : ""}${l.reason ? ` · ${l.reason}` : ""}——只能用在线模型`
+    hint.textContent = `已开启${at ? ` · ${at}` : ""}${l.reason ? ` · ${l.reason}` : ""}——只能用在线模型（只对勾选的会话生效）`
   } else {
     hint.textContent = cloudModel ? "关着：可以自由在本地 / 在线之间切换。" : "没配在线模型（models.cloud），这个开关用不了。"
   }
@@ -987,7 +987,7 @@ function renderLocalPin(pin, baseOff, models, protectOn) {
   } else if (on) {
     const at = pin.at && Number.isFinite(Date.parse(pin.at)) ? new Date(pin.at).toLocaleString("zh-CN", { hour12: false }) : ""
     const broken = pin.broken ? "（状态文件读不出来，按锁定处理）" : ""
-    hint.textContent = `已锁定${at ? ` · ${at}` : ""}${pin.reason ? ` · ${pin.reason}` : ""}${broken}——不会自动切到在线`
+    hint.textContent = `已锁定${at ? ` · ${at}` : ""}${pin.reason ? ` · ${pin.reason}` : ""}${broken}——不会自动切到在线（只对勾选的会话生效）`
   } else if (!hasLocal) {
     hint.textContent = "没配本地模型（models.local），这个开关用不了。"
   } else if (baseOff) {

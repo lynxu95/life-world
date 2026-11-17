@@ -3417,7 +3417,11 @@ function readLocalLock(): LocalLockState {
     }
   } catch { return { enabled: true, broken: true } }
 }
-function localLockOn(): boolean { return readLocalLock().enabled }
+/** 本会话是否受「自动模型策略」管辖（名单见 models.autoFailoverRoles，默认 qq/home） */
+function roleManaged(): boolean { return autoFailoverRoles().includes(ROLE) }
+/** 本地保护的整机开关（文件里存的），是否生效还要看本会话在不在名单里 */
+function localLockRaw(): boolean { return readLocalLock().enabled }
+function localLockOn(): boolean { return localLockRaw() && roleManaged() }
 function writeLocalLock(enabled: boolean, reason = "", by = ROLE): void {
   atomicWrite(LOCAL_LOCK_FILE, JSON.stringify({
     enabled,
@@ -3443,7 +3447,9 @@ function readLocalPin(): LocalPinState {
     }
   } catch { return { enabled: true, broken: true } }
 }
-function localPinOn(): boolean { return readLocalPin().enabled }
+/** 本地锁定的整机开关；同样只对名单里的会话生效 */
+function localPinRaw(): boolean { return readLocalPin().enabled }
+function localPinOn(): boolean { return localPinRaw() && roleManaged() }
 function writeLocalPin(enabled: boolean, reason = "", by = ROLE): void {
   atomicWrite(LOCAL_PIN_FILE, JSON.stringify({
     enabled,
@@ -5243,7 +5249,8 @@ export default function (pi: ExtensionAPI) {
         const when = p.at && Number.isFinite(Date.parse(p.at)) ? `${isoLocal(new Date(p.at))} 开启` : ""
         const eff = autoFailoverOn()
         const broken = p.enabled && p.broken ? "（状态文件读不出来，按锁定处理）" : ""
-        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}\n自动兜底：${eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}（本会话 ${ROLE}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
+        const scope = p.enabled && !roleManaged() ? "（本会话不在生效名单，实际不受影响）" : ""
+        return ok(`本地锁定：${p.enabled ? `开（${when}${p.reason ? `，${p.reason}` : ""}）${broken}` : "关"}${scope}\n自动兜底：${eff ? "开" : "关"}${!p.enabled && o.autoFailover === false ? "（配置基线就是关的）" : ""}（本会话 ${ROLE}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
       }
       const on = params.enabled === true
       if (on) {
@@ -5689,7 +5696,7 @@ export default function (pi: ExtensionAPI) {
           : "（没有活跃会话）"
       }
       if (!raw || raw === "status") {
-        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}（本会话 ${roleKey}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n本地保护：${localLockOn() ? "开（只能用在线）" : "关"}\n本地锁定：${localPinOn() ? "开（不会自动切走）" : "关"}`)
+        return ok(`当前会话：${roleKey}（${kindLabel(cur)} · ${cur}）\n全部会话：\n${list()}\n本地：${o.local || "未配"}\n在线：${o.cloud || "未配"}\n自动兜底：${autoFailoverOn() ? "开" : `关${localPinOn() ? "（本地锁定）" : o.autoFailover === false ? "（配置基线）" : ""}`}（本会话 ${roleKey}：${autoFailoverRoleOn() ? "允许自动切" : "只手动"}）\n本地保护：${localLockRaw() ? `开（只能用在线）${roleManaged() ? "" : "（本会话不受影响）"}` : "关"}\n本地锁定：${localPinRaw() ? `开（不会自动切走）${roleManaged() ? "" : "（本会话不受影响）"}` : "关"}`)
       }
       if (!o.local && !o.cloud) return ok("还没配 models.local / models.cloud，先在 life-world.json 里配好。")
       const target = raw === "local" ? o.local : raw === "cloud" ? o.cloud : raw
