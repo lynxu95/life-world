@@ -3470,6 +3470,7 @@ function autoFailoverOn(): boolean {
  * 连着两次就换模型会把原版 TUI 搅得没法用。
  * 群聊（group）在下面两条兜底里另有硬拦；子代理进程不加载本扩展，压根到不了这里。
  */
+let warnedBadRoles = false
 function autoFailoverRoles(): string[] {
   const v = config().models.autoFailoverRoles
   if (!Array.isArray(v)) {
@@ -3480,9 +3481,8 @@ function autoFailoverRoles(): string[] {
     }
     return ["qq", "home"]
   }
-  return v.map((x) => String(x))
+  return v.map((x) => String(x).trim()).filter(Boolean)
 }
-let warnedBadRoles = false
 
 function autoFailoverRoleOn(): boolean {
   if (!autoFailoverOn()) return false
@@ -5185,7 +5185,7 @@ export default function (pi: ExtensionAPI) {
   if (CHANNEL !== "group") addTool(pi, {
     name: "local_protect",
     label: "Local protect",
-    description: "本地保护模式：开着的时候只能用在线模型。适合要打游戏、跑占显存的软件，或者做图先把本地让出来的时候——开了之后自己不会被切回本地、不会断线。闹钟上的 local 标签不改，执行时自动改走在线。不传 enabled 就是查状态。",
+    description: "本地保护模式：开着的时候只能用在线模型。适合要打游戏、跑占显存的软件，或者做图先把本地让出来的时候——开了之后自己不会被切回本地、不会断线。闹钟上的 local 标签不改，执行时自动改走在线。只对「生效会话」名单（models.autoFailoverRoles，默认 qq/home）里的会话起作用。不传 enabled 就是查状态。",
     parameters: {
       type: "object",
       properties: {
@@ -5200,7 +5200,8 @@ export default function (pi: ExtensionAPI) {
       if (params?.enabled === undefined) {
         const l = readLocalLock()
         const when = l.at && Number.isFinite(Date.parse(l.at)) ? `${isoLocal(new Date(l.at))} 开启` : ""
-        return ok(`本地保护模式：${l.enabled ? `开（${when}${l.reason ? `，${l.reason}` : ""}）` : "关"}\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
+        const scope = l.enabled && !roleManaged() ? "（本会话不在生效名单，实际不受影响）" : ""
+        return ok(`本地保护模式：${l.enabled ? `开（${when}${l.reason ? `，${l.reason}` : ""}）` : "关"}${scope}\n当前会话：${kind === "local" ? "本地" : kind === "cloud" ? "在线" : "其他"} · ${cur || "未知"}`)
       }
       const on = params.enabled === true
       if (on) {
@@ -5212,14 +5213,15 @@ export default function (pi: ExtensionAPI) {
         }
         try { writeLocalLock(true, String(params.reason || ""), roleKey) }
         catch (e) { return ok(`已切到在线，但锁没写上：${String(e)}。请重试或检查 ${ROOT} 的写权限。`) }
-        // 两个锁互斥：保护是安全锁，开它就把本地锁定解掉
-        const hadPin = localPinOn()
+        // 两个锁互斥：保护是安全锁，开它就把本地锁定解掉（按整机状态判断，不看本会话是否受管）
+        const hadPin = localPinRaw()
         if (hadPin) {
           try { writeLocalPin(false, "本地保护模式开启，自动解除本地锁定", roleKey) }
           catch (e) { log(`解除本地锁定失败 · ${String(e)}`) }
         }
         writeStatus(); writeModelMode()
-        return ok(`本地保护模式已开：现在只能用在线模型，闹钟里写着 local 的也会改走在线（标签不变）。${hadPin ? "\n顺带解除了本地锁定。" : ""}`)
+        const scope = roleManaged() ? "" : `\n（本会话 ${ROLE} 不在生效名单，保护只约束名单内的会话；你自己仍可切回本地。）`
+        return ok(`本地保护模式已开：现在只能用在线模型，闹钟里写着 local 的也会改走在线（标签不变）。${hadPin ? "\n顺带解除了本地锁定。" : ""}${scope}`)
       }
       try { writeLocalLock(false, String(params.reason || ""), roleKey) }
       catch (e) { return ok(`没关成：${String(e)}。保护还开着，请重试或检查 ${ROOT} 的写权限。`) }
@@ -5256,7 +5258,7 @@ export default function (pi: ExtensionAPI) {
       if (on) {
         // 和本地保护对称：先切到本地，切不过去就别把门锁上
         if (!o.local) return ok("锁不了：life-world.json 里没配 models.local（本地模型）。")
-        if (localLockOn()) return ok("本地保护模式正开着（只能用在线），要锁定本地先把 local_protect({ enabled: false }) 关掉。")
+        if (localLockRaw()) return ok("本地保护模式正开着（只能用在线），要锁定本地先把 local_protect({ enabled: false }) 关掉。")
         if (cur !== o.local) {
           const r = await switchTo(ctx, o.local, "开启本地锁定")
           if (!r.startsWith("已切到") && !r.startsWith("已经是")) return ok(`没锁成：${r}`)
@@ -5264,7 +5266,7 @@ export default function (pi: ExtensionAPI) {
         try { writeLocalPin(true, String(params.reason || ""), roleKey) }
         catch (e) { return ok(`已切到本地，但锁没写上：${String(e)}。请重试或检查 ${ROOT} 的写权限。`) }
         writeStatus()
-        return ok("本地锁定已开：探活失败、模型无响应、工具连续失败都不会自动切走了；要换模型还是可以手动 switch_model。")
+        return ok(`本地锁定已开：探活失败、模型无响应、工具连续失败都不会自动切走了；要换模型还是可以手动 switch_model。${roleManaged() ? "" : `\n（本会话 ${ROLE} 不在生效名单，锁定只约束名单内的会话。）`}`)
       }
       try { writeLocalPin(false, String(params.reason || ""), roleKey) }
       catch (e) { return ok(`没解除成：${String(e)}。锁还是开着的，请重试或检查 ${ROOT} 的写权限。`) }

@@ -554,7 +554,7 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
         <label class="check" style="margin-top:10px"><input type="checkbox" id="mf-enabled">本地锁定（不自动切走）</label>
         <div class="hint" id="mf-hint">开着的时候探活失败、模型无响应、工具连续失败都不会自动切到在线——适合用本地模型完整跑一个项目。同样只对勾选的会话起作用。</div>
         <div class="af-block">
-          <div class="af-head"><b>生效会话</b><span>勾上的会话才受「自动切换 / 本地保护 / 本地锁定」约束</span></div>
+          <div class="af-head"><b>生效会话</b><span>勾上的会话才受「自动切换 / 本地保护 / 本地锁定」约束</span><span class="muted" id="af-note"></span></div>
           <div class="af-roles" id="af-roles"><span class="muted">…</span></div>
           <div class="hint">默认只勾 <code>qq</code> 和 <code>home</code>；<code>cli</code>（原版 TUI）和 <code>api</code>（网关）留空，就是纯手动换模型、也不吃保护/锁定。群聊固定不参与，子代理不加载扩展。</div>
         </div>
@@ -1269,6 +1269,8 @@ function renderAutoFailover(models) {
   const roles = Array.isArray(src) ? src.map(String) : ["qq", "home"]
   const known = ["qq", "home", "cli", "api"]
   const all = [...new Set([...known, ...roles])]
+  const note = $("af-note")
+  if (note) note.textContent = roles.length ? "" : "（名单为空：两个锁也不会生效）"
   el.innerHTML = ""
   for (const r of all) {
     const lab = document.createElement("label")

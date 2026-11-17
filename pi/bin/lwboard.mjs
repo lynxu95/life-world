@@ -72,6 +72,13 @@ function readLocalLockStrict() {
   } catch { return { enabled: true, broken: true } }
 }
 
+/** 生效会话名单（与扩展同一套语义：非数组按默认 qq/home，数组 trim 掉空白） */
+function autoFailoverRolesOf(cfg) {
+  const v = cfg && cfg.models && cfg.models.autoFailoverRoles
+  if (!Array.isArray(v)) return ["qq", "home"]
+  return v.map((x) => String(x).trim()).filter(Boolean)
+}
+
 // 机密抽屉里的文件（跳过 sessions/ 和聊天记录 jsonl，那些是备份不是用户文件）
 function listDrawerFiles() {
   const base = join(WORLD, "机密抽屉")
@@ -964,11 +971,15 @@ const server = http.createServer(async (req, res) => {
         try { writeAtomic(join(ROOT, "local-pin.json"), JSON.stringify({ enabled: false, at: doc.at, by: "board", reason: "本地保护模式开启，自动解除本地锁定" }, null, 2)) }
         catch (e) { console.error(`清 local-pin 失败：${String(e)}`) }
       }
-      // 开锁时顺手把所有会话推到在线，别等下一轮才切换
+      // 开锁时顺手把「生效会话」名单里的窗口推到在线，别等下一轮才切换
+      // （名单外的 cli / api 不动——锁对它们不生效，硬推会违背作用域）
+      const roles = autoFailoverRolesOf(cfg)
       if (enabled && cloud) {
-        try { appendCommand(ROOT, { target: "all", action: "model", model: "cloud", reason: "本地保护模式" }) } catch { /* 命令下发失败不影响锁 */ }
+        for (const role of roles) {
+          try { appendCommand(ROOT, { target: role, action: "model", model: "cloud", reason: "本地保护模式" }) } catch { /* 命令下发失败不影响锁 */ }
+        }
       }
-      return json(res, 200, { ok: true, enabled, msg: enabled ? "已开：正在把会话切到在线" : "已关" })
+      return json(res, 200, { ok: true, enabled, roles, msg: enabled ? (roles.length ? `已开：正在把 ${roles.join(" / ")} 切到在线` : "已开：生效会话名单为空，没有窗口需要切换") : "已关" })
     }
     if (req.method === "POST" && url.pathname === "/api/local-pin") {
       const data = await body(req)
@@ -981,11 +992,14 @@ const server = http.createServer(async (req, res) => {
       if (enabled && readLocalLockStrict().enabled) return json(res, 400, { ok: false, msg: "本地保护模式开着（只能用在线），先关掉再锁定" })
       const doc = { enabled, at: new Date().toISOString(), by: "board", reason: String(data.reason || "").slice(0, 200) }
       writeAtomic(join(ROOT, "local-pin.json"), JSON.stringify(doc, null, 2))
-      // 锁定时顺手把所有会话推到本地，别等下一轮才切
+      // 锁定时只推「生效会话」名单里的窗口，名单外的 cli / api 不动
+      const roles = autoFailoverRolesOf(cfg)
       if (enabled) {
-        try { appendCommand(ROOT, { target: "all", action: "model", model: "local", reason: "本地锁定" }) } catch { /* 命令下发失败不影响锁 */ }
+        for (const role of roles) {
+          try { appendCommand(ROOT, { target: role, action: "model", model: "local", reason: "本地锁定" }) } catch { /* 命令下发失败不影响锁 */ }
+        }
       }
-      return json(res, 200, { ok: true, localPin: { enabled, at: doc.at, reason: doc.reason }, msg: enabled ? "已锁定：正在把会话切到本地" : "已解除" })
+      return json(res, 200, { ok: true, roles, localPin: { enabled, at: doc.at, reason: doc.reason }, msg: enabled ? (roles.length ? `已锁定：正在把 ${roles.join(" / ")} 切到本地` : "已锁定：生效会话名单为空，没有窗口需要切换") : "已解除" })
     }
     if (req.method === "GET" && url.pathname === "/api/gateway") {
       const cfg = readJson(CONFIG_FILE, {})

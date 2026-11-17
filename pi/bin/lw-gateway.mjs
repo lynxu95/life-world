@@ -71,6 +71,9 @@ const pickModel = () => {
 }
 function modelWithLocks() {
   const pick = pickModel()
+  // 两个锁只对「生效会话」名单里的会话生效；网关的 role 是 api，不在名单里就别吃锁
+  const roles = Array.isArray(MODELS.autoFailoverRoles) ? MODELS.autoFailoverRoles.map((x) => String(x).trim()) : ["qq", "home"]
+  if (!roles.includes("api")) return pick
   const readLock = (file) => {
     const p = join(ROOT, file)
     if (!existsSync(p)) return { exists: false, on: false }

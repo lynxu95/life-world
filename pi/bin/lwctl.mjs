@@ -308,11 +308,15 @@ const DEFAULT_CLOUD = "deepseek/deepseek-flash"
 function cmdRestart(target) {
   const c = models()
   const cloud = String(c.cloud || DEFAULT_CLOUD)
-  let model = process.env.LIFE_WORLD_MODEL || c.local || ""
+  const baseModel = process.env.LIFE_WORLD_MODEL || c.local || ""
+  let model = baseModel
+  // 两个锁只对「生效会话」名单里的会话生效（名单缺省 = qq/home）
+  const roles = Array.isArray(c.autoFailoverRoles) ? c.autoFailoverRoles.map((x) => String(x).trim()) : ["qq", "home"]
+  const roleManaged = (role) => roles.includes(role)
   // 本地保护模式：常驻窗口直接用在线模型启动，别先起来再切。
   // 锁文件存在但读不出来时按「开着」处理（和扩展一样 fail-closed）。
   try {
-    if (existsSync(join(ROOT, "local-lock.json"))) {
+    if ((roleManaged("home") || roleManaged("qq")) && existsSync(join(ROOT, "local-lock.json"))) {
       let locked = true
       try { locked = JSON.parse(readFileSync(join(ROOT, "local-lock.json"), "utf8")).enabled !== false } catch { /* 坏文件按开着 */ }
       if (locked) model = cloud  // 锁定期间一律在线，连 shell 里导出的本地模型也不认
@@ -322,7 +326,7 @@ function cmdRestart(target) {
   // 本地锁定：重启后直接落在本地；同样按 fail-closed 读，保护优先
   try {
     const pinFile = join(ROOT, "local-pin.json")
-    if (existsSync(pinFile)) {
+    if ((roleManaged("home") || roleManaged("qq")) && existsSync(pinFile)) {
       let pinned = true
       try { pinned = JSON.parse(readFileSync(pinFile, "utf8")).enabled !== false } catch { /* 坏文件按锁定 */ }
       let protectedNow = false
@@ -343,8 +347,10 @@ function cmdRestart(target) {
     : `${shq(join(process.env.HOME || "", ".local/bin"))}:${shq(join(process.env.HOME || "", ".pi/agent/bin"))}:`
   const results = []
   const run = (name, script) => {
+    // 网关的 role 是 api：api 不在生效名单时别把锁算出来的模型塞给它
+    const windowModel = name === "gateway" && !roleManaged("api") ? baseModel : model
     // 用当前 node 的绝对路径：tmux 窗口里的 PATH 不一定是调用方的
-    const cmd = `cd ${shq(ROOT)} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${shq(model)} ${shq(process.execPath)} ${shq(join(ROOT, "bin", script))} 2>&1 | tee -a ${shq(join(ROOT, `${name}.console.log`))}`
+    const cmd = `cd ${shq(ROOT)} && PATH=${pathPrefix}$PATH TZ=Asia/Shanghai LIFE_WORLD_MODEL=${shq(windowModel)} ${shq(process.execPath)} ${shq(join(ROOT, "bin", script))} 2>&1 | tee -a ${shq(join(ROOT, `${name}.console.log`))}`
     // tmux 的 target 支持前缀匹配：用 =名字 精确匹配，别把 life-world-xxx 当成 life-world
     const has = spawnSync("tmux", ["has-session", "-t", "=life-world"], { encoding: "utf8" })
     let r
