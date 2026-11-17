@@ -52,7 +52,7 @@
 | 换化形 | 默认关，看板「扩展功能 · 化形」开启；`form({ name: "小狐狸" })` 设本地/未登记厂商的标签，映射可在看板或 `identity/化形表.md` 改 |
 | 改代码 | `patch`（行级哈希编辑，不用抄原文）；`edit` 兜底 |
 | 家里 | `ha` 查实体 / 调服务 / 让音箱说话（看板「Home Assistant」配地址和令牌，默认关） |
-| 接别的终端 | OpenAI 兼容网关 `/v1`（AnimaVN / 桌宠等），默认关；看板「扩展功能」页配置 |
+| 接别的终端 | OpenAI 兼容网关 `/v1`（默认关，看板「扩展功能」页配置）：AnimaVN 用 `life-world-vn`、桌宠用 `life-world-pet`、通用前端用 `life-world`；步骤见 `docs/gateway-clients.md` |
 | gal 模式 | 用户说「接下来由你主导」或「进入 gal 模式」；只在终端 TUI 有面板 |
 
 工具都是**直接按名字调用**，例如：
