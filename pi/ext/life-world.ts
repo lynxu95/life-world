@@ -2122,6 +2122,7 @@ let lastTurnEndAt = 0
 let idleRefreshDue = false
 let idleGapMs = 0
 let lastTurnBad = false
+let lastTurnOverflow = false
 let wakeQueuedThisTurn = false
 function idleRefreshEnabled(): boolean {
   const c = config().session
@@ -3259,10 +3260,10 @@ async function healthTarget(id: string, ctx?: any): Promise<{ url: string; heade
 }
 
 /** 模型是否可用（15 秒内复用结果，避免每轮都探） */
-async function modelUp(id: string, ctx?: any): Promise<boolean> {
+async function modelUp(id: string, ctx?: any, force = false): Promise<boolean> {
   const o = config().models
   const cached = modelHealthCache.get(id)
-  if (cached && Date.now() - cached.at < 15_000) return cached.up
+  if (!force && cached && Date.now() - cached.at < 15_000) return cached.up
   const h = await healthTarget(id, ctx)
   // 不知道探哪里就别判死，避免误触发自动切换
   const up = h ? await probeUrl(h.url, h.headers, o.probeTimeoutMs) : true
@@ -3335,12 +3336,17 @@ async function ensureModelAlive(ctx: any): Promise<void> {
   failingOver = true
   try {
     if (await modelUp(cur, ctx)) return
+    // 一次探活失败可能只是抽风：隔 1 秒强制再探一次（绕开 15 秒缓存），
+    // 连续两次都不通才认为真的挂了
+    log(`model health retry · ${cur}`)
+    await new Promise((r) => setTimeout(r, 1000))
+    if (await modelUp(cur, ctx, true)) return
     const alt = cur === o.local ? o.cloud : o.local
     if (!(await modelUp(alt, ctx))) {
       log(`failover skipped · both down (${cur}, ${alt})`)
       return
     }
-    const result = await switchTo(ctx, alt, `${cur} 不可用，自动切换`)
+    const result = await switchTo(ctx, alt, `${cur} 重试后仍不可用，自动切换`)
     log(`failover · ${result}`)
   } catch (e) {
     log(`failover failed · ${String(e)}`)
@@ -4209,6 +4215,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     lastCtx = ctx
     lastTurnBad = false
+    lastTurnOverflow = false
     wakeQueuedThisTurn = false
     markIdleBeforeTurn()
     setAgentBusy(true)
@@ -4500,8 +4507,9 @@ export default function (pi: ExtensionAPI) {
     if (stop === "error") {
       lastTurnBad = true
       const errText = String(message?.errorMessage || "")
+      lastTurnOverflow = isContextOverflow(errText)
       log(`model error · ${modelIdOf(ctx)} · ${errText.slice(0, 200)}`)
-      if (isContextOverflow(errText)) {
+      if (lastTurnOverflow) {
         // 上下文超限不是模型坏了：不切模型，避免把私聊送去云端
         log("context overflow · skip failover, abort run")
         if (CHANNEL === "qq" || CHANNEL === "group") markContextOverflow(roleKey, errText)
@@ -4509,12 +4517,15 @@ export default function (pi: ExtensionAPI) {
         // pi 自己会进入溢出恢复/压缩重试，可能卡好几分钟；直接中止这一轮
         try { ctx.abort?.() } catch { /* ignore */ }
       } else {
-        // 回复不了就直接切，不计数
-        await failoverToOther(ctx, "模型无响应")
+        // 先让 pi 自己重试（默认 3 次，含退避）；真的用尽后 agent_settled 再切模型
+        log("model error · wait for pi auto-retry, failover after settle")
       }
     } else if (stop === "stop" || stop === "length") {
       // 正常收尾才清零；toolUse 只是中间轮，别把失败计数抹掉
       toolFailures = 0
+      // pi 自动重试后成功：这一轮最终是好的，别再触发换模型
+      lastTurnBad = false
+      lastTurnOverflow = false
     }
   })
 
@@ -4531,6 +4542,11 @@ export default function (pi: ExtensionAPI) {
       try { markHydrationDelivered(pendingHydrationKey) } catch { /* ignore */ }
     }
     pendingHydrationKey = null
+    // pi 已经用尽自动重试（agent_settled 只会在不再重试/压缩/续跑后触发）才换模型；
+    // 用户中止、上下文超限都不切
+    if (lastTurnBad && !lastTurnOverflow && event?.aborted !== true) {
+      await failoverToOther(ctx, "重试后仍无响应")
+    }
     // 连续在场：这一轮说完了，接下一跳（普通心跳不受影响）
     if (ROLE === "home" || ROLE === "qq") void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
     lastTurnEndAt = Date.now()
