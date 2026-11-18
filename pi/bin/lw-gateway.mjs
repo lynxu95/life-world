@@ -29,7 +29,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const PI = process.env.PI_BIN || "pi"
 const EXT = process.env.LIFE_WORLD_EXT || join(HERE, "../ext/life-world.ts")
 const SESSION_DIR = join(ROOT, "pi-sessions")
-const WORLD_TMP = join(ROOT, "worlds/default/tmp")
+const WORLD = join(ROOT, "worlds/default")
+const WORLD_TMP = join(WORLD, "tmp")
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 const MAX_IMAGES = 4
 
@@ -131,7 +132,9 @@ function startChild() {
   buf = ""
   const myGen = ++gen
   try { mkdirSync(SESSION_DIR, { recursive: true }) } catch (e) { log("session dir failed", String(e)) }
+  try { mkdirSync(WORLD, { recursive: true }) } catch { /* ignore */ }
   const c = spawn(PI, args, {
+    cwd: WORLD, // 相对路径写进世界目录，别落在插件根目录
     env: { ...process.env, TZ: process.env.TZ || "Asia/Shanghai", LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: "api", LIFE_WORLD_CHANNEL: "cli" },
     stdio: ["pipe", "pipe", "pipe"],
   })

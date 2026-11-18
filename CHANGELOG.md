@@ -70,6 +70,14 @@
 - **新增 `docs/gateway-clients.md`**：网关接入指南——开启步骤、地址怎么选、AnimaVN 与 dsh-pet-indesktop
   的填法、立绘不换的排查顺序、行为限制与报错对照表。
 
+## [1.17.2] - 2026-11-18
+
+### 修复
+
+- **pi 会话工作目录固定到 `worlds/default/`**：home / QQ / 网关三路 pi 子进程的 cwd 不再继承插件根目录；
+  AI 用相对路径写 `diary/`、`tmp/`、`skills/` 时会落在世界目录里，不会再把文件丢进
+  `~/.local/share/life-world/` 根目录。
+
 ## [1.17.1] - 2026-11-16
 
 ### 修改

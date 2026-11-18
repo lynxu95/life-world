@@ -541,7 +541,9 @@ class PiSession {
     if (this.sessionFile) args.push("--session", this.sessionFile)
     else args.push("--name", this.name)
     log("pi start", this.name, this.model, this.sessionFile || "(new)")
-    const child = spawn(PI_BIN, args, { env: this.env(), stdio: ["pipe", "pipe", "pipe"] })
+    try { mkdirSync(WORLD, { recursive: true }) } catch { /* ignore */ }
+    // 工作目录固定在 worlds/default：相对路径的 diary/tmp/skills 才不会写进插件根目录
+    const child = spawn(PI_BIN, args, { cwd: WORLD, env: this.env(), stdio: ["pipe", "pipe", "pipe"] })
     this.child = child
     this.closed = false
     this.lastUsed = Date.now()
@@ -1132,7 +1134,7 @@ function judgeGroup(groupId, batch) {
     const prompt = ["你是群聊读空气判断器。只输出 REPLY 或 SKIP。", `群号：${groupId}`, "最近消息：", ...batch.map((m) => `${m.sender}：${m.trigger ? "【@/点名】" : ""}${m.text}`), "规则：@/点名/关键词倾向 REPLY；闲聊/广告/敏感 SKIP。"].join("\n")
     // 判官用在线模型（更快）：配了 models.cloud 就用它
     const judgeModel = CLOUD_MODEL || MODEL
-    const child = spawn(PI_BIN, ["-p", "--model", judgeModel, "--no-session", "--no-skills", "--no-prompt-templates", "--no-extensions", "--no-context-files", "--no-tools", "--system-prompt", "你是群聊读空气判断器，只输出 REPLY 或 SKIP。"], { env: { ...process.env, TZ }, stdio: ["pipe", "pipe", "ignore"] })
+    const child = spawn(PI_BIN, ["-p", "--model", judgeModel, "--no-session", "--no-skills", "--no-prompt-templates", "--no-extensions", "--no-context-files", "--no-tools", "--system-prompt", "你是群聊读空气判断器，只输出 REPLY 或 SKIP。"], { cwd: WORLD, env: { ...process.env, TZ }, stdio: ["pipe", "pipe", "ignore"] })
     let out = ""
     const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch { /* ignore */ } resolve("SKIP") }, 45000)
     child.stdout.on("data", (d) => { out += String(d) })

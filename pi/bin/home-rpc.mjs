@@ -18,6 +18,8 @@ import { spawn } from "node:child_process"
 import { isMessageEnd, isAgentSettled, isExtensionUIRequest, isAssistant, textOf, reqExtensionUIResponse } from "./rpc-adapter.mjs"
 
 const ROOT = process.env.LIFE_WORLD_ROOT || join(homedir(), ".local/share/life-world")
+// pi 会话的工作目录：相对路径（diary/tmp/skills）必须落在世界目录，而不是插件根目录
+const WORLD = join(ROOT, "worlds/default")
 const LOG = join(ROOT, "home-rpc.log")
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PI = process.env.PI_BIN || "pi"
@@ -61,7 +63,9 @@ let startedAt = 0
 function startChild() {
   if (stopping) return
   buf = ""
+  try { mkdirSync(WORLD, { recursive: true }) } catch { /* ignore */ }
   const c = spawn(PI, args, {
+    cwd: WORLD,
     env: { ...process.env, TZ, LIFE_WORLD_ROOT: ROOT, LIFE_WORLD_ROLE: "home", LIFE_WORLD_CHANNEL: "cli" },
     stdio: ["pipe", "pipe", "pipe"],
   })
