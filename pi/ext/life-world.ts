@@ -1850,9 +1850,11 @@ function qqBusy(): boolean {
   } catch { return false }
 }
 
-/** 这条闹钟该在哪个窗口醒：来自 QQ 私聊且桥接在线 → 回私聊；否则后台窗口 */
-function wakeTarget(a: Alarm): "qq" | "home" {
-  if (a.origin === "qq" && CHANNEL !== "group" && bridgeAlive()) return "qq"
+/** 这条闹钟该在哪个窗口醒：QQ 私聊 → 私聊；终端心跳 → 自己的 pid；其余 → 后台 */
+function wakeTarget(a: Alarm): string {
+  const origin = String(a.origin || "")
+  if (origin === "qq" && CHANNEL !== "group" && bridgeAlive()) return "qq"
+  if (origin.startsWith("cli-")) return origin
   return "home"
 }
 
@@ -1875,6 +1877,13 @@ function deliverWake(a: { origin?: string; reason?: string; note?: string; conti
     } catch (e) { log(`wake → qq failed ${String(e)}`) }
   }
   const wc = opts.context === false ? { text: "", nextAt: null } : wakeSuffix(currentModelPref())
+  if (target.startsWith("cli-")) {
+    // 终端心跳只由该 pid 自己投递；别的窗口/后台不能替它开一轮
+    if (target !== heartbeatOwner()) return false
+    const sent = sendTime(text + wc.text)
+    if (sent && wc.nextAt) commitWakeContext(wc.nextAt)
+    return sent
+  }
   const sent = sendTime(text + wc.text)
   if (sent && wc.nextAt) commitWakeContext(wc.nextAt)
   return sent
@@ -2143,6 +2152,57 @@ function markIdleBeforeTurn(): void {
   idleRefreshDue = true
 }
 
+/** 心跳归属：终端用进程级 key，多个 TUI 窗口互不接管；qq/home 用角色名 */
+function heartbeatOwner(): string {
+  return ROLE === "cli" ? `cli-${process.pid}` : ROLE
+}
+/** 从 cli-<pid> 取出 pid；不是终端归属返回 0 */
+function ownerPid(owner: string): number {
+  const m = /^cli-(\d+)$/.exec(String(owner || ""))
+  return m ? Number(m[1]) : 0
+}
+/** 归属窗口还在不在：qq 看桥接+会话，home 看状态文件，cli 看进程 */
+function ownerAlive(owner: string): boolean {
+  if (owner === "qq") return bridgeAlive() && sessionAlive("qq")
+  if (owner === "home") return sessionAlive("home")
+  const pid = ownerPid(owner)
+  if (!pid) return false
+  try { process.kill(pid, 0); return true }
+  catch (e: any) { return e?.code === "EPERM" } // 没权限发信号 = 进程还在
+}
+
+/** home tick 每轮清理：终端进程已经不在的 cli 心跳，未来时间的也一起收掉 */
+function pruneDeadCliHeartbeats(): void {
+  const st = readWorldStrict()
+  if (!st) return
+  const dead = new Set<string>()
+  for (const a of st.alarms || []) {
+    const origin = String(a.origin || "")
+    if (origin.startsWith("cli-") && a.status === "pending" && !ownerAlive(origin)) dead.add(origin)
+  }
+  const cc = activeContinuous(st)
+  if (cc && String(cc.origin || "").startsWith("cli-") && !ownerAlive(String(cc.origin))) dead.add(String(cc.origin))
+  if (!dead.size) return
+  const pruned = withWorldLock(() => {
+    const f = readWorldStrict()
+    if (!f) return false
+    let changed = false
+    for (const a of f.alarms || []) {
+      if (a.status === "pending" && dead.has(String(a.origin || ""))) {
+        a.status = "cancelled"
+        a.cancelledAt = new Date().toISOString()
+        changed = true
+      }
+    }
+    if (f.continuous && !f.continuous.endedAt && dead.has(String(f.continuous.origin || ""))) {
+      endContinuous(f)
+      changed = true
+    }
+    return changed ? writeWorld(f) : false
+  })
+  if (pruned) log(`cli heartbeat prune · ${[...dead].join(", ")}`)
+}
+
 /** 某个会话最近 90 秒有没有心跳（判断它还在不在） */
 function sessionAlive(key: string): boolean {
   try {
@@ -2178,11 +2238,21 @@ async function continuousAfterSettle(ownerKey: string): Promise<void> {
   const st0 = readWorldStrict()
   const cc0 = activeContinuous(st0)
   if (!st0 || !cc0) return
-  const ownerRaw = String(cc0.origin || "home")
-  const owner = ownerRaw === "qq" ? "qq" : "home"
-  // qq 属主还要看桥接在不在：桥接断了，qq 会话虽然活着也发不出去，交给 home 接管
-  const ownerAlive = owner === "qq" ? (bridgeAlive() && sessionAlive("qq")) : sessionAlive(owner)
-  if (owner !== ownerKey && ownerAlive) return
+  const owner = String(cc0.origin || "home")
+  const alive = ownerAlive(owner)
+  // 终端归属只由该 pid 推进；终端关了，链就结束，不回落
+  if (owner.startsWith("cli-") && !alive) {
+    withWorldLock(() => {
+      const st = readWorldStrict()
+      if (!st) return false
+      if (st.continuous && st.continuous.chainId === cc0.chainId) endContinuous(st)
+      return writeWorld(st)
+    })
+    return
+  }
+  // qq 属主桥接断了交给 home；home 没了交给 home tick 收尾，不让 cli 抢
+  if ((owner === "qq" || owner === "home") && !alive && ROLE !== "home") return
+  if (owner !== ownerKey && alive) return
   const now = Date.now()
   const r = withWorldLock(() => {
     const st = readWorldStrict()
@@ -2257,9 +2327,13 @@ async function fireContinuousJump(chainId: string, wantId = ""): Promise<void> {
     const a = (st.alarms || []).find((x) => x.chainId === chainId && x.status === "pending" && (!wantId || x.id === wantId))
     if (!a) return { kind: "none" as const }
     if (a.paused) return { kind: "paused" as const }
-    // 这一跳该落在 home，但当前不是 home 进程：别在这里跑（qq 子进程 sendTime 会跑进 QQ 会话）
-    const landsHome = !(a.origin === "qq" && bridgeAlive())
-    if (landsHome && ROLE !== "home") return { kind: "defer" as const }
+    const targetOwner = String(a.origin || "home")
+    const localCli = targetOwner.startsWith("cli-")
+    // 终端归属只由该 pid 推进；别的窗口别替它开一轮
+    if (localCli && targetOwner !== heartbeatOwner()) return { kind: "defer" as const }
+    // 该落在 home 的跳，当前不是 home 进程就别在这里跑（qq 子进程 sendTime 会跑进 QQ 会话）
+    const landsHome = !(targetOwner === "qq" && bridgeAlive())
+    if (!localCli && landsHome && ROLE !== "home") return { kind: "defer" as const }
     const startedMs = Date.parse(String(cc.startedAt || "")) || now
     if (now - startedMs > heartbeatLimitMinutes() * 60_000) { endContinuous(st, now); writeWorld(st); return { kind: "timeup" as const } }
     a.status = "fired"
@@ -2284,6 +2358,124 @@ async function fireContinuousJump(chainId: string, wantId = ""): Promise<void> {
       return writeWorld(st)
     })
     scheduleContinuousTimer(chainId, Date.now() + 30_000)
+  }
+}
+
+// —— 终端心跳：只调度本进程（cli-<pid>）自己的普通心跳；不跑完整 tick ——
+let cliHbTimer: any = null
+let cliHbBusy = false
+
+function scheduleCliHeartbeat(): void {
+  if (ROLE !== "cli") return
+  if (cliHbTimer) { clearTimeout(cliHbTimer); cliHbTimer = null }
+  const st = readWorldStrict()
+  if (!st) {
+    // 世界文件瞬时读不出来：留一个保守轮询，别让本地调度链永久断掉
+    cliHbTimer = setTimeout(() => { void cliHeartbeatTick() }, 30_000)
+    try { cliHbTimer.unref?.() } catch { /* ignore */ }
+    return
+  }
+  const owner = heartbeatOwner()
+  const now = Date.now()
+  let next = 0
+  let has = false
+  for (const a of st.alarms || []) {
+    if (a.origin !== owner || a.status !== "pending" || a.continuous) continue
+    has = true
+    if (a.paused) continue
+    const t = Date.parse(String(a.at || ""))
+    if (!Number.isFinite(t)) continue
+    next = next ? Math.min(next, t) : t
+  }
+  // 没有本进程的 pending 跳就不占定时器；暂停/门控关闭时用 30 秒轻轮询，
+  // 这样看板 resume/fire_now 和重新打开心跳都能在不重启 TUI 的情况下接上
+  if (!has) return
+  const c = config()
+  const gateOff = !c.world.enabled || !c.world.running || !heartbeatEnabled()
+  const delay = gateOff || !next ? 30_000 : Math.max(2_000, Math.min(30_000, next - now))
+  cliHbTimer = setTimeout(() => { void cliHeartbeatTick() }, delay)
+  try { cliHbTimer.unref?.() } catch { /* ignore */ }
+}
+
+async function cliHeartbeatTick(): Promise<void> {
+  if (ROLE !== "cli" || cliHbBusy) return
+  cliHbBusy = true
+  try {
+    const c = config()
+    if (!c.world.enabled || !c.world.running || !heartbeatEnabled()) return
+    const st = readWorldStrict()
+    if (!st) return
+    const owner = heartbeatOwner()
+    const now = Date.now()
+    const due = (st.alarms || []).filter((a) =>
+      a.origin === owner && a.status === "pending" && !a.paused && !a.continuous &&
+      Number.isFinite(Date.parse(String(a.at || ""))) && Date.parse(String(a.at)) <= now)
+    if (!due.length) return
+    if (isAgentBusy()) {
+      // 和 home tick 一样：忙就顺延，不跳过
+      withWorldLock(() => {
+        const f = readWorld()
+        for (const a of f.alarms || []) {
+          if (a.origin === owner && a.status === "pending" && !a.continuous && due.some((d) => d.id === a.id)) {
+            a.at = new Date(Date.now() + 30_000).toISOString()
+          }
+        }
+        return writeWorld(f)
+      })
+      return
+    }
+    const a = due[0]
+    const seqN = Number(a.seq)
+    const seq0 = Number.isFinite(seqN) && seqN > 0 ? seqN : 1
+    const everySec = hbIntervalSeconds(a)
+    const startedRaw = Date.parse(String(a.startedAt || ""))
+    const fallbackRaw = Date.parse(String(a.setAt || a.at || ""))
+    const startedMs = Number.isFinite(startedRaw) ? startedRaw : (Number.isFinite(fallbackRaw) ? fallbackRaw : Date.now())
+    const timeUp = (now - startedMs) / 1000 + everySec > heartbeatLimitMinutes() * 60
+    const willContinue = seq0 < 60 && !timeUp
+    const ending = !willContinue
+    const why: "time" | "jumps" | null = timeUp ? "time" : (seq0 >= 60 ? "jumps" : null)
+    const text = heartbeatText(a, ending, why)
+    if (a.model) await switchForAlarm(a).catch((e) => log(`heartbeat switch failed ${String(e)}`))
+    const sent = deliverWake(a, text)
+    if (!sent) {
+      withWorldLock(() => {
+        const f = readWorld()
+        const cur = (f.alarms || []).find((x) => x.id === a.id)
+        if (cur && cur.status === "pending") cur.at = new Date(Date.now() + 30_000).toISOString()
+        return writeWorld(f)
+      })
+      return
+    }
+    withWorldLock(() => {
+      const f = readWorld()
+      const list = f.alarms || []
+      const cur = list.find((x) => x.id === a.id)
+      // 发送期间被 heartbeat_stop 停掉：不要复活
+      if (!cur || cur.status === "fired" || cur.status === "cancelled") return writeWorld(f)
+      cur.status = "fired"
+      cur.firedAt = new Date().toISOString()
+      if (willContinue) {
+        const base = Date.parse(String(a.at || ""))
+        const nextMs = Math.max(Date.now(), (Number.isFinite(base) ? base : Date.now()) + everySec * 1000)
+        list.push({
+          id: `s-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          at: new Date(nextMs).toISOString(),
+          note: a.note, setAt: new Date().toISOString(), model: a.model,
+          kind: "sub", status: "pending",
+          chainId: a.chainId, reason: a.reason, intervalSeconds: everySec, seq: seq0 + 1,
+          startedAt: new Date(startedMs).toISOString(), origin: owner,
+        })
+      }
+      f.alarms = list
+      f.lastWake = dayOf()
+      return writeWorld(f)
+    })
+  } catch (e) {
+    log(`cli heartbeat tick failed · ${String(e)}`)
+  } finally {
+    cliHbBusy = false
+    scheduleCliHeartbeat()
   }
 }
 
@@ -2383,12 +2575,15 @@ async function tick(): Promise<void> {
   try {
     rotateLog(LOG_FILE)
     const c = config()
-    if (!c.world.enabled || !c.world.running) return
     // world.json 损坏时整轮跳过：否则每个 tick 都会重发同一条后台任务，还写不进去标记
     if (!readWorldStrict()) {
       log("world.json 解析失败，本轮跳过（等修好或下次重启）")
       return
     }
+    // 终端窗口异常退出（SIGKILL/关窗）不会走 exit：每轮按 pid 清掉死掉的 cli 心跳
+    // 放在世界开关判断之前：世界暂停时也能收掉死链
+    pruneDeadCliHeartbeats()
+    if (!c.world.enabled || !c.world.running) return
     const state = readWorld()
     const now = new Date()
     const today = dayOf(now)
@@ -2486,7 +2681,7 @@ async function tick(): Promise<void> {
       if (cc && !(state.alarms || []).some((a) => a.chainId === cc.chainId && a.status === "pending")) {
         const lastAt = (state.alarms || []).filter((a) => a.chainId === cc.chainId)
           .reduce((m, a) => Math.max(m, Date.parse(String(a.firedAt || a.at || "")) || 0), 0)
-        if (lastAt && Date.now() - lastAt > 5 * 60_000 && !sessionAlive(String(cc.origin || "home"))) {
+        if (lastAt && Date.now() - lastAt > 5 * 60_000 && !ownerAlive(String(cc.origin || "home"))) {
           withWorldLock(() => {
             const f = readWorld()
             if (f.continuous && f.continuous.chainId === cc.chainId) endContinuous(f)
@@ -2579,6 +2774,8 @@ async function tick(): Promise<void> {
         }
         // —— 心跳串：独立于主活动，触发后自动续下一跳 ——
         if (a.chainId && !a.parentId) {
+          // 终端心跳只由该 pid 自己跑；死掉的已在 pruneDeadCliHeartbeats 里收过
+          if (String(a.origin || "").startsWith("cli-")) continue
           // 总开关关掉时不再触发（未执行的跳保留，打开后接着跳）
           if (!heartbeatEnabled()) continue
           if (a.paused) continue
@@ -4548,7 +4745,7 @@ export default function (pi: ExtensionAPI) {
       await failoverToOther(ctx, "重试后仍无响应")
     }
     // 连续在场：这一轮说完了，接下一跳（普通心跳不受影响）
-    if (ROLE === "home" || ROLE === "qq") void continuousAfterSettle(roleKey).catch((e) => log(`continuous settle failed · ${String(e)}`))
+    if (ROLE === "home" || ROLE === "qq" || ROLE === "cli") void continuousAfterSettle(heartbeatOwner()).catch((e) => log(`continuous settle failed · ${String(e)}`))
     lastTurnEndAt = Date.now()
     if (contextOverflowPending) {
       contextOverflowPending = false
@@ -4812,7 +5009,7 @@ export default function (pi: ExtensionAPI) {
   addTool(pi, {
     name: "heartbeat",
     label: "Heartbeat",
-    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 秒/分钟在当下醒一次，像一直坐在旁边。**continuous=true 是「连续在场」特殊模式**：说完就接下一跳、不等间隔，很费 token、会取消其他心跳串，只有用户明确要求并确认后才能开。**没有会话/窗口参数**：在哪个窗口起，之后每一跳就回到那个窗口醒（私聊里起的回私聊，桥接离线才回后台）。理由写一次，之后每一跳都带着；普通心跳每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串；连续在场不按跳数限，只受心跳时长限制。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
+    description: "心跳：当对方需要你同步在场陪伴时使用——每隔 N 秒/分钟在当下醒一次，像一直坐在旁边。**continuous=true 是「连续在场」特殊模式**：说完就接下一跳、不等间隔，很费 token、会取消其他心跳串，只有用户明确要求并确认后才能开。**没有会话/窗口参数**：在哪个窗口起，之后每一跳就回到那个窗口醒（私聊里起的回私聊；终端 TUI 里起的只回那个终端，窗口关掉后心跳会被结束；桥接离线才回后台）。理由写一次，之后每一跳都带着；普通心跳每跳结束自动续下一跳（最多 60 跳），同时最多 2 条串；连续在场不按跳数限，只受心跳时长限制。等具体任务完成请用 bg_run({ notify: true }) 让它在跑完时叫你，别用轮询。",
     parameters: {
       type: "object",
       properties: {
@@ -4834,6 +5031,7 @@ export default function (pi: ExtensionAPI) {
       const reason = String(params?.reason || "").trim()
       if (!reason) return ok("说一下为什么要起这个心跳。")
       const continuous = params?.continuous === true
+      const owner = heartbeatOwner()
       const everySecRaw = Number(params?.every_seconds) > 0
         ? Number(params?.every_seconds)
         : Number(params?.every_minutes) > 0 ? Number(params?.every_minutes) * 60 : 0
@@ -4880,8 +5078,8 @@ export default function (pi: ExtensionAPI) {
           st.continuous = {
             chainId,
             startedAt: new Date(now).toISOString(),
-            // 非 qq 的链最终都落在 home（sendTime 只有 home 会跑），归属窗口按落点记
-            origin: CHANNEL === "qq" ? roleKey : "home",
+            // 归属窗口：qq 回私聊；终端回自己的 pid；其余回后台 home
+            origin: owner,
             reason: reason.slice(0, 200),
             note: (String(params?.note || "").trim() || reason).slice(0, 500),
             model,
@@ -4901,24 +5099,25 @@ export default function (pi: ExtensionAPI) {
           intervalSeconds: everySec,
           seq: 1,
           startedAt: new Date(now).toISOString(),
-          origin: continuous ? (CHANNEL === "qq" ? roleKey : "home") : roleKey,
+          origin: owner,
           ...(continuous ? { continuous: true } : {}),
         }
         st.alarms = [...list, alarm].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-        return { ok: writeWorld(st), chainId, preempted }
+        return { ok: writeWorld(st), chainId, preempted, origin: owner }
       })
       // res.msg 承载真正的失败原因（如「同时最多 2 条」「world.json 读不出来」），别吞掉
       if (!res?.ok) return ok(res?.msg || "心跳没起成（world.json 被占用或读不出来）。")
       const maxMin = heartbeatLimitMinutes()
       if (continuous) {
-        // 第一跳：归属窗口自己排定时器（qq/home），cli 起的交给 home 的 tick
-        if (ROLE === (CHANNEL === "qq" ? roleKey : "home")) scheduleContinuousTimer(String(res.chainId), now + firstSec * 1000)
+        // 第一跳：归属窗口自己排定时器；cli 由该终端进程自己推进
+        if (res.origin === heartbeatOwner()) scheduleContinuousTimer(String(res.chainId), now + firstSec * 1000)
         const cut = Number(res.preempted) > 0 ? `\n其他 ${res.preempted} 条心跳已让路（标记为已取消）。` : ""
         return ok(`连续在场已起：${res.chainId}${cut}\n模式：这一轮说完就接下一跳，两轮之间至少隔 ${everySec} 秒，最长 ${maxMin} 分钟。\n它很费 token，而且会在窗口里持续说话；不需要了立刻 heartbeat_stop({ chainId: "${res.chainId}" })。`)
       }
       // 从首跳开始算：还能跳几次 = (上限 - 首跳) / 间隔 + 1
       const maxJumps = Math.max(1, Math.min(60, Math.floor((maxMin * 60 - firstSec) / everySec) + 1))
       const spanSec = Math.min(maxMin * 60, firstSec + (maxJumps - 1) * everySec)
+      if (ROLE === "cli") scheduleCliHeartbeat()
       return ok(`心跳已起：${res.chainId}\n每 ${hbEveryText(everySec)}一跳，第一跳 ${isoLocal(new Date(now + firstSec * 1000))}。\n按当前设置（单次最长 ${maxMin} 分钟），这条串最多 ${maxJumps} 跳、约 ${hbEveryText(spanSec)}。\n不需要了：heartbeat_stop({ chainId: "${res.chainId}" })`)
     },
   })
@@ -4954,6 +5153,7 @@ export default function (pi: ExtensionAPI) {
         return { ok: writeWorld(st), removed: cancelled }
       })
       if (!res?.ok) return ok("没停成（world.json 被占用）。")
+      if (ROLE === "cli") scheduleCliHeartbeat()
       return ok(res.removed ? `已停止心跳 ${chainId}（撤掉 ${res.removed} 跳未触发的）。` : `心跳 ${chainId} 本来就没有待触发的了。`)
     },
   })
@@ -6153,5 +6353,30 @@ export default function (pi: ExtensionAPI) {
     } else {
       log("pi timer skipped (lock held)")
     }
+  } else if (ROLE === "cli") {
+    // 终端心跳：只调度本进程自己的串；窗口关了（exit）就把它们收掉
+    scheduleCliHeartbeat()
+    process.on("exit", () => {
+      try {
+        withWorldLock(() => {
+          const st = readWorldStrict()
+          if (!st) return false
+          const owner = heartbeatOwner()
+          let changed = false
+          for (const a of st.alarms || []) {
+            if (a.origin === owner && a.status === "pending") {
+              a.status = "cancelled"
+              a.cancelledAt = new Date().toISOString()
+              changed = true
+            }
+          }
+          if (st.continuous && st.continuous.origin === owner && !st.continuous.endedAt) {
+            endContinuous(st)
+            changed = true
+          }
+          return changed ? writeWorld(st) : false
+        })
+      } catch { /* exit 时尽力而为 */ }
+    })
   }
 }
