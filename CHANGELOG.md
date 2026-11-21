@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.17.8] - 2026-11-22
+
+### 修复
+
+- **模型探活优先跟随当前模型的 API**：先探 `provider.baseUrl + /models`，失败再退回
+  `localHealthUrl` / `cloudHealthUrl`。换本地模型或换端口后，旧的 health URL 不会再把这个模型误判成
+  “本地异常”；显式 health URL 仍作为没有 `/models` 的服务兜底。
+
 ## [1.17.7] - 2026-11-20
 
 ### 新增

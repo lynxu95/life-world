@@ -3437,23 +3437,23 @@ async function healthAuth(provider: string, ctx?: any, model?: any): Promise<{ h
 }
 
 /**
- * 健康检查地址：优先用 life-world.json 的显式配置；没配就跟随模型，
- * 从 provider 的 baseUrl 推导 `${baseUrl}/models`，换模型后自动跟着换。
+ * 健康检查候选：优先当前模型 provider 的 baseUrl + /models（换模型自动跟着换），
+ * 探不到再退回 life-world.json 的显式 health URL（给没有 /models 的服务兜底）。
+ * 这样旧的 localHealthUrl 不会把新换的本地模型判死。
  */
-async function healthTarget(id: string, ctx?: any): Promise<{ url: string; headers: Record<string, string> } | null> {
+async function healthTargets(id: string, ctx?: any): Promise<Array<{ url: string; headers: Record<string, string> }>> {
   const ref = parseModelRef(id)
-  if (!ref) return null
+  if (!ref) return []
   const o = config().models
   const explicit = id === o.local ? o.localHealthUrl : id === o.cloud ? o.cloudHealthUrl : ""
   let model: any = null
   try { model = (ctx || lastCtx)?.modelRegistry?.find?.(ref.provider, ref.id) } catch { /* stale ctx */ }
   const auth = await healthAuth(ref.provider, ctx, model)
-  if (explicit) {
-    return { url: explicit, headers: auth.headers }
-  }
   const base = String(auth.baseUrl || model?.baseUrl || "").replace(/\/+$/, "")
-  if (!base) return null
-  return { url: `${base}/models`, headers: auth.headers }
+  const out: Array<{ url: string; headers: Record<string, string> }> = []
+  if (base) out.push({ url: `${base}/models`, headers: auth.headers })
+  if (explicit && !out.some((x) => x.url === explicit)) out.push({ url: explicit, headers: auth.headers })
+  return out
 }
 
 /** 模型是否可用（15 秒内复用结果，避免每轮都探） */
@@ -3461,10 +3461,13 @@ async function modelUp(id: string, ctx?: any, force = false): Promise<boolean> {
   const o = config().models
   const cached = modelHealthCache.get(id)
   if (!force && cached && Date.now() - cached.at < 15_000) return cached.up
-  const h = await healthTarget(id, ctx)
+  const hs = await healthTargets(id, ctx)
   // 不知道探哪里就别判死，避免误触发自动切换
-  const up = h ? await probeUrl(h.url, h.headers, o.probeTimeoutMs) : true
-  if (!up && h) log(`model health down · ${id} · ${h.url}`)
+  let up = hs.length === 0
+  for (const h of hs) {
+    if (await probeUrl(h.url, h.headers, o.probeTimeoutMs)) { up = true; break }
+  }
+  if (!up && hs.length) log(`model health down · ${id} · ${hs.map((h) => h.url).join(" | ")}`)
   modelHealthCache.set(id, { at: Date.now(), up })
   return up
 }
