@@ -3452,7 +3452,13 @@ async function healthTargets(id: string, ctx?: any): Promise<Array<{ url: string
   const base = String(auth.baseUrl || model?.baseUrl || "").replace(/\/+$/, "")
   const out: Array<{ url: string; headers: Record<string, string> }> = []
   if (base) out.push({ url: `${base}/models`, headers: auth.headers })
-  if (explicit && !out.some((x) => x.url === explicit)) out.push({ url: explicit, headers: auth.headers })
+  // 显式 health 只在同源（同一 host:port 的自定义 /health）或没有 baseUrl 时兜底；
+  // 换模型换端口后旧 health URL 不再把新模型判活
+  let sameOrigin = false
+  if (base && explicit) {
+    try { sameOrigin = new URL(explicit).origin === new URL(base).origin } catch { /* ignore */ }
+  }
+  if (explicit && (!base || sameOrigin) && !out.some((x) => x.url === explicit)) out.push({ url: explicit, headers: auth.headers })
   return out
 }
 

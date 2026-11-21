@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.17.9] - 2026-11-22
+
+### 修复
+
+- **显式 health URL 只在同源兜底**：当前模型 API 的 `/models` 失败后，只有 `localHealthUrl` /
+  `cloudHealthUrl` 与当前 `baseUrl` 同 host/port 时才继续探；换模型/换端口后旧 health URL 不会再
+  把新模型误判成存活。
+
 ## [1.17.8] - 2026-11-22
 
 ### 修复
