@@ -15,6 +15,14 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.17.10] - 2026-11-22
+
+### 修复
+
+- **看板健康探测同步新逻辑**：`/api/health` 也优先探当前模型 `provider.baseUrl + /models`，
+  `localHealthUrl` / `cloudHealthUrl` 只在同源或没有 baseUrl 时兜底。换本地模型/端口后，
+  看板不会再显示「本地模型异常」。
+
 ## [1.17.9] - 2026-11-22
 
 ### 修复

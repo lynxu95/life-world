@@ -388,15 +388,28 @@ async function probeModel(ref, explicitUrl) {
   const id = String(ref || "")
   const provider = id.includes("/") ? id.slice(0, id.indexOf("/")) : ""
   const base = providerBase(provider).replace(/\/+$/, "")
-  const url = String(explicitUrl || (base ? `${base}/models` : ""))
-  if (!url) return { state: "unknown", url: "", detail: "没配健康地址" }
-  const key = providerKey(provider)
-  try {
-    const r = await fetch(url, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(4000) })
-    return { state: r.ok ? "ok" : "bad", url, code: r.status }
-  } catch (e) {
-    return { state: "bad", url, error: String(e?.message || e) }
+  const urls = []
+  if (base) urls.push(`${base}/models`)
+  // 显式 health 只在同源（同一 host:port 的自定义 /health）或没有 baseUrl 时兜底；
+  // 换模型换端口后旧 localHealthUrl 不会把新模型误判成异常
+  let sameOrigin = false
+  if (base && explicitUrl) {
+    try { sameOrigin = new URL(String(explicitUrl)).origin === new URL(base).origin } catch { /* ignore */ }
   }
+  if (explicitUrl && (!base || sameOrigin) && !urls.includes(String(explicitUrl))) urls.push(String(explicitUrl))
+  if (!urls.length) return { state: "unknown", url: "", detail: "没配健康地址" }
+  const key = providerKey(provider)
+  let last = null
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(4000) })
+      if (r.ok) return { state: "ok", url, code: r.status }
+      last = { state: "bad", url, code: r.status }
+    } catch (e) {
+      last = { state: "bad", url, error: String(e?.message || e) }
+    }
+  }
+  return last || { state: "bad", url: urls.join(" | "), error: "all failed" }
 }
 function readTail(file, max) {
   try { const s = readFileSync(file, "utf8"); return s.slice(-max) } catch { return "" }
