@@ -15,6 +15,17 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.18.1] - 2026-11-22
+
+### 修复
+
+- **纯在线部署也会执行档位恢复**：`model_select` 的取消防抖/恢复逻辑移到 `!models.local` 早退之前，避免中间档位写脏
+  `cloudByRole` 且不恢复。
+- **切到在线不再继承本地档位**：没有 `cloudByRole` 时使用 pi 的 `getSettings().defaultThinkingLevel`，
+  缺失则回落到 pi 默认 `medium`；本地的 `off` 不会被原样带到在线。
+- **看板思考下拉每次重建**，历史「当前」选项不会越堆越多。
+- `setThinkingLevelSafe` 在 pi 不支持该接口时返回失败，不再静默报成功。
+
 ## [1.18.0] - 2026-11-22
 
 ### 新增

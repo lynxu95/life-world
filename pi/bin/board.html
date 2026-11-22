@@ -1216,8 +1216,10 @@ async function loadOverview() {
       const th = $("m-thinking")
       if (th && document.activeElement !== th) {
         const val = (d.models.thinking && d.models.thinking.defaultLocal) || "off"
-        // 配置里可能是 pi 的其他档位（xhigh/max/minimal）：保留显示，别让下拉变空白
-        if (![...th.options].some((o) => o.value === val)) {
+        // 每次重建，别让历史「（当前）」选项越堆越多；未知档位保留显示
+        const base = [["off", "关"], ["low", "低"], ["medium", "中"], ["high", "高"]]
+        th.innerHTML = base.map(([v, label]) => `<option value="${v}">${label}</option>`).join("")
+        if (!base.some(([v]) => v === val)) {
           const o = document.createElement("option")
           o.value = val
           o.textContent = val + "（当前）"

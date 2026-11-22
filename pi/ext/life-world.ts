@@ -3638,9 +3638,17 @@ function localThinkingFor(roleKey: string): string {
   const t = config().models.thinking
   return normalizeThinkingLevel(t.byRole[roleKey]) || normalizeThinkingLevel(t.defaultLocal) || "off"
 }
+function onlineDefaultThinking(): string {
+  try {
+    const v = normalizeThinkingLevel((piRef as any)?.getSettings?.()?.defaultThinkingLevel)
+    if (v) return v
+  } catch { /* ignore */ }
+  // pi 自己的 DEFAULT_THINKING_LEVEL；绝不能把本地 off 原样带到在线
+  return "medium"
+}
 function cloudThinkingFor(roleKey: string): string {
-  // 在线档位不归 AI 管：只有用户手动设过 cloudByRole 才恢复，否则交给 pi 自己的默认
-  return normalizeThinkingLevel(config().models.thinking.cloudByRole[roleKey])
+  // 在线档位不归 AI 管：有用户保存的值就恢复，没有就用 pi 的默认
+  return normalizeThinkingLevel(config().models.thinking.cloudByRole[roleKey]) || onlineDefaultThinking()
 }
 /** 思考持久化抑制：切模型时 pi 会先重置档位，别把这个中间值当成用户选择写盘 */
 let suppressThinkingPersist = false
@@ -3650,14 +3658,14 @@ function getThinkingLevelSafe(): string {
   try { return String((piRef as any)?.getThinkingLevel?.() ?? lastCtx?.thinkingLevel ?? "") }
   catch { return "" }
 }
-function setThinkingLevelSafe(level: string): string {
+function setThinkingLevelSafe(level: string): string | null {
   const p: any = piRef
-  if (!p?.setThinkingLevel) return ""
+  if (!p?.setThinkingLevel) return null
   const prev = suppressThinkingPersist
   suppressThinkingPersist = true
-  try { p.setThinkingLevel(level) } catch { /* ignore */ }
+  try { p.setThinkingLevel(level) } catch { return null }
   finally { suppressThinkingPersist = prev }
-  return getThinkingLevelSafe()
+  return getThinkingLevelSafe() || level
 }
 function cancelPendingThinkingPersist(): void {
   if (pendingThinkingTimer) { clearTimeout(pendingThinkingTimer); pendingThinkingTimer = null }
@@ -3694,11 +3702,13 @@ function applyThinkingFor(ctx: any): void {
   if (!roleManaged()) return
   let id = ""
   try { id = modelIdOf(ctx) } catch { return }
-  const kind = modelKind(id)
+  const o = config().models
+  let kind = modelKind(id)
+  // 纯在线部署（没配 local）时 modelKind 认不出 cloud，这里补上
+  if (kind === "other" && !o.local && o.cloud && id === o.cloud) kind = "cloud"
   if (kind !== "local" && kind !== "cloud") return
   const key = thinkingRoleKey()
   const level = kind === "local" ? localThinkingFor(key) : cloudThinkingFor(key)
-  if (!level) return // 在线没有用户保存的档位：交给 pi 自己，不硬改
   setThinkingLevelSafe(level)
 }
 function currentThinkingLine(): string {
@@ -4392,7 +4402,8 @@ export default function (pi: ExtensionAPI) {
       let cur = ""
       try { cur = modelIdOf(lastCtx) } catch { writeAck(c.id, { ok: false, msg: "会话上下文已失效" }); return }
       if (cur !== o.local) { writeAck(c.id, { ok: false, msg: "在线模型无需调整档位" }); return }
-      const actual = setThinkingLevelSafe(level) || level
+      const actual = setThinkingLevelSafe(level)
+      if (!actual) { writeAck(c.id, { ok: false, msg: "当前 pi 不支持调整思考档位" }); return }
       saveThinkingSlot(thinkingRoleKey(), "local", actual)
       writeAck(c.id, { ok: true, level: actual, msg: `思考档位已设为 ${thinkingLabel(actual)}（${actual}）` })
       writeStatus()
@@ -4468,11 +4479,11 @@ export default function (pi: ExtensionAPI) {
   // 手动 /model、Ctrl+P 切到云端也要开抽屉；切回本地合上
   pi.on("model_select", async (event: any, ctx: any) => {
     const o = config().models
-    if (!o.local) return
     const id = `${event?.model?.provider}/${event?.model?.id}`
     cancelPendingThinkingPersist()
     thinkingSessionKey = ""
     applyThinkingFor(ctx)
+    if (!o.local) return
     // 本地保护：手动/别处切到本地也立刻扳回在线，防止断电式的自我断线
     if (localLockOn() && id === o.local && o.cloud) {
       const r = await switchTo(ctx, o.cloud, "本地保护模式")
@@ -6143,7 +6154,7 @@ export default function (pi: ExtensionAPI) {
       try { cur = modelIdOf(ctx) || "" } catch { /* stale ctx */ }
       if (!cur) return ok("还没有模型信息。")
       const kind = modelKind(cur)
-      if (kind === "cloud") return ok("在线模型无需调整档位")
+      if (kind === "cloud" || (!o.local && o.cloud && cur === o.cloud)) return ok("在线模型无需调整档位")
       if (kind !== "local") return ok("这个模型不在本地/在线配置里，档位不归插件管。")
       if (!roleManaged()) return ok("本会话不在生效名单（models.autoFailoverRoles），不能自己调思考档位。")
       const actual = getThinkingLevelSafe()
@@ -6151,7 +6162,8 @@ export default function (pi: ExtensionAPI) {
       if (!want) {
         return ok(`当前思考档位：${thinkingLabel(actual)}（${actual || "未知"}）；本地默认：${thinkingLabel(localThinkingFor(thinkingRoleKey()))}。可设：off / low / medium / high。`)
       }
-      const now = setThinkingLevelSafe(want) || want
+      const now = setThinkingLevelSafe(want)
+      if (!now) return ok("当前 pi 不支持调整思考档位。")
       saveThinkingSlot(thinkingRoleKey(), "local", now)
       writeStatus()
       return ok(now === want
