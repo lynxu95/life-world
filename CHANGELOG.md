@@ -15,6 +15,30 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.18.2] - 2026-11-22
+
+### 修复
+
+- **记忆索引保留来源**：SQLite 读路径与回填 INSERT 补回 `src`，群聊成员的话不再被标成「对方」；已有但 `src` 为空的旧索引行也会补写，索引可用和退回文件扫描两种状态结果一致。
+- **切云端不再漏 bootstrap**：隐私抽屉只常驻 `life-world-state` 小消息；`life-world-bootstrap`（近期原话 + 我是谁）在切云端后被一起藏起。
+- **`perceive` 音频可用**：`input_audio.data` 改为裸 base64（data URL 取逗号后内容，远程 URL 先下载）；远程音频按 Content-Length/流式累计限制 10MB，格式优先取响应 Content-Type。
+- **配置不会被写空**：`group_chat`、`weather`、看板监听地址、`lwctl board` 四处写回前严格解析；文件损坏/读不出来时报错，不拿 `{}` 覆盖整份配置。
+- **终端多开互不踩**：cli 的 roleKey 改为 `cli-<pid>`，控制命令、回执、水位、状态文件按进程隔离；`switch_model({ session: "cli" })` 广播到所有终端；`lwctl set cli` / 看板会汇总各 `cli-<pid>` 回执，不再误报超时。
+- **后台任务通知回到发起窗口**：`bg_run` 的 origin 改用 `cli-<pid>`；home 发现通知不属于自己时排一条 `notify` 命令，由那个终端自己送达；目标终端已退出时回落到 home，多个窗口的任务按 origin 分组各自通知。
+- **cli 闹钟不再改 home 模型**：终端发起的活动到点时，home 只负责投递，不替终端执行 `model: local/cloud` 的切换。
+- **home 定时器锁重试**：重启时旧 home 还没退干净，新进程每 2 秒重试最多 60 秒，不再永久跳过 tick（闹钟/心跳/回顾一起停摆）。
+- **世界锁不抢活锁**：超过 10 秒也会先确认持有者 pid 是否还活着；释放时只删自己的锁，避免双进程进临界区。回填锁同样处理。
+- **心跳清理防 pid 复用**：状态文件记录进程启动时刻（`ps lstart`，固定 UTC/LC 口径）；pid 活着但启动时刻对不上才判死。终端休眠/长阻塞不会误杀，pid 复用仍能清链。
+- **`delegate` 超时收进程组**：子代理以 detached 启动，超时用 `kill(-pid)` 连工具孙进程一起收；正常退出不再碰进程组，exit 后留 200ms 收尾，避免孙进程占着 stdout 导致误报超时。
+- **`memory_timeline` 跨度上限**：最多一年，避免 `0000→9999` 把主进程卡死。
+- **看板安全**：`/api/plan` 的 `date` 限 `YYYY-MM-DD`（防路径穿越）；回环绑定时校验 Host 白名单（防 DNS rebinding），带 `x-forwarded-host` 的反代访问仍放行，并覆盖 `127.0.0.0/8` 与 IPv4-mapped 写法。
+- **颜文字热更新**：更新脚本写到 `$LIFE_WORLD_ROOT/pi-kaomoji.json`（不再是 opencode 旧路径），扩展按 mtime+size 失效缓存，下一轮即生效。
+
+### 说明
+
+- 群聊模块（群工具白名单、群聊切换回执、判官并发、群会话看门狗）按用户要求留待整体重构，本版未改。
+- QQ 附件 URL 的下载维持现状（确认是预期行为，不按 SSRF 处理）。
+
 ## [1.18.1] - 2026-11-22
 
 ### 修复

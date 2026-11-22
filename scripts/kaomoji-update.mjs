@@ -23,9 +23,11 @@ import { gunzipSync } from "node:zlib"
 
 const PKG = "kaomoji-collection"
 const HOME = homedir()
-const DATA_DIR = join(process.env.XDG_CONFIG_HOME || join(HOME, ".config"), "opencode/plugins/life-world/data")
-const DATA_FILE = join(DATA_DIR, "kaomoji.json")
-const META_FILE = join(DATA_DIR, "kaomoji.meta.json")
+// pi 插件读的是 $LIFE_WORLD_ROOT/pi-kaomoji.json（install.sh 也复制到这里）
+const ROOT = process.env.LIFE_WORLD_ROOT || join(HOME, ".local/share/life-world")
+const DATA_DIR = ROOT
+const DATA_FILE = join(DATA_DIR, "pi-kaomoji.json")
+const META_FILE = join(DATA_DIR, "pi-kaomoji.meta.json")
 
 const args = process.argv.slice(2)
 const flag = (name) => args.includes(name)

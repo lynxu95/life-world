@@ -244,10 +244,11 @@ pi          # TUI，已经带 life-world
 
 ```bash
 lwctl          # 交互菜单：列出会话 → 选一个 → 选本地/在线/自定义模型
-lwctl status   # 直接打印：qq / home / cli / group:<群号> 现在各用什么模型
+lwctl status   # 直接打印：qq / home / cli-<pid> / group:<群号> 现在各用什么模型
 lwctl targets  # 列出当前可切换目标
 lwctl set qq cloud        # 脚本方式：把 QQ 私聊切到在线
 lwctl set home local
+lwctl set cli local       # 广播给所有终端窗口（等任一窗口的回执）
 lwctl set group:894742315 cloud
 
 lwctl backup [--private]           # 世界数据快照到 worlds/backup（git 增量）
@@ -263,7 +264,7 @@ lwctl update [--no-restart] [--project] [--branch <分支>]
 lwctl usage [天数]                 # 用量：token / 云端本地 / 切换次数
 ```
 
-原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` / 看板把命令**追加**到 `control/commands-YYYY-MM-DD.jsonl`（每行一条，唯一 id），目标进程按 `(at, id)` 水位轮询、执行后回执到 `control-acks/<id>-<roleKey>.json`。超过 60 秒的命令只推进水位不执行，重启不会重放；同一秒连发多条也不会互相覆盖。旧版 `control.json` 只做一次性兼容读取。配了本地模型时，切到在线会打开该会话的机密抽屉；没配本地模型（纯云端实例）则不启用抽屉，云端可看全量上下文与记忆块。
+原理：每个扩展进程每 5 秒写一份心跳到 `~/.local/share/life-world/status/`；`lwctl` / 看板把命令**追加**到 `control/commands-YYYY-MM-DD.jsonl`（每行一条，唯一 id），目标进程按 `(at, id)` 水位轮询、执行后回执到 `control-acks/<id>-<roleKey>.json`（终端的 roleKey 是 `cli-<pid>`，多开时各窗口互不抢命令）。超过 60 秒的命令只推进水位不执行，重启不会重放；同一秒连发多条也不会互相覆盖。旧版 `control.json` 只做一次性兼容读取。配了本地模型时，切到在线会打开该会话的机密抽屉；没配本地模型（纯云端实例）则不启用抽屉，云端可看全量上下文与记忆块。
 
 ### 用量统计
 

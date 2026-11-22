@@ -155,6 +155,14 @@ const KAOMOJI_FILE = process.env.LIFE_WORLD_KAOMOJI || join(ROOT, "pi-kaomoji.js
 const TIMER_LOCK = join(WORLD, ".pi-timer.lock")
 const ROLE = process.env.LIFE_WORLD_ROLE || "cli"
 const CHANNEL = process.env.LIFE_WORLD_CHANNEL || "cli"
+/** 本进程启动时刻（ps lstart），写进状态文件，用来区分「同一个 pid 被复用」 */
+const SELF_START = (() => {
+  try {
+    // 固定 TZ/LC：ps lstart 的输出随时区变化，跨进程必须同口径才能比对
+    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } })
+    return String(r.stdout || "").trim()
+  } catch { return "" }
+})()
 const JUDGE = process.env.LIFE_WORLD_JUDGE === "1"
 const GROUP_ID = process.env.LIFE_WORLD_GROUP_ID || ""
 const DEPTH = Number(process.env.LIFE_WORLD_DEPTH || 0)
@@ -311,6 +319,16 @@ function shortStamp(iso: string): string {
 
 function readText(path: string): string { try { return existsSync(path) ? readFileSync(path, "utf8").trim() : "" } catch { return "" } }
 function readJson<T>(path: string, fallback: T): T { try { return JSON.parse(readFileSync(path, "utf8")) as T } catch { return fallback } }
+/** 配置写回前严格解析：文件存在但读不出来时必须报错，不能拿 {} 覆盖掉整份配置 */
+function readConfigForWrite(): any {
+  if (!existsSync(CONFIG_FILE)) return {}
+  const text = readFileSync(CONFIG_FILE, "utf8")
+  if (!text.trim()) throw new Error("life-world.json 是空的，拒绝覆盖")
+  let raw: any
+  try { raw = JSON.parse(text) } catch { throw new Error("life-world.json 解析失败，拒绝覆盖") }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("life-world.json 不是对象，拒绝覆盖")
+  return raw
+}
 
 function ensureDirs(): void {
   for (const dir of [CONV_DIR, DIARY_DIR, PLAN_DIR, IDENTITY_DIR, ROOM_DIR, STICKER_DIR, VOICE_DIR, TMP_DIR, OUTBOX_DIR, PROACTIVE_DIR, SKILLS_DIR, SKILL_OWN_DIR, SKILL_DL_DIR]) {
@@ -631,6 +649,14 @@ function updateWorld(mutator: (s: WorldState) => void | WorldState): boolean {
 }
 
 
+function lockHolderPid(lock: string): number {
+  try { return Number(readFileSync(lock, "utf8").trim()) || 0 } catch { return 0 }
+}
+function procAlive(pid: number): boolean {
+  if (!pid) return false
+  try { process.kill(pid, 0); return true } catch (e: any) { return e?.code === "EPERM" }
+}
+
 /** world.json 跨进程读改写的轻量锁（home/qq/cli 会同时改闹钟） */
 function withWorldLock<T>(fn: () => T): T | undefined {
   const lock = join(ROOT, ".world.lock")
@@ -643,7 +669,11 @@ function withWorldLock<T>(fn: () => T): T | undefined {
     try { fd = openSync(lock, "wx", 0o600) }
     catch {
       try {
-        if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > 10_000) { unlinkSync(lock); continue }
+        // 只有「超过 10 秒且持有者确实不在」才抢锁；活着的进程卡顿再久也不能抢
+        if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > 10_000) {
+          const holder = lockHolderPid(lock)
+          if (!procAlive(holder)) { unlinkSync(lock); continue }
+        }
       } catch { /* ignore */ }
       pause()
       continue
@@ -652,7 +682,8 @@ function withWorldLock<T>(fn: () => T): T | undefined {
       try { writeFileSync(fd, String(process.pid)); closeSync(fd) } catch (e) { try { closeSync(fd) } catch { /* ignore */ } throw e }
       return fn()
     } finally {
-      try { unlinkSync(lock) } catch { /* ignore */ }
+      // 只在锁还是自己的时候删，避免删掉别人抢到的锁
+      try { if (lockHolderPid(lock) === process.pid) unlinkSync(lock) } catch { /* ignore */ }
     }
   }
   log("world lock timeout")
@@ -660,7 +691,7 @@ function withWorldLock<T>(fn: () => T): T | undefined {
 }
 
 // ———————— 控制队列（lwctl / lwboard → 各会话） ————————
-interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; level?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short"; text?: string; wakeHint?: string }
+interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; level?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short"; text?: string; wakeHint?: string; wakeNextAt?: string }
 function controlCommandsFile(day = dayOf()): string { return join(CONTROL_DIR, `commands-${day}.jsonl`) }
 
 /** 追加一条命令；id 唯一，不再用毫秒时间戳当序号 */
@@ -1083,7 +1114,10 @@ function markIndexStale(): void {
 }
 
 function mapRow(r: any): Record_ {
-  return { id: String(r.id), t: String(r.t), role: r.role === "assistant" ? "assistant" : "user", text: String(r.text) }
+  return {
+    id: String(r.id), t: String(r.t), role: r.role === "assistant" ? "assistant" : "user", text: String(r.text),
+    src: r.src ? String(r.src) : undefined,
+  }
 }
 
 /** 走 SQLite 读；索引没准备好返回 null，由调用方退回文件扫描 */
@@ -1376,6 +1410,9 @@ function indexRecord(r: Record_): void {
       if (Number(info?.changes || 0) > 0) {
         db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)").run(r.id, r.text)
         db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)").run(r.id)
+      } else if (r.src) {
+        // 行已存在但 src 为空（旧版本索引/回填留下的）：补来源，不重复写 FTS
+        db.prepare("UPDATE msg SET src = ? WHERE id = ? AND (src IS NULL OR src = '')").run(r.src, r.id)
       }
       db.exec("COMMIT")
     } catch (e) {
@@ -1399,7 +1436,8 @@ function takeBackfillLock(name: string): boolean {
     return true
   } catch {
     try {
-      if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs >= 600_000) {
+      // 过期且持有者确实不在才抢；释放时也只删自己的
+      if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs >= 600_000 && !procAlive(lockHolderPid(lock))) {
         unlinkSync(lock)
         const fd = openSync(lock, "wx", 0o600)
         writeFileSync(fd, String(process.pid))
@@ -1411,7 +1449,10 @@ function takeBackfillLock(name: string): boolean {
   }
 }
 function releaseBackfillLock(name: string): void {
-  try { unlinkSync(join(ROOT, `.${name}.lock`)) } catch { /* ignore */ }
+  try {
+    const lock = join(ROOT, `.${name}.lock`)
+    if (lockHolderPid(lock) === process.pid) unlinkSync(lock)
+  } catch { /* ignore */ }
 }
 
 function backfillMemoryIndex(): void {
@@ -1435,12 +1476,15 @@ function backfillMemoryIndex(): void {
       const slice = all.slice(i, i + CHUNK)
       db.exec("BEGIN IMMEDIATE")
       try {
-        const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text) VALUES (?,?,?,?,?)")
+        const ins = db.prepare("INSERT OR IGNORE INTO msg (id, day, t, role, text, src) VALUES (?,?,?,?,?,?)")
+        const fixSrc = db.prepare("UPDATE msg SET src = ? WHERE id = ? AND (src IS NULL OR src = '')")
         const insF = db.prepare("INSERT INTO msg_fts (id, text) VALUES (?,?)")
         const insM = db.prepare("INSERT OR IGNORE INTO mem (id) VALUES (?)")
         for (const r of slice) {
-          const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text)
+          const info = ins.run(r.id, dayOf(new Date(r.t)), r.t, r.role, r.text, r.src || "")
           if (Number(info?.changes || 0) > 0) { insF.run(r.id, r.text); insM.run(r.id); added++ }
+          // 老索引里已有的行是 INSERT OR IGNORE 跳过的，src 可能为空：补一次
+          else if (r.src) fixSrc.run(r.src, r.id)
         }
         db.exec("COMMIT")
       } catch (e) {
@@ -1777,9 +1821,17 @@ const KAOMOJI_MAP: Record<string, string[]> = {
   胜利: ["peace", "goo", "banzai"], 点头: ["ok", "nodding", "yoshiyoshi", "naruhodo"], 逃跑: ["nigeru", "kakureru"],
 }
 let kaoCache: Record<string, string[]> | undefined
+let kaoStamp = ""
 function kaomoji(): Record<string, string[]> {
-  if (kaoCache) return kaoCache
-  try { kaoCache = JSON.parse(readFileSync(KAOMOJI_FILE, "utf8")) } catch { kaoCache = {} }
+  // 按 mtime+size 失效缓存：更新脚本写完文件后，下一轮就生效，不用重启 pi
+  let stamp = ""
+  try { const st = statSync(KAOMOJI_FILE); stamp = `${st.mtimeMs}:${st.size}` } catch { /* 文件不在就用旧缓存 */ }
+  if (kaoCache && (!stamp || stamp === kaoStamp)) return kaoCache
+  if (!stamp) return kaoCache || {}
+  try {
+    kaoCache = JSON.parse(readFileSync(KAOMOJI_FILE, "utf8"))
+    kaoStamp = stamp
+  } catch { kaoCache = kaoCache || {} }
   return kaoCache || {}
 }
 function pick<T>(list: T[], n: number): T[] {
@@ -1813,18 +1865,34 @@ function delegate(task: string, model?: string): Promise<string> {
     }
     const system = "你是一个被主 agent 调用的子代理。只完成给定的任务，输出可直接使用的结果；不要闲聊，不要调用 reach_out，不要开新的子代理。"
     const args = ["-p", "--model", m, "--no-session", "--no-skills", "--no-extensions", "--no-context-files", "--system-prompt", system, task]
-    const child = spawn(process.env.PI_BIN || "pi", args, { env: { ...process.env, LIFE_WORLD_DEPTH: String(DEPTH + 1), LIFE_WORLD_ROLE: "subagent" }, stdio: ["ignore", "pipe", "pipe"] })
+    // detached 起独立进程组：超时/退出时连 pi 拉起的工具孙进程一起收，别留孤儿
+    const child = spawn(process.env.PI_BIN || "pi", args, { env: { ...process.env, LIFE_WORLD_DEPTH: String(DEPTH + 1), LIFE_WORLD_ROLE: "subagent" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
     let out = "", err = ""
-    const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch { /* ignore */ } resolvePromise("子代理超时（180 秒）。") }, 180_000)
+    let settled = false
+    let timer: any = null
+    const killGroup = () => {
+      const pid = Number(child.pid || 0)
+      if (!pid) return
+      try { process.kill(-pid, "SIGKILL") } catch { try { child.kill("SIGKILL") } catch { /* ignore */ } }
+    }
+    const finish = (text: string) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolvePromise(text)
+    }
+    // 只有超时才收进程组：正常退出时 leader 可能已被回收，再 kill(-pid) 有极小概率误伤复用的进程组
+    timer = setTimeout(() => { killGroup(); finish("子代理超时（180 秒）。") }, 180_000)
+    const done = (code: number | null) => {
+      const text = out.trim()
+      finish(code === 0 && text ? text : `子代理失败（exit ${code}）：${(err || out).trim().slice(0, 500)}`)
+    }
     child.stdout.on("data", (d) => { out += String(d) })
     child.stderr.on("data", (d) => { err += String(d) })
-    child.on("error", (e) => { clearTimeout(timer); resolvePromise(`子代理启动失败：${String(e)}`) })
-    child.on("close", (code) => {
-      clearTimeout(timer)
-      const text = out.trim()
-      if (code === 0 && text) resolvePromise(text)
-      else resolvePromise(`子代理失败（exit ${code}）：${(err || out).trim().slice(0, 500)}`)
-    })
+    child.on("error", (e) => finish(`子代理启动失败：${String(e)}`))
+    // pi 退出后孙进程可能还占着 stdout，close 会迟迟不来：exit 后留 200ms 收尾，别误报超时
+    child.on("exit", (code) => { const t = setTimeout(() => done(code), 200); ;(t as any).unref?.() })
+    child.on("close", (code) => done(code))
   })
 }
 
@@ -1888,8 +1956,23 @@ function deliverWake(a: { origin?: string; reason?: string; note?: string; conti
   }
   const wc = opts.context === false ? { text: "", nextAt: null } : wakeSuffix(currentModelPref())
   if (target.startsWith("cli-")) {
-    // 终端心跳只由该 pid 自己投递；别的窗口/后台不能替它开一轮
-    if (target !== heartbeatOwner()) return false
+    // 终端心跳只由该 pid 自己投递；别的窗口/后台不能替它开一轮。
+    // 不在那个进程里时（例如 home 投递后台任务完成），排一条 notify 命令让它自己醒。
+    if (target !== heartbeatOwner()) {
+      // 终端已经关了/pid 没了：别把通知排进无人消费的队列，回落到 home
+      if (ownerAlive(target)) {
+        try {
+          appendControl({
+            target, action: "notify", text: text + wc.text,
+            reason: String(a.reason || a.note || "").slice(0, 100),
+            wakeNextAt: wc.nextAt || undefined,
+          })
+          log(`wake → ${target} (notify)`)
+          return true
+        } catch (e) { log(`wake → ${target} failed ${String(e)}`); return false }
+      }
+      log(`wake → ${target} dead, fallback home`)
+    }
     const sent = sendTime(text + wc.text)
     if (sent && wc.nextAt) commitWakeContext(wc.nextAt)
     return sent
@@ -2177,8 +2260,24 @@ function ownerAlive(owner: string): boolean {
   if (owner === "home") return sessionAlive("home")
   const pid = ownerPid(owner)
   if (!pid) return false
-  try { process.kill(pid, 0); return true }
-  catch (e: any) { return e?.code === "EPERM" } // 没权限发信号 = 进程还在
+  // 不能只看 kill(pid,0)：pid 可能被系统复用给无关进程。
+  // 有状态文件但心跳过期 → 判死（pid 复用的典型特征）；没有状态文件 → 只能凭 pid 判活。
+  try { process.kill(pid, 0) } catch (e: any) { if (e?.code !== "EPERM") return false }
+  const f = statusFileFor(owner)
+  if (!f) return true
+  const st = readJson<any>(f, null)
+  if (!st) return true
+  const t = Date.parse(String(st.updated || ""))
+  if (Number.isFinite(t) && Date.now() - t < 90_000) return true
+  // 心跳过期不等于进程死了（休眠/长阻塞）。用 ps 启动时刻核对是不是同一个进程：
+  // 启动时刻相同 = 原进程还活着；不同 = pid 被复用，判死。
+  const recorded = String(st.start || "")
+  if (!recorded) return true // 旧状态文件没有指纹，宁可不清理
+  try {
+    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } })
+    const nowStart = String(r.stdout || "").trim()
+    return !nowStart || nowStart === recorded
+  } catch { return true }
 }
 
 /** home tick 每轮清理：终端进程已经不在的 cli 心跳，未来时间的也一起收掉 */
@@ -2213,12 +2312,24 @@ function pruneDeadCliHeartbeats(): void {
   if (pruned) log(`cli heartbeat prune · ${[...dead].join(", ")}`)
 }
 
+/** 找一个会话的状态文件（不管新不新鲜）：cli-<pid>.json 精确名，其它 role-pid.json */
+function statusFileFor(key: string): string | null {
+  try {
+    if (!existsSync(STATUS_DIR)) return null
+    for (const f of readdirSync(STATUS_DIR)) {
+      if (!f.endsWith(".json")) continue
+      if (f === `${key}.json` || f.startsWith(`${key}-`)) return join(STATUS_DIR, f)
+    }
+  } catch { /* ignore */ }
+  return null
+}
 /** 某个会话最近 90 秒有没有心跳（判断它还在不在） */
 function sessionAlive(key: string): boolean {
   try {
     if (!existsSync(STATUS_DIR)) return false
     for (const f of readdirSync(STATUS_DIR)) {
-      if (!f.endsWith(".json") || !f.startsWith(`${key}-`)) continue
+      if (!f.endsWith(".json")) continue
+      if (f !== `${key}.json` && !f.startsWith(`${key}-`)) continue
       const st = readJson<any>(join(STATUS_DIR, f), null)
       const t = Date.parse(String(st?.updated || ""))
       if (Number.isFinite(t) && Date.now() - t < 90_000) return true
@@ -2503,6 +2614,9 @@ async function switchForAlarm(alarm: Alarm): Promise<void> {
   if (!roleManaged()) { log("alarm model · skip (本会话不在生效名单)"); return }
   // 回私聊醒的闹钟：切的是 home 的模型，没用；私聊那一轮沿用自己当前的模型
   if (wakeTarget(alarm) === "qq") return
+  // 终端发起的闹钟：home 不能替它切模型（切的是 home 自己）；终端只认手动切换
+  const wt = wakeTarget(alarm)
+  if (wt.startsWith("cli-") && wt !== heartbeatOwner()) return
   const c = config().models
   // 两个锁都会改写这一跳：保护把 local 改走在线，锁定把 cloud 改走本地；闹钟上的标签不动
   const locked = localLockOn()
@@ -2885,19 +2999,29 @@ async function tick(): Promise<void> {
             finished.push({ ...job, ...st })
           }
           if (finished.length) {
-            const lines = finished.map((j) => {
+            const fmt = (j: any) => {
               const codeText = j.state === "failed" && (j.code === null || j.code === undefined)
                 ? (j.signal ? `被 ${j.signal} 终止` : "异常结束")
                 : `退出码 ${j.code}`
               const started = Date.parse(j.startedAt || "")
               const mins = Number.isFinite(started) ? Math.max(1, Math.round((Date.now() - started) / 60_000)) : null
               return `- ${j.id}${j.label ? `（${j.label}）` : ""}：${codeText}${mins ? `，跑了约 ${mins} 分钟` : ""}`
-            })
-            const text = `【后台任务完成】\n${lines.join("\n")}\n看输出用 bg_output({ id })。`
-            // 哪个窗口起的后台任务，跑完就回哪个窗口通知
-            const origin = finished.length === 1 ? finished[0].origin : undefined
-            if (deliverWake({ origin, reason: "后台任务完成" }, text, { context: true })) {
-              for (const j of finished) {
+            }
+            // 按发起窗口分组：哪个窗口起的任务，跑完就回哪个窗口通知（死窗口由 deliverWake 回落 home）
+            const groups = new Map<string, any[]>()
+            for (const j of finished) {
+              const k = String(j.origin || "home")
+              const list = groups.get(k)
+              if (list) list.push(j); else groups.set(k, [j])
+            }
+            let delivered = false
+            for (const [origin, jobs] of groups) {
+              const text = `【后台任务完成】\n${jobs.map(fmt).join("\n")}\n看输出用 bg_output({ id })。`
+              if (!deliverWake({ origin, reason: "后台任务完成" }, text, { context: true })) {
+                log(`bg notify send failed (${origin}), retry next tick`)
+                continue
+              }
+              for (const j of jobs) {
                 try {
                   const jp = join(BG_DIR, `${j.id}.json`)
                   const cur = JSON.parse(readFileSync(jp, "utf8"))
@@ -2905,10 +3029,9 @@ async function tick(): Promise<void> {
                   atomicWrite(jp, JSON.stringify(cur, null, 2))
                 } catch { /* ignore */ }
               }
-              woke = true
-            } else {
-              log("bg notify send failed, retry next tick")
+              delivered = true
             }
+            if (delivered) woke = true
           }
         }
       } catch (e) { log(`bg notify failed ${String(e)}`) }
@@ -4092,12 +4215,13 @@ async function compressVideo(src: string, outDir: string, duration: number): Pro
   try { return statSync(out).size <= MEDIA_INLINE_BYTES ? out : "" } catch { return "" }
 }
 
-function audioFormatOf(mediaUrl: string, raw: string): string {
+function audioFormatOf(mediaUrl: string, raw: string, contentType = ""): string {
+  const norm = (sub: string) => sub === "mpeg" ? "mp3" : sub === "mp4" ? "m4a" : sub.replace(/^x-/, "")
   const m = String(mediaUrl).match(/^data:audio\/([a-z0-9.+-]+);/i)
-  if (m) {
-    const sub = m[1].toLowerCase()
-    return sub === "mpeg" ? "mp3" : sub === "mp4" ? "m4a" : sub
-  }
+  if (m) return norm(m[1].toLowerCase())
+  // 远程 URL 优先用响应的 Content-Type，别靠 URL 后缀猜（签名/CDN 地址常没有扩展名）
+  const ct = String(contentType || "").toLowerCase().split(";")[0].trim()
+  if (ct.startsWith("audio/")) return norm(ct.slice(6))
   const ext = (String(raw).match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/)?.[1] || "").toLowerCase()
   return ext || "wav"
 }
@@ -4208,7 +4332,10 @@ export default function (pi: ExtensionAPI) {
   ;(backfillTimer as any).unref?.()
 
   // —— lwctl：会话心跳 + 远程切换模型 ——
-  const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE
+  // 终端多开：cli 的控制/回执/水位必须按进程区分，否则两个 TUI 互相抢命令、覆盖回执
+  const roleKey = ROLE === "group" ? `group-${GROUP_ID}` : ROLE === "cli" ? `cli-${process.pid}` : ROLE
+  /** 控制命令目标：自己的 roleKey / all，以及旧的粗粒度 "cli"（广播给所有终端） */
+  const targetMatches = (t?: string) => t === roleKey || t === "all" || (ROLE === "cli" && t === "cli")
   const writeAck = (id: string, payload: any) => {
     const text = JSON.stringify({ id, target: roleKey, roleKey, at: new Date().toISOString(), ...payload }, null, 2)
     try { atomicWrite(controlAckFile(id, roleKey), text) } catch { /* ignore */ }
@@ -4253,6 +4380,7 @@ export default function (pi: ExtensionAPI) {
       model,
       sessionId,
       sessionFile,
+      start: SELF_START,
       updated: new Date().toISOString(),
     }
   }
@@ -4287,7 +4415,9 @@ export default function (pi: ExtensionAPI) {
     try {
       mkdirSync(STATUS_DIR, { recursive: true, mode: 0o700 })
       cleanupEphemeral()
-      atomicWrite(join(STATUS_DIR, `${roleKey}-${process.pid}.json`), JSON.stringify(statusPayload(), null, 2))
+      // cli 的 roleKey 已经带 pid，别再拼一次；其它角色仍按 role-pid 区分进程
+      const statusFile = ROLE === "cli" ? `${roleKey}.json` : `${roleKey}-${process.pid}.json`
+      atomicWrite(join(STATUS_DIR, statusFile), JSON.stringify(statusPayload(), null, 2))
       // 清理 10 分钟没心跳的
       const cutoff = Date.now() - 600_000
       for (const f of readdirSync(STATUS_DIR)) {
@@ -4357,6 +4487,16 @@ export default function (pi: ExtensionAPI) {
   const handleControl = async (c: ControlCmd) => {
     // wake 是写给桥接的，扩展（谁收到都算）只回个回执，别当模型切换处理
     if (String(c.action || "") === "wake") { writeAck(c.id, { ok: bridgeAlive(), msg: bridgeAlive() ? "由桥接消费" : "桥接不在线，等回落" }); return }
+    // 跨窗口送达：home 把「后台任务完成」等通知排给发起它的终端，由那个终端自己 sendTime
+    if (String(c.action || "") === "notify") {
+      const t = String(c.text || "").trim()
+      if (!t) { writeAck(c.id, { ok: false, msg: "空的通知" }); return }
+      const sent = sendTime(t)
+      if (sent && c.wakeNextAt) commitWakeContext(c.wakeNextAt)
+      writeAck(c.id, { ok: sent, msg: sent ? "已送达" : "没送进会话" })
+      writeStatus()
+      return
+    }
     const o = config().models
     if (String(c.action || "") === "impression") {
       if (!lastCtx) { writeAck(c.id, { ok: false, msg: "还没有可用的会话上下文" }); return }
@@ -4434,7 +4574,7 @@ export default function (pi: ExtensionAPI) {
         if (!isNewCmd(c)) continue
         try {
           if (!c.at || Date.now() - c.at > 60_000) continue
-          if (c.target !== roleKey && c.target !== "all") { selfHandled.delete(c.id); continue }
+          if (!targetMatches(c.target)) { selfHandled.delete(c.id); continue }
           if (CHANNEL === "group") continue
           if (selfHandled.has(c.id)) { selfHandled.delete(c.id); continue }
           const handled = await withTimeout(handleControl(c), 60_000)
@@ -4447,7 +4587,7 @@ export default function (pi: ExtensionAPI) {
       if (lat && Date.now() - lat <= 60_000) {
         const c: ControlCmd = { ...legacy, id: `legacy-${lat}`, action: legacy.action || "model" }
         if (isNewCmd(c)) {
-          if (CHANNEL !== "group" && (c.target === roleKey || c.target === "all")) {
+          if (CHANNEL !== "group" && targetMatches(c.target)) {
             try { await handleControl(c) } catch { /* ignore */ }
           }
           markCmd(c)
@@ -4708,7 +4848,9 @@ export default function (pi: ExtensionAPI) {
     if (drawerEnabled() && drawer.active && o.local && modelIdOf(ctx) !== o.local) {
       let lastUser = -1
       for (let i = 0; i < messages.length; i++) if (messages[i]?.role === "user") lastUser = i
-      const kept = sanitizeToolPairs(messages.filter((m: any, i: number) => String(m?.customType || "").startsWith("life-world-") || Number(m?.timestamp || 0) >= drawer.cutoff || i === lastUser))
+      // 只常驻当前状态这类小消息；bootstrap 里是切云端前的近期原话和「我是谁」，必须一起藏
+      const kept = sanitizeToolPairs(messages.filter((m: any, i: number) =>
+        String(m?.customType || "") === "life-world-state" || Number(m?.timestamp || 0) >= drawer.cutoff || i === lastUser))
       if (kept.length !== messages.length) {
         const hidden = messages.length - kept.length
         if (!drawer.stashed) {
@@ -5002,7 +5144,7 @@ export default function (pi: ExtensionAPI) {
         model,
         kind: "main",
         status: "pending",
-        origin: roleKey,
+        origin: heartbeatOwner(),
       }
       const saved = withWorldLock(() => {
         const state = readWorldStrict()
@@ -5050,7 +5192,7 @@ export default function (pi: ExtensionAPI) {
         id, label: String(params?.label || "").replace(/\s+/g, " ").trim().slice(0, 60),
         notify: params?.notify === true, notified: false,
         command: command.slice(0, 2000),
-        origin: roleKey,
+        origin: heartbeatOwner(),
         pid: 0, startedAt: new Date().toISOString(), endedAt: null, exitCode: null,
         log, exit: exitFile, cwd: ROOT,
       }
@@ -5535,7 +5677,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: any) {
       if (JUDGE || CHANNEL === "group") return ok("这个会话不能开关群聊。")
       try {
-        const raw = readJson<any>(CONFIG_FILE, {})
+        const raw = readConfigForWrite()
         raw.bridge = raw.bridge || {}
         raw.bridge.group = raw.bridge.group || {}
         raw.bridge.group.enabled = params.enabled === true
@@ -6007,7 +6149,7 @@ export default function (pi: ExtensionAPI) {
       if (!d) return ok(`没查到 ${city} 的天气（网络或地名问题），过会儿再试；默认城市和缓存都没动。`)
       if (remember) {
         try {
-          const raw = readJson<any>(CONFIG_FILE, {})
+          const raw = readConfigForWrite()
           raw.care = raw.care || {}
           raw.care.weatherCity = city
           atomicWrite(CONFIG_FILE, JSON.stringify(raw, null, 2))
@@ -6111,9 +6253,14 @@ export default function (pi: ExtensionAPI) {
 
       // 切别的会话 / 全部：下发控制命令，逐个等回执
       const active = activeSessionSummaries().map((s) => s.roleKey)
-      // all 永远包含自己：TUI 可能还没写心跳，不能把自己漏掉
-      const roles = scope === "all" ? Array.from(new Set([...active, roleKey])) : [scope]
-      if (!roles.length) return ok("没有活跃会话可切。")
+      // cli 是多进程角色：scope="cli" 展开成所有终端（含自己）；all 永远包含自己，TUI 可能还没写心跳
+      const cliRoles = active.filter((rk) => rk.startsWith("cli-"))
+      const roles = scope === "all"
+        ? Array.from(new Set([...active, roleKey]))
+        : scope === "cli"
+          ? Array.from(new Set([...cliRoles, ...(ROLE === "cli" ? [roleKey] : [])]))
+          : [scope]
+      if (!roles.length) return ok(scope === "cli" ? "没有活跃的终端会话可切。" : "没有活跃会话可切。")
       const missing = roles.filter((rk) => rk !== roleKey && !active.includes(rk))
       if (missing.length) return ok(`这些会话没在跑或没心跳（可能刚重启/正忙）：${missing.join("、")}`)
 
@@ -6358,7 +6505,50 @@ export default function (pi: ExtensionAPI) {
           const content: any[] = []
           if (kind === "image") content.push({ type: "image_url", image_url: { url: mediaUrl } })
           else if (kind === "video") content.push({ type: "video_url", video_url: { url: mediaUrl } })
-          else content.push({ type: "input_audio", input_audio: { data: mediaUrl, format: audioFormatOf(mediaUrl, raw) } })
+          else {
+            // OpenAI 兼容接口的 input_audio.data 只要裸 base64，不接 data: URL / http URL
+            let data = mediaUrl
+            let audioType = ""
+            const MAX_AUDIO = 10 * 1024 * 1024
+            if (mediaUrl.startsWith("data:")) {
+              const comma = mediaUrl.indexOf(",")
+              if (comma < 0) return ok("音频数据格式不对（data URL 缺少逗号）。")
+              data = mediaUrl.slice(comma + 1)
+            } else if (isHttpUrl(mediaUrl)) {
+              try {
+                const r = await fetch(mediaUrl, { signal: AbortSignal.timeout(Math.max(30_000, mm.timeoutMs)) })
+                if (!r.ok) return ok(`下载音频失败：${r.status}`)
+                audioType = String(r.headers.get("content-type") || "")
+                const declared = Number(r.headers.get("content-length") || 0)
+                if (Number.isFinite(declared) && declared > MAX_AUDIO) {
+                  try { await r.body?.cancel?.() } catch { /* ignore */ }
+                  return ok("音频超过 10MB，先截短或给本地文件。")
+                }
+                // 流式累计，超限立刻停，别先把大文件整个读进内存
+                const reader = r.body?.getReader?.()
+                if (reader) {
+                  const chunks: Buffer[] = []
+                  let total = 0
+                  while (true) {
+                    const { done, value } = await reader.read()
+                    if (done) break
+                    total += value?.length || 0
+                    if (total > MAX_AUDIO) {
+                      try { await reader.cancel() } catch { /* ignore */ }
+                      return ok("音频超过 10MB，先截短或给本地文件。")
+                    }
+                    if (value) chunks.push(Buffer.from(value))
+                  }
+                  data = Buffer.concat(chunks).toString("base64")
+                } else {
+                  const buf = Buffer.from(await r.arrayBuffer())
+                  if (buf.length > MAX_AUDIO) return ok("音频超过 10MB，先截短或给本地文件。")
+                  data = buf.toString("base64")
+                }
+              } catch (e) { return ok(`下载音频失败：${String(e).slice(0, 200)}`) }
+            }
+            content.push({ type: "input_audio", input_audio: { data, format: audioFormatOf(mediaUrl, raw, audioType) } })
+          }
           content.push({ type: "text", text: question })
           try {
             const res = await fetch(aux.url, {
@@ -6470,6 +6660,9 @@ export default function (pi: ExtensionAPI) {
       const from = /^\d{4}-\d{2}-\d{2}$/.test(String(params.from || "")) ? String(params.from) : dayOf(new Date(Date.now() - 6 * 86_400_000))
       const to = /^\d{4}-\d{2}-\d{2}$/.test(String(params.to || "")) ? String(params.to) : today
       if (from > to) return ok("起始日期比结束日期还晚。")
+      // 逐日循环必须有上限，否则 0000→9999 能把主进程卡死
+      const spanDays = Math.round((Date.parse(`${to}T00:00:00`) - Date.parse(`${from}T00:00:00`)) / 86_400_000)
+      if (!Number.isFinite(spanDays) || spanDays > 366) return ok("时间跨度最多一年；要看更久请分段查。")
       const records = recordsInRange(from, to)
       const byDay = new Map<string, Record_[]>()
       for (const r of records) {
@@ -6542,7 +6735,15 @@ export default function (pi: ExtensionAPI) {
 
   // 定时器只在 home 角色跑；QQ/群聊/子代理进程不跑，避免重复
   if (ROLE === "home") {
-    if (acquireTimerLock()) {
+    // 重启时旧 home 可能还没退干净：别一次拿不到锁就永久放弃，隔 2 秒重试最多 60 秒
+    const startTimer = (attempt: number) => {
+      if (!acquireTimerLock()) {
+        if (attempt < 30) {
+          const retry = setTimeout(() => startTimer(attempt + 1), 2000)
+          ;(retry as any).unref?.()
+        } else log("pi timer skipped (lock held)")
+        return
+      }
       // 不再固定 30 秒：有快到点的闹钟就提前醒（心跳可以 10 秒一跳），没事就 30 秒一轮
       const loop = () => {
         const t = setTimeout(async () => {
@@ -6554,9 +6755,8 @@ export default function (pi: ExtensionAPI) {
       loop()
       log(`pi timer started role=${ROLE}`)
       process.on("exit", () => { try { if (readText(TIMER_LOCK) === String(process.pid)) writeFileSync(TIMER_LOCK, "") } catch { /* ignore */ } })
-    } else {
-      log("pi timer skipped (lock held)")
     }
+    startTimer(0)
   } else if (ROLE === "cli") {
     // 终端心跳：只调度本进程自己的串；窗口关了（exit）就把它们收掉
     scheduleCliHeartbeat()

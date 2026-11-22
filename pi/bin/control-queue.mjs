@@ -9,7 +9,7 @@
  * - id 唯一（时间戳 + 随机），不再用 Date.now() 当序号
  * - 按天分文件，消费方扫前后一天；超过 60 秒的命令只推水位不执行
  */
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 
@@ -38,10 +38,31 @@ export function readAck(root, id, roleKey) {
 export function waitAck(root, id, roleKey, timeoutMs = 12_000) {
   return new Promise((resolve) => {
     const deadline = Date.now() + timeoutMs
+    // cli 是多进程角色，回执名是 <id>-cli-<pid>.json；广播 target="cli" 时汇总这些回执
+    const cliAcks = () => {
+      const out = []
+      try {
+        for (const f of readdirSync(acksDir(root))) {
+          if (!f.startsWith(`${id}-cli-`) || !f.endsWith(".json")) continue
+          try {
+            const st = JSON.parse(readFileSync(join(acksDir(root), f), "utf8"))
+            if (st) out.push(st)
+          } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+      return out
+    }
+    let fallback = null
     const tick = () => {
       const st = readAck(root, id, roleKey)
       if (st) return resolve(st)
-      if (Date.now() > deadline) return resolve(null)
+      if (roleKey === "cli") {
+        const got = cliAcks()
+        const ok = got.find((x) => x.ok)
+        if (ok) return resolve(ok)
+        if (got.length) fallback = fallback || got[0]
+      }
+      if (Date.now() > deadline) return resolve(fallback)
       setTimeout(tick, 300)
     }
     tick()

@@ -595,7 +595,13 @@ function boardSettings() {
   }
 }
 function writeBoardSettings(host, port) {
-  const c = readJson(CONFIG_FILE, {})
+  // 严格解析：文件损坏/读不出来时报错，不能拿空对象把整份配置覆盖掉
+  let c = {}
+  if (existsSync(CONFIG_FILE)) {
+    const text = readFileSync(CONFIG_FILE, "utf8")
+    if (!text.trim()) throw new Error("life-world.json 是空的，拒绝覆盖")
+    try { c = JSON.parse(text) } catch { throw new Error("life-world.json 解析失败，拒绝覆盖") }
+  }
   if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("life-world.json 不是对象，拒绝写入")
   const b = c.board && typeof c.board === "object" ? c.board : {}
   if (host !== undefined) b.host = host

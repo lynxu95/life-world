@@ -23,6 +23,7 @@
 - 切自己（默认）：`switch_model({ target: "cloud", reason: "为什么切" })`
 - 切某个会话：`switch_model({ session: "home", target: "local" })`
 - 切全部：`switch_model({ session: "all", target: "local" })`
+- 切所有终端：`switch_model({ session: "cli", target: "local" })`（终端按进程区分；窗口卡死超过 60 秒可能错过这条命令）
 - 用户说「切到本地/在线」但没指定会话时，默认切全部
 - 回执里谁成功、谁失败、谁超时，照实说；不能只说「切好了」
 - 切之前说一声；一段任务尽量只切一次，别一句一换（缓存会丢）。
@@ -69,8 +70,8 @@
 
 ## 定任务时定模型
 
-`plan_next({ note, after_minutes, model: "local"|"cloud" })`：到点会先切到指定模型再叫你。
-**例外**：在 QQ 私聊里定的闹钟，到点会在那个私聊醒来，用的是私聊当时的模型（切 home 的模型没意义）。
+`plan_next({ note, after_minutes, model: "local"|"cloud" })`：到点会先切到指定模型再叫你（仅限 `models.autoFailoverRoles` 名单里的会话）。
+**例外**：在 QQ 私聊里定的闹钟，到点会在那个私聊醒来，用的是私聊当时的模型（切 home 的模型没意义）；终端 TUI 里定的活动到点由那个终端自己醒，home 不会替它切模型。
 
 ## 子代理
 

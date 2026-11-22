@@ -34,10 +34,21 @@ const boardCfg = (() => {
 })()
 const PORT = Number(process.env.LW_BOARD_PORT || boardCfg.port || 8099) || 8099
 const HOST = String(process.env.LW_BOARD_HOST || boardCfg.host || "127.0.0.1")
+const LOOPBACK = /^(127(?:\.\d{1,3}){3}|localhost|::1|\[::1\]|\[::ffff:127(?:\.\d{1,3}){3}\])$/i.test(HOST)
 /** 分支能力：v2 没有印象整理，adv 有；v2 的 board.html 会据此隐藏印象墙 */
 const FEATURES = { impressions: true }
 
 const readJson = (file, fallback) => { try { return JSON.parse(readFileSync(file, "utf8")) } catch { return fallback } }
+/** 写回配置前严格解析：解析失败就报错，绝不拿 {} 覆盖整份配置 */
+function readConfigStrict() {
+  if (!existsSync(CONFIG_FILE)) return {}
+  const text = readFileSync(CONFIG_FILE, "utf8")
+  if (!text.trim()) throw new Error("life-world.json 是空的，拒绝覆盖")
+  let c
+  try { c = JSON.parse(text) } catch { throw new Error("life-world.json 解析失败，拒绝覆盖") }
+  if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("life-world.json 不是对象，拒绝覆盖")
+  return c
+}
 
 // —— 检查插件更新（只读；结果由 lwctl check-update 写进 update-check.json）——
 const UPDATE_CHECK_FILE = join(ROOT, "update-check.json")
@@ -198,6 +209,14 @@ async function availableModels() {
 let overviewCache = { at: 0, data: null }
 /** 浏览器同源 POST 才放行：挡住别的网页用表单偷偷触发的 POST */
 function sameOrigin(req) {
+  // 回环绑定时先验 Host：挡住 DNS rebinding（攻击者域名解析到 127.0.0.1，Origin 与 Host 仍然一致）。
+  // 有 x-forwarded-host 说明前面挂了反代（浏览器不能伪造这个头而不触发预检），交给下面的同源比对。
+  if (LOOPBACK) {
+    const host = String(req.headers.host || "").trim()
+    const loopbackHost = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\]|::1|\[::ffff:127(?:\.\d{1,3}){3}\])(:\d+)?$/i.test(host)
+    const forwarded = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()
+    if (!loopbackHost && !forwarded) return false
+  }
   const origin = req.headers.origin
   if (!origin) return true // curl / 本机脚本没有 Origin，照常放行
   const norm = (h) => {
@@ -706,6 +725,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/plan") {
       const date = url.searchParams.get("date") || dayOfLocal()
+      // 和 /api/day 一样只认日期，别让 ../ 穿出 plan 目录
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json(res, 400, { error: "date 必须是 YYYY-MM-DD" })
       const file = join(WORLD, "plan", `${date}.md`)
       let text = ""
       try { text = readFileSync(file, "utf8") } catch { /* ignore */ }
@@ -1298,7 +1319,8 @@ const server = http.createServer(async (req, res) => {
       const port = Number(data.port)
       if (!host || !/^[A-Za-z0-9_.:-]+$/.test(host)) return json(res, 400, { ok: false, msg: "监听地址不合法" })
       if (!Number.isInteger(port) || port < 1 || port > 65535) return json(res, 400, { ok: false, msg: "端口要在 1-65535" })
-      const c = readJson(CONFIG_FILE, {})
+      let c
+      try { c = readConfigStrict() } catch (e) { return json(res, 400, { ok: false, msg: String(e?.message || e) }) }
       c.board = { ...(c.board || {}), host, port }
       try { writeAtomic(CONFIG_FILE, JSON.stringify(c, null, 2)) } catch (e) {
         return json(res, 500, { ok: false, msg: `写配置失败：${String(e)}` })
