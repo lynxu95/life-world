@@ -355,6 +355,8 @@ interface ModelSwitchOptions {
   probeTimeoutMs: number
   /** 两次自动切换之间的冷却（毫秒），防止来回抖 */
   cooldownMs: number
+  /** 本地模型的思考档位：defaultLocal 是默认，byRole 是各会话自己挑的；cloudByRole 用来切回在线时恢复 */
+  thinking: { defaultLocal: string; byRole: Record<string, string>; cloudByRole: Record<string, string> }
 }
 
 /** 辅助感知：只补主模型缺的模态（视频/音频；主模型不支持图片时的图片） */
@@ -490,7 +492,7 @@ function config(): Config {
     subagent: { model: "deepseek-flash" },
     multimodal: { enabled: false, model: "", timeoutMs: 300_000, warnImageBytes: 8 * 1024 * 1024, warnVideoBytes: 200 * 1024 * 1024 },
     localModel: { enabled: false, keepRecent: 20, foldToolResults: 6, resultChars: 300, foldingThinkingTurns: 0, debugStats: false },
-    models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, autoFailoverRoles: ["qq", "home"], localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000 },
+    models: { local: "", cloud: "deepseek/deepseek-flash", autoFailover: true, autoFailoverRoles: ["qq", "home"], localHealthUrl: "", cloudHealthUrl: "", probeTimeoutMs: 4000, cooldownMs: 60000, thinking: { defaultLocal: "off", byRole: {}, cloudByRole: {} } },
     forms: { enabled: false, free: "" },
     care: { enabled: true, quietStart: "23:30", quietEnd: "08:00", randomEnabled: true, randomMinGapHours: 3, randomChancePerTick: 0.02, weatherEnabled: true, weatherCity: "" },
     homeAssistant: { enabled: false, sayService: "", sayEntity: "" },
@@ -517,7 +519,15 @@ function config(): Config {
     subagent: { ...base.subagent, ...(raw.subagent || {}) },
     multimodal: { ...base.multimodal, ...(raw.multimodal || {}) },
     localModel: { ...base.localModel, ...(raw.localModel || {}) },
-    models: { ...base.models, ...(raw.models || {}) },
+    models: {
+      ...base.models, ...(raw.models || {}),
+      thinking: {
+        ...base.models.thinking,
+        ...((raw.models || {}).thinking || {}),
+        byRole: { ...base.models.thinking.byRole, ...(((raw.models || {}).thinking || {}).byRole || {}) },
+        cloudByRole: { ...base.models.thinking.cloudByRole, ...(((raw.models || {}).thinking || {}).cloudByRole || {}) },
+      },
+    },
     forms: { ...base.forms, ...(raw.forms || {}) },
     care: { ...base.care, ...(raw.care || {}) },
     homeAssistant: { ...base.homeAssistant, ...(raw.homeAssistant || {}) },
@@ -650,7 +660,7 @@ function withWorldLock<T>(fn: () => T): T | undefined {
 }
 
 // ———————— 控制队列（lwctl / lwboard → 各会话） ————————
-interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short"; text?: string; wakeHint?: string }
+interface ControlCmd { id: string; at: number; target?: string; action?: string; model?: string; level?: string; reason?: string; op?: string; alarmId?: string; scope?: "long" | "short"; text?: string; wakeHint?: string }
 function controlCommandsFile(day = dayOf()): string { return join(CONTROL_DIR, `commands-${day}.jsonl`) }
 
 /** 追加一条命令；id 唯一，不再用毫秒时间戳当序号 */
@@ -774,7 +784,7 @@ function stateText(withMood = true): string {
   ]
   const wx = weatherText()
   const form = currentForm()
-  const parts = [currentModelLine(), form ? form.line : "", ...modes, wx ? `天气：${wx}` : "", withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
+  const parts = [currentModelLine(), form ? form.line : "", currentThinkingLine(), ...modes, wx ? `天气：${wx}` : "", withMood ? `心情：${moodLine()}` : "", `OneBot 桥接：${bridgeStatus()}`].filter(Boolean)
   // 化形只报名字；外观描述留在《化形表》里，不每轮注入
   return `[本地时间 ${stamp()} ${zone()}]\n（${parts.join("；")}）`
 }
@@ -3504,7 +3514,12 @@ async function switchTo(ctx: any, target: string, reason: string): Promise<strin
     openedNow = drawerEnabled() && !readDrawer(key).active
     if (drawerEnabled() && !openDrawer(ctx)) return `切不过去：机密抽屉打不开（${DRAWER_DIR}）`
   }
-  const success = await (piRef as any)?.setModel?.(model)
+  // pi 切模型会先按 settings 默认重置档位并同步发 thinking_level_select；
+  // 这个中间值不是用户选择，抑制落库，等下面 applyThinkingFor 恢复目标档位
+  suppressThinkingPersist = true
+  let success = false
+  try { success = await (piRef as any)?.setModel?.(model) }
+  finally { suppressThinkingPersist = false }
   if (!success) {
     if (goingCloud && openedNow) closeDrawer(ctx)
     return `切不过去：${target} 没有可用凭据`
@@ -3512,6 +3527,7 @@ async function switchTo(ctx: any, target: string, reason: string): Promise<strin
   lastSwitch = { at: Date.now(), from, to: target }
   modelHealthCache.delete(target)
   toolFailures = 0
+  applyThinkingFor(ctx)
   if (goingLocal && drawerEnabled()) closeDrawer(ctx)
   log(`model switch ${from} → ${target}${reason ? ` · ${reason}` : ""}`)
   return `已切到 ${target}${reason ? `（${reason}）` : ""}`
@@ -3604,6 +3620,94 @@ function modelKind(id: string): "local" | "cloud" | "other" {
   if (o.local && id === o.local) return "local"
   if (o.cloud && id === o.cloud) return "cloud"
   return "other"
+}
+
+// ———————— 思考档位（只有本地模型归 AI 管；范围同 autoFailoverRoles） ————————
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+function normalizeThinkingLevel(v: unknown): string {
+  const s = String(v || "").trim().toLowerCase()
+  return (THINKING_LEVELS as readonly string[]).includes(s) ? s : ""
+}
+function thinkingLabel(level: string): string {
+  return ({ off: "关", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最高" } as Record<string, string>)[level] || level
+}
+function thinkingRoleKey(): string {
+  return ROLE === "cli" ? `cli-${process.pid}` : ROLE
+}
+function localThinkingFor(roleKey: string): string {
+  const t = config().models.thinking
+  return normalizeThinkingLevel(t.byRole[roleKey]) || normalizeThinkingLevel(t.defaultLocal) || "off"
+}
+function cloudThinkingFor(roleKey: string): string {
+  // 在线档位不归 AI 管：只有用户手动设过 cloudByRole 才恢复，否则交给 pi 自己的默认
+  return normalizeThinkingLevel(config().models.thinking.cloudByRole[roleKey])
+}
+/** 思考持久化抑制：切模型时 pi 会先重置档位，别把这个中间值当成用户选择写盘 */
+let suppressThinkingPersist = false
+let pendingThinking: { role: string; kind: "local" | "cloud"; level: string } | null = null
+let pendingThinkingTimer: any = null
+function getThinkingLevelSafe(): string {
+  try { return String((piRef as any)?.getThinkingLevel?.() ?? lastCtx?.thinkingLevel ?? "") }
+  catch { return "" }
+}
+function setThinkingLevelSafe(level: string): string {
+  const p: any = piRef
+  if (!p?.setThinkingLevel) return ""
+  const prev = suppressThinkingPersist
+  suppressThinkingPersist = true
+  try { p.setThinkingLevel(level) } catch { /* ignore */ }
+  finally { suppressThinkingPersist = prev }
+  return getThinkingLevelSafe()
+}
+function cancelPendingThinkingPersist(): void {
+  if (pendingThinkingTimer) { clearTimeout(pendingThinkingTimer); pendingThinkingTimer = null }
+  pendingThinking = null
+}
+/** 把某个会话在本地/在线下的档位写进配置，供换会话/换模型恢复 */
+function saveThinkingSlot(roleKey: string, kind: "local" | "cloud", level: string): void {
+  const lv = normalizeThinkingLevel(level)
+  if (!lv) return
+  // 和 world.json 共用一把跨进程锁，避免 qq/home 同时回执时互相覆盖
+  withWorldLock(() => {
+    let raw: any = {}
+    if (existsSync(CONFIG_FILE)) {
+      try { raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) }
+      catch { return false }
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false
+    raw.models = raw.models && typeof raw.models === "object" && !Array.isArray(raw.models) ? raw.models : {}
+    raw.models.thinking = raw.models.thinking && typeof raw.models.thinking === "object" && !Array.isArray(raw.models.thinking) ? raw.models.thinking : {}
+    const t = raw.models.thinking
+    if (kind === "local") {
+      t.byRole = t.byRole && typeof t.byRole === "object" && !Array.isArray(t.byRole) ? t.byRole : {}
+      t.byRole[roleKey] = lv
+    } else {
+      t.cloudByRole = t.cloudByRole && typeof t.cloudByRole === "object" && !Array.isArray(t.cloudByRole) ? t.cloudByRole : {}
+      t.cloudByRole[roleKey] = lv
+    }
+    try { atomicWrite(CONFIG_FILE, JSON.stringify(raw, null, 2)) } catch { /* ignore */ }
+    return true
+  })
+}
+/** 当前模型是本地/在线时，套用该会话保存的档位 */
+function applyThinkingFor(ctx: any): void {
+  if (!roleManaged()) return
+  let id = ""
+  try { id = modelIdOf(ctx) } catch { return }
+  const kind = modelKind(id)
+  if (kind !== "local" && kind !== "cloud") return
+  const key = thinkingRoleKey()
+  const level = kind === "local" ? localThinkingFor(key) : cloudThinkingFor(key)
+  if (!level) return // 在线没有用户保存的档位：交给 pi 自己，不硬改
+  setThinkingLevelSafe(level)
+}
+function currentThinkingLine(): string {
+  if (!roleManaged()) return ""
+  let id = ""
+  try { id = lastCtx ? modelIdOf(lastCtx) : "" } catch { /* stale ctx */ }
+  if (!id || id !== config().models.local) return ""
+  const level = getThinkingLevelSafe()
+  return level ? `思考：${thinkingLabel(level)}（本地）` : ""
 }
 
 /** 当前实际模型落在哪一档：wakeSuffix 用它判断能不能喂其他窗口原文 */
@@ -4280,6 +4384,20 @@ export default function (pi: ExtensionAPI) {
       writeStatus()
       return
     }
+    if (String(c.action || "") === "thinking") {
+      const level = normalizeThinkingLevel(c.level)
+      if (!level) { writeAck(c.id, { ok: false, msg: "思考档位不合法" }); return }
+      if (!lastCtx) { writeAck(c.id, { ok: false, msg: "还没有可用的会话上下文" }); return }
+      if (!roleManaged()) { writeAck(c.id, { ok: false, msg: "本会话不在生效名单，跳过" }); return }
+      let cur = ""
+      try { cur = modelIdOf(lastCtx) } catch { writeAck(c.id, { ok: false, msg: "会话上下文已失效" }); return }
+      if (cur !== o.local) { writeAck(c.id, { ok: false, msg: "在线模型无需调整档位" }); return }
+      const actual = setThinkingLevelSafe(level) || level
+      saveThinkingSlot(thinkingRoleKey(), "local", actual)
+      writeAck(c.id, { ok: true, level: actual, msg: `思考档位已设为 ${thinkingLabel(actual)}（${actual}）` })
+      writeStatus()
+      return
+    }
     const wanted = String(c.model || "")
     const target = wanted === "local" ? o.local : wanted === "cloud" ? o.cloud : wanted
     if (!target || !lastCtx) { writeAck(c.id, { ok: false, msg: "没有可切换的上下文或模型" }); return }
@@ -4333,11 +4451,14 @@ export default function (pi: ExtensionAPI) {
 
   let hydrated = false
   let pendingHydrationKey: string | null = null
+  let thinkingSessionKey = ""
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     hydrated = false
     pendingHydrationKey = null
+    thinkingSessionKey = ""
     lastCtx = ctx
+    applyThinkingFor(ctx)
     // 恢复会话时只补开、不主动合：同一 session 可能还有另一个进程在云端
     const o = config().models
     if (!o.local) return
@@ -4349,6 +4470,9 @@ export default function (pi: ExtensionAPI) {
     const o = config().models
     if (!o.local) return
     const id = `${event?.model?.provider}/${event?.model?.id}`
+    cancelPendingThinkingPersist()
+    thinkingSessionKey = ""
+    applyThinkingFor(ctx)
     // 本地保护：手动/别处切到本地也立刻扳回在线，防止断电式的自我断线
     if (localLockOn() && id === o.local && o.cloud) {
       const r = await switchTo(ctx, o.cloud, "本地保护模式")
@@ -4357,6 +4481,26 @@ export default function (pi: ExtensionAPI) {
     }
     if (id === o.local) { if (drawerEnabled()) closeDrawer(ctx) }
     else if (drawerEnabled()) openDrawer(ctx)
+  })
+
+  // 用户手动 /thinking 后记档；切模型时 pi 会先重置档位再发 model_select，
+  // 那个中间值不能落库——延迟 500ms，若紧接着来了 model_select 就丢弃。
+  pi.on("thinking_level_select", async (event: any, ctx: any) => {
+    if (!roleManaged() || suppressThinkingPersist) return
+    let id = ""
+    try { id = modelIdOf(ctx) } catch { return }
+    const kind = modelKind(id)
+    const level = normalizeThinkingLevel(event?.level)
+    if ((kind !== "local" && kind !== "cloud") || !level) return
+    pendingThinking = { role: thinkingRoleKey(), kind, level }
+    if (pendingThinkingTimer) clearTimeout(pendingThinkingTimer)
+    pendingThinkingTimer = setTimeout(() => {
+      const p = pendingThinking
+      pendingThinking = null
+      pendingThinkingTimer = null
+      if (p) saveThinkingSlot(p.role, p.kind, p.level)
+    }, 500)
+    try { (pendingThinkingTimer as any).unref?.() } catch { /* ignore */ }
   })
 
   // 云端模式：别碰机密抽屉（拦常见路数，剩下的靠自觉）
@@ -4427,6 +4571,12 @@ export default function (pi: ExtensionAPI) {
     setAgentBusy(true)
     // 脚本级兜底：当前模型探活失败就自动切另一个（不依赖模型自己判断）
     await ensureModelAlive(ctx)
+    // 新会话（含 idle refresh）套用本会话保存的思考档位；同一会话不重复覆盖用户手动改动
+    const tk = sessionKey(ctx)
+    if (tk !== thinkingSessionKey) {
+      thinkingSessionKey = tk
+      applyThinkingFor(ctx)
+    }
     maybeRefreshWeather()
     const patch: any = {}
     const original = String(event?.systemPrompt || "")
@@ -5974,6 +6124,39 @@ export default function (pi: ExtensionAPI) {
       const lines = results.map((x) => `- ${x.rk} ${x.ok ? "✓" : "✗"} ${x.msg}`).join("\n")
       const allOk = results.every((x) => x.ok)
       return ok(`切换 ${scope === "all" ? "全部会话" : scope} → ${target}\n${lines}${allOk ? "" : "\n有会话没成功，按上面如实告诉用户。"}`)
+    },
+  })
+
+  addTool(pi, {
+    name: "thinking",
+    label: "Thinking",
+    description: "调整自己的思考档位。只在本地模型、且本会话在「生效会话」名单（models.autoFailoverRoles）里时可用；在线模型无需调整。日常闲聊可以 off，复杂任务再调高。不传 level 查看当前档位。",
+    parameters: {
+      type: "object",
+      properties: {
+        level: { type: "string", enum: ["off", "low", "medium", "high"], description: "off=关闭思考，low/medium/high=低/中/高档" },
+      },
+    },
+    async execute(_id: string, params: any, _signal: any, _update: any, ctx: any) {
+      const o = config().models
+      let cur = ""
+      try { cur = modelIdOf(ctx) || "" } catch { /* stale ctx */ }
+      if (!cur) return ok("还没有模型信息。")
+      const kind = modelKind(cur)
+      if (kind === "cloud") return ok("在线模型无需调整档位")
+      if (kind !== "local") return ok("这个模型不在本地/在线配置里，档位不归插件管。")
+      if (!roleManaged()) return ok("本会话不在生效名单（models.autoFailoverRoles），不能自己调思考档位。")
+      const actual = getThinkingLevelSafe()
+      const want = normalizeThinkingLevel(params?.level)
+      if (!want) {
+        return ok(`当前思考档位：${thinkingLabel(actual)}（${actual || "未知"}）；本地默认：${thinkingLabel(localThinkingFor(thinkingRoleKey()))}。可设：off / low / medium / high。`)
+      }
+      const now = setThinkingLevelSafe(want) || want
+      saveThinkingSlot(thinkingRoleKey(), "local", now)
+      writeStatus()
+      return ok(now === want
+        ? `思考档位已设为 ${thinkingLabel(want)}（${want}）`
+        : `模型不支持 ${thinkingLabel(want)}，已按实际生效 ${thinkingLabel(now)}（${now}）`)
     },
   })
 

@@ -55,6 +55,7 @@
   细节写在末尾的 `## 化形描述`（每个化形一个 `### 名字` 小节），AI 自己维护；状态行只报化形名，描述不每轮注入，`form()` 会显示当前这一节的摘要。
 
 ## 模型
+- 思考档位：`thinking()` 查看，`thinking({ level: "off|low|medium|high" })` 调整。**只在本地模型、且本会话在「生效会话」名单里可用**；在线模型回「在线模型无需调整档位」。看板本地模型右侧也有同一个控制。
 - 切换：`switch_model({ target: "local|cloud", reason: "为什么切" })`
 - 查状态：`switch_model()`，或 `switch_model({ target: "status" })`
 - 本地锁定：`local_pin({ enabled: true, reason: "跑项目" })` —— 和本地保护正好一对（保护锁在线、锁定锁本地）。

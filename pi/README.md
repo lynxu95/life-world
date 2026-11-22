@@ -11,9 +11,10 @@
 
 把 life-world 从 opencode 插件搬到 pi 的原生扩展点：
 
-- **工具**：`plan_next` / `check_alarm` / `check_proactive` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `perceive` / `delegate` / `gal_choice` / `switch_model` / `local_protect` / `form` / `weather` / `ha` / `patch` / `web_search` / `bg_run` / `bg_status` / `bg_output` / `bg_kill`
+- **工具**：`plan_next` / `check_alarm` / `check_proactive` / `cancel_alarm` / `reach_out` / `send_media` / `group_chat` / `kaomoji` / `memory_search` / `memory_day` / `memory_timeline` / `skill_list` / `skill_read` / `skill_run` / `skill_toggle` / `perceive` / `delegate` / `gal_choice` / `switch_model` / `thinking` / `local_protect` / `form` / `weather` / `ha` / `patch` / `web_search` / `bg_run` / `bg_status` / `bg_output` / `bg_kill`
 - **后台任务**：`bg_run` 把生图、转码、长脚本扔到 detached 进程，立刻返回 job id；`bg_status` / `bg_output` 查状态和输出，`bg_kill` 停掉。同时最多 3 个，日志 7 天清理、超 20MB 截断
 - **模型热切换**：`switch_model` 让角色自己决定本地 / 在线；模型无响应或工具连续失败两次会兜底切换，但**只在 `models.autoFailoverRoles` 名单里的会话生效**（默认 `["qq","home"]`，`cli` / `api` 只认手动切换）；另有脚本探活兜底；`local_protect` 可临时锁在在线
+- **思考档位**：本地模型可用 `thinking({ level })` 自己调（off/low/medium/high），看板本地模型右侧也能手动换；只对「生效会话」名单生效，在线模型不动，切模型/换会话自动恢复各自档位
 - **化形（可选，默认关）**：看板「扩展功能 · 化形」开启后每轮状态行带 `化形：`；在线按当前模型自动匹配（deepseek=鲸鱼娘、claude=claude娘、qwen=千问大小姐…），本地或认不出的厂商用 `form` 工具自己挑。映射可在看板编辑，或写 `identity/化形表.md` 的 `- 关键词 → 标签` 行覆盖内置表；描述区 `## 化形描述` 留给 AI 自己维护
 - **机密抽屉**：切云端前把之前的对话与机密文件收进 `worlds/default/机密抽屉/`，`用户画像-私密.md` 不预加载、本地需要时自己读，云端禁止打开该目录；没配本地模型则整个抽屉不启用
 - **闹钟带模型**：`plan_next` 可指定到点用 `local` / `cloud`，定时器触发前先切过去
@@ -175,7 +176,8 @@ pi          # TUI，已经带 life-world
     "localHealthUrl": "",
     "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
-    "cooldownMs": 60000
+    "cooldownMs": 60000,
+    "thinking": { "defaultLocal": "off", "byRole": {}, "cloudByRole": {} }
   }
 }
 ```

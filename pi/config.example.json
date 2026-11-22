@@ -70,7 +70,12 @@
     "localHealthUrl": "",
     "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
-    "cooldownMs": 60000
+    "cooldownMs": 60000,
+    "thinking": {
+      "defaultLocal": "off",
+      "byRole": {},
+      "cloudByRole": {}
+    }
   },
   "forms": {
     "enabled": false,

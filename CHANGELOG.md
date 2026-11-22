@@ -15,6 +15,18 @@
 ~/.local/share/life-world/bin/lwctl update
 ```
 
+## [1.18.0] - 2026-11-22
+
+### 新增
+
+- **思考档位可由 AI 自己调**：新增 `thinking` 工具（`off / low / medium / high`），只在**本地模型**且本会话在
+  「生效会话」名单（`models.autoFailoverRoles`，默认 qq / home）时可用；在线模型直接回「在线模型无需调整档位」。
+- **档位按会话持久化**：本地档位记在 `models.thinking.byRole`，在线档位记在 `cloudByRole`；切模型、换会话
+  （含 idle refresh）会自动恢复，不会被新会话默认值冲掉。
+- **状态行**：本地且名单内时显示 `思考：关/低/中/高（本地）`。
+- **看板**：「模型设置」本地模型右侧新增思考档位下拉，可手动覆盖；保存会清掉 AI 的按会话偏好并下发到各会话。
+- 训练/文档同步：`modules/models.md`、`help/tools.md`、`tools-quick.md`、README/GUIDE/pi/README、config example。
+
 ## [1.17.10] - 2026-11-22
 
 ### 修复

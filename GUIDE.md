@@ -49,6 +49,7 @@
 | QQ | 私聊 / 群聊、语音 / 图片 / 文件；`reach_out` 主动找人 |
 | 看视频 / 听音频 / 看图 | `perceive`；主模型自己能看的图片直接用 `read` |
 | 换模型 | `switch_model` / 看板 / `lwctl set`；自动切换、本地保护、本地锁定都只在 `models.autoFailoverRoles` 名单里的会话生效（默认 qq / home，看板「模型设置 → 生效会话」勾选） |
+| 换思考档位 | 本地模型：`thinking({ level: "off|low|medium|high" })`，或看板「模型设置」本地模型右侧手动换；在线模型不调，只对生效会话生效 |
 | 换化形 | 默认关，看板「扩展功能 · 化形」开启；`form({ name: "小狐狸" })` 设本地/未登记厂商的标签，映射可在看板或 `identity/化形表.md` 改 |
 | 改代码 | `patch`（行级哈希编辑，不用抄原文）；`edit` 兜底 |
 | 家里 | `ha` 查实体 / 调服务 / 让音箱说话（看板「Home Assistant」配地址和令牌，默认关） |

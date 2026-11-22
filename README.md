@@ -46,6 +46,7 @@
 | 印象整理 | 每天把近期对话/日记归纳成 `identity/印象.md`，本地/云端都注入 |
 | 记忆星图 | 看板 3D 星图：全屏、星云背景随旋转、印象连线回真实来源 |
 | 模型热切换 | `switch_model` / 看板 / `lwctl` 都能切；脚本级故障切换；`local_protect` 本地保护模式（临时只用在线）、`local_pin` 本地锁定（只留本地）——两者都按「生效会话」名单起作用 |
+| 思考档位 | 本地模型可由 AI 用 `thinking` 自己调（off/低/中/高），看板本地模型右侧也能手动换；只对「生效会话」名单生效，在线不调 |
 | 化形（可选，默认关） | 看板「扩展功能」开启后，在线模型自动对应社区化形（deepseek=鲸鱼娘、claude=claude娘…），每轮状态行显示；本地或未登记厂商用 `form` 自己挑，看板/`identity/化形表.md` 可改映射；关着时不加任何字段，完全自由 |
 | 代码编辑 | `patch` 行级哈希编辑：只给 tag + 行号，不用抄原文；`edit` 兜底 |
 | Home Assistant | 默认关；看板填地址+令牌（存 `机密抽屉/钥匙串`），`ha` 工具查实体/调服务/让音箱说话 |
@@ -250,7 +251,8 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "localHealthUrl": "",
     "cloudHealthUrl": "",
     "probeTimeoutMs": 4000,
-    "cooldownMs": 60000
+    "cooldownMs": 60000,
+    "thinking": { "defaultLocal": "off", "byRole": {}, "cloudByRole": {} }
   },
   "care": {
     "enabled": true, "quietStart": "23:30", "quietEnd": "08:00",
@@ -329,6 +331,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
 - 人能切：`lwctl` 交互菜单 / `lwctl set qq cloud` / 看板按钮；
 - 脚本兜底：模型无响应立即切另一个；工具连续失败两次从本地切云端；每轮探活。探活优先跟随当前模型 provider 的 `baseUrl + /models`，换本地模型/换端口自动跟着走，`localHealthUrl` 只作同源兜底；看板「健康」项也走同一套。**这三样都按会话生效**：`models.autoFailoverRoles` 名单（默认 `["qq","home"]`），名单外的会话（`cli` 终端、`api` 网关）只认手动切换——写代码时工具报错是常态，不能连着两次就把你拽去另一个模型。**「本地保护」「本地锁定」也只对名单里的会话起作用**（打游戏时只有 home/qq 会被赶到在线，你开的 cli 不受影响）。看板「模型设置」里一顿勾选：`qq` / `home` / `cli` / `api`（群聊固定不参与，子代理不加载扩展）。优先级：本地锁定 > 本地保护 > 会话名单；05:00 的整理任务和带 `model` 的闹钟同样只对名单内会话自动切。想临时不切就用「本地锁定」（看板「模型设置」可开，`local_pin` 工具也行），和「本地保护（只用在线）」正好一对；开启本地保护时不往本地掉；
 - 切换记录写进会话，恢复会话时保留；
+- 思考档位：本地模型可以用 `thinking({ level: "off|low|medium|high" })` 自己调，看板「模型设置」本地模型右侧也能手动换。只对「生效会话」名单里的本地模型生效，在线模型不动；本地/在线来回切会恢复各自保存的档位。
 - 规范文件 `worlds/default/identity/模型使用规范.md`（建议 ≤500 字）会注入 system，说明什么时候切、切换礼仪。
 
 模型是“化形”，不是人格：本地是家、在线是进机房借算力；换模型不换人，名字和关系不变。这具身子是谁家的可以照实说，不需要回避。
@@ -518,7 +521,7 @@ home（后台那个「总脑」）在日程、心跳、想起你、早上这些�
 
 ## 工具
 
-`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `local_protect` · `form` · `weather` · `ha` · `patch` · `web_search`
+`plan_next` · `check_alarm` · `cancel_alarm` · `heartbeat` · `heartbeat_stop` · `bg_run` · `bg_status` · `bg_output` · `bg_kill` · `check_proactive` · `reach_out` · `send_media` · `group_chat` · `kaomoji` · `memory_search` · `memory_day` · `memory_timeline` · `skill_list` · `skill_read` · `skill_run` · `skill_toggle` · `perceive` · `delegate` · `gal_choice` · `switch_model` · `thinking` · `local_protect` · `form` · `weather` · `ha` · `patch` · `web_search`
 
 - `web_search` 走 TinyFish keyless，免 API Key；
 - `delegate` 起独立 `pi -p` 子进程，深度 1 层；

@@ -914,8 +914,21 @@ const server = http.createServer(async (req, res) => {
         cfg.multimodal.model = data.multimodal.trim()
         cfg.multimodal.enabled = !!cfg.multimodal.model
       }
+      let thinking = ""
+      if (typeof data.thinking === "string") {
+        thinking = data.thinking.trim().toLowerCase()
+        if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking)) return json(res, 400, { ok: false, msg: "思考档位不合法" })
+        cfg.models.thinking = cfg.models.thinking && typeof cfg.models.thinking === "object" && !Array.isArray(cfg.models.thinking) ? cfg.models.thinking : {}
+        cfg.models.thinking.defaultLocal = thinking
+        // 手动换档覆盖 AI 的按会话偏好；之后 AI 还可以再单独调
+        cfg.models.thinking.byRole = {}
+      }
       writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
-      return json(res, 200, { ok: true, models: { local: cfg.models.local, cloud: cfg.models.cloud }, subagent: cfg.subagent || {}, multimodal: cfg.multimodal || {} })
+      let commandQueued = true
+      if (thinking) {
+        try { appendCommand(ROOT, { target: "all", action: "thinking", level: thinking, reason: "看板手动" }) } catch { commandQueued = false }
+      }
+      return json(res, 200, { ok: true, commandQueued, models: { local: cfg.models.local, cloud: cfg.models.cloud, thinking: cfg.models.thinking || {} }, subagent: cfg.subagent || {}, multimodal: cfg.multimodal || {} })
     }
     // 会话级自动切换：勾/取勾某个 roleKey（默认名单 qq / home）
     if (req.method === "POST" && url.pathname === "/api/auto-failover") {

@@ -539,7 +539,11 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
 
         <section>
         <div class="sec-head"><h2>模型设置</h2></div>
-        <label class="field">本地<select id="m-local"></select></label>
+        <div class="row">
+          <label class="field" style="flex:1;min-width:0">本地<select id="m-local"></select></label>
+          <label class="field" style="flex:0 0 96px">思考<select id="m-thinking"><option value="off">关</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+        </div>
+        <div class="hint">思考档位只对「生效会话」里的本地模型生效，在线不调整；这里保存会覆盖 AI 按会话单独设的档位。</div>
         <label class="field" style="margin-top:8px">在线<select id="m-cloud"></select></label>
         <label class="field" style="margin-top:8px">分身<select id="m-subagent"></select></label>
         <label class="field" style="margin-top:8px">辅助感知<select id="m-vision"></select></label>
@@ -1209,6 +1213,18 @@ async function loadOverview() {
     }
     if (!mTouched) {
       fillSelect($("m-local"), d.models.local || "", d.available || [], "（不设置）")
+      const th = $("m-thinking")
+      if (th && document.activeElement !== th) {
+        const val = (d.models.thinking && d.models.thinking.defaultLocal) || "off"
+        // 配置里可能是 pi 的其他档位（xhigh/max/minimal）：保留显示，别让下拉变空白
+        if (![...th.options].some((o) => o.value === val)) {
+          const o = document.createElement("option")
+          o.value = val
+          o.textContent = val + "（当前）"
+          th.append(o)
+        }
+        th.value = val
+      }
       fillSelect($("m-cloud"), d.models.cloud || "", d.available || [], "（不设置）")
       fillSelect($("m-subagent"), (d.subagent && d.subagent.model) || "", d.available || [], "（默认）")
       fillSelect($("m-vision"), (d.multimodal && d.multimodal.model) || "", d.available || [], "（不启用）")
@@ -1758,6 +1774,7 @@ for (const id of ["care-qs", "care-qe"]) $(id).addEventListener("input", () => {
 $("care-random").addEventListener("change", () => { careTouched = true })
 
 let mTouched = false
+let thinkingTouched = false
 let mLoaded = false
 let LAST_MODEL_INFO = {}
 function fillSelect(el, current, list, noneLabel) {
@@ -1777,6 +1794,7 @@ function fillSelect(el, current, list, noneLabel) {
   el.value = current || ""
 }
 $("m-local").addEventListener("change", () => { mTouched = true })
+$("m-thinking").addEventListener("change", () => { mTouched = true; thinkingTouched = true })
 $("m-cloud").addEventListener("change", () => { mTouched = true })
 $("m-subagent").addEventListener("change", () => { mTouched = true })
 $("m-vision").addEventListener("change", () => { mTouched = true })
@@ -1785,9 +1803,13 @@ $("m-save").onclick = async () => {
   if (!mLoaded) { $("m-hint").textContent = "模型列表还没加载好，稍后再保存"; return }
   b.disabled = true; b.textContent = "保存中…"
   try {
-    const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim(), subagent: $("m-subagent").value.trim(), multimodal: $("m-vision").value.trim() }) })
-    $("m-hint").textContent = r.ok ? "已保存" : "保存失败"
+    const body = { local: $("m-local").value.trim(), cloud: $("m-cloud").value.trim(), subagent: $("m-subagent").value.trim(), multimodal: $("m-vision").value.trim() }
+    // 只有用户真的动过思考档位才提交，避免改模型时顺手清掉 AI 的按会话偏好
+    if (thinkingTouched) body.thinking = $("m-thinking").value
+    const r = await getJson("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    $("m-hint").textContent = r.ok ? (r.commandQueued === false ? "已保存，但思考档位下发失败；下次换模型/会话生效" : "已保存") : "保存失败"
     mTouched = false
+    thinkingTouched = false
   } catch (e) { $("m-hint").textContent = "保存失败：" + e.message }
   b.disabled = false; b.textContent = "保存"
   setTimeout(() => { $("m-hint").textContent = "" }, 3000)
