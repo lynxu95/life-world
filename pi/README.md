@@ -27,6 +27,7 @@
 - **QQ 桥接**：OneBot v11 正向 WS ↔ `pi --mode rpc`；私聊、余波、outbox、图片/语音/文件、基础群聊
   - 配了 `models.cloud` 时，**群聊会话优先在线模型**（判官也用在线模型），私聊仍用 `LIFE_WORLD_MODEL`（通常本地）
   - 群聊触发：@ / 关键词 / 5% 随机插话；群聊配置热加载（2 秒缓存），改 `life-world.json` 不用重启
+  - 忙时连发：`bridge.coalesce` 把处理期间收到的私聊先缓冲，结束后做一次「投递复核」，只发最终回复；看板「扩展功能 → 余波 · QQ 私聊」可改余波开关/间隔/轮次（1/2 次）
 - **子代理**：`delegate` 起独立 `pi -p` 子进程，零第三方扩展，深度限制 1 层
 - **gal**：`gal_choice` 工具用 `ctx.ui.select` 抛单选面板（仅终端 TUI；QQ 无面板）
 
@@ -163,6 +164,7 @@ pi          # TUI，已经带 life-world
     "wsUrl": "ws://127.0.0.1:3001",
     "token": "",
     "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 },
+    "coalesce": { "enabled": true, "graceMs": 500, "maxMessages": 20, "maxRounds": 2 },
     "group": { "enabled": false, "keywords": ["铃"] }
   },
   "subagent": { "model": "deepseek-flash" },

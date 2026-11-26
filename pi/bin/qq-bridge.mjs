@@ -88,7 +88,37 @@ const ownerQQ = Number(bridge.ownerQQ)
 if (!ownerQQ) { log("ownerQQ missing, exit"); process.exit(1) }
 const wsUrl = bridge.wsUrl || "ws://127.0.0.1:3001"
 const wsToken = bridge.token || ""
-const afterglowCfg = Object.assign({ enabled: true, delayMs: 60000, maxRounds: 2 }, bridge.afterglow || {})
+function liveBridge() {
+  try { return readJson(CONFIG_FILE, {}).bridge || {} } catch { return {} }
+}
+/** 余波配置热加载：看板改完 2 秒内生效，不用重启桥接 */
+let afterglowCache = { at: 0, cfg: null }
+function afterglowCfg() {
+  const now = Date.now()
+  if (afterglowCache.cfg && now - afterglowCache.at < 2000) return afterglowCache.cfg
+  const raw = liveBridge().afterglow || {}
+  const rounds = Number(raw.maxRounds)
+  const cfg = {
+    enabled: raw.enabled !== false,
+    delayMs: Math.max(10_000, Math.min(3_600_000, Number(raw.delayMs) || 60_000)),
+    maxRounds: Number.isFinite(rounds) ? Math.max(0, Math.min(2, Math.round(rounds))) : 2,
+  }
+  afterglowCache = { at: now, cfg }
+  return cfg
+}
+/** 忙时合并：对方在 AI 处理期间连发多条，结束后先复核再发，避免过时回复 */
+function coalesceCfg() {
+  const raw = liveBridge().coalesce || {}
+  const grace = Number(raw.graceMs)
+  const maxMessages = Number(raw.maxMessages)
+  const maxRounds = Number(raw.maxRounds)
+  return {
+    enabled: raw.enabled !== false,
+    graceMs: Number.isFinite(grace) ? Math.max(100, Math.min(3000, Math.round(grace))) : 500,
+    maxMessages: Number.isFinite(maxMessages) ? Math.max(1, Math.min(100, Math.round(maxMessages))) : 20,
+    maxRounds: Number.isFinite(maxRounds) ? Math.max(0, Math.min(5, Math.round(maxRounds))) : 2,
+  }
+}
 /** 一轮多久没有任何动静就算卡死、自动掐掉；显式写 0 = 关闭，不写则默认 600 秒 */
 const idleRaw = bridge.idleTimeoutSec
 const idleTimeoutSec = String(idleRaw).trim() === "0" ? 0 : (Number(idleRaw) > 0 ? Number(idleRaw) : 600)
@@ -815,12 +845,16 @@ const afterglow = { timer: null, round: 0, seq: 0, userSeq: 0 }
 function clearAfterglow() { if (afterglow.timer) { clearTimeout(afterglow.timer); afterglow.timer = null } }
 function userReturned() { afterglow.userSeq++; afterglow.round = 0; clearAfterglow(); log("userReturned", afterglow.userSeq) }
 function armAfterglow(round) {
-  if (!afterglowCfg.enabled || afterglowCfg.maxRounds <= 0 || round < 1 || round > afterglowCfg.maxRounds) return
+  const ag = afterglowCfg()
+  if (!ag.enabled || ag.maxRounds <= 0 || round < 1 || round > ag.maxRounds) return
   clearAfterglow()
   afterglow.round = round
   afterglow.seq = afterglow.userSeq
   afterglow.timer = setTimeout(async () => {
     afterglow.timer = null
+    const live = afterglowCfg()
+    if (!live.enabled || live.maxRounds <= 0 || round > live.maxRounds) { log("afterglow cancelled by config"); return }
+    if (privateStopRequested || privateBusy) { log("afterglow skipped · private busy/stopped"); return }
     log("afterglow fire", round, "seq", afterglow.seq, "userSeq", afterglow.userSeq, "running", pi.running)
     if (afterglow.seq !== afterglow.userSeq || pi.running) return
     try {
@@ -840,9 +874,9 @@ function armAfterglow(round) {
       // 没发出去就别继续下一拍
       if (sent && afterglow.seq === afterglow.userSeq) armAfterglow(round + 1)
     } catch (e) { log("afterglow failed", String(e)); stopTyping() }
-  }, Number(afterglowCfg.delayMs) || 60000)
+  }, ag.delayMs)
   afterglow.timer.unref?.()
-  log("afterglow armed", round, afterglowCfg.delayMs)
+  log("afterglow armed", round, ag.delayMs)
 }
 
 /** 扩展写的唤醒（闹钟/心跳起源于这个私聊）：直接在本会话里跑一轮，回复发给他 */
@@ -867,48 +901,178 @@ async function wakeFromControl(text, id = "", wakeHint = "") {
 }
 
 // ———————————————— 私聊 ————————————————
-async function handlePrivateNow(msg) {
-  if (Number(msg.user_id) !== ownerQQ) return
-  userReturned()
+/** 下载一条消息的附件；预算跨多条消息共用，避免合并时爆量 */
+async function prepareIncoming(msg, budget = MAX_TOTAL_BYTES) {
   const text = textOf(msg)
   const media = mediaParts(msg)
-  if (!text && !media.length) return
   const attachments = []
   lastAttachmentIssue = ""
-  let budget = MAX_TOTAL_BYTES
+  let remain = budget
   for (const item of media) {
+    if (privateStopRequested) break
     const cap = item.type === "image" ? MAX_IMAGE_BYTES : item.type === "voice" ? MAX_VOICE_BYTES : MAX_FILE_BYTES
-    const max = Math.min(cap, budget)
+    const max = Math.min(cap, remain)
     if (max <= 0) break
     const got = await fetchAttachment(item, max)
     if (!got) continue
     let size = 0
     try { size = statSync(got.path).size } catch { /* ignore */ }
-    if (size > budget) { try { unlinkSync(got.path) } catch { /* ignore */ } continue }
-    budget -= size
+    if (size > remain) { try { unlinkSync(got.path) } catch { /* ignore */ } continue }
+    remain -= size
     attachments.push({ ...got, type: item.type })
   }
-  if (!text && !attachments.length) {
-    const hasVoice = media.some((m) => m.type === "voice")
-    const tip = lastAttachmentIssue === "too_large"
-      ? (hasVoice ? "（语音太大了：上限 20MB，发短一点的。）" : "（图片太大了：单张上限 8MB，缩一下或截小一点再发；装了 imagemagick 或 ffmpeg 的话我会自动缩。）")
-      : hasVoice ? "（语音没下载下来，再发一次试试？）" : "（附件没下载下来，再发一次试试？）"
-    await call("send_private_msg", { user_id: ownerQQ, message: tip }).catch(() => {})
-    return
-  }
-  const images = attachments.filter((a) => a.type === "image").map((a) => imagePayload(a.path))
+  return { text, media, attachments, remain, issue: lastAttachmentIssue }
+}
+function summarizeAttachments(attachments, media, maxImages = Infinity) {
+  const imageAtts = attachments.filter((a) => a.type === "image")
+  const take = Number.isFinite(maxImages) ? Math.max(0, maxImages) : imageAtts.length
+  const images = imageAtts.slice(0, take).map((a) => imagePayload(a.path))
+  const imagePaths = imageAtts.map((a) => a.path)
   const silkVoices = attachments.filter((a) => a.unsupported === "silk")
   const describe = (a) => a.type === "image" ? `[图片 ${basename(a.path)}]`
     : a.type === "voice"
       ? (a.unsupported === "silk" ? `[语音 ${basename(a.path)}：SILK 格式，本机解不了，听不到]` : `[语音 ${basename(a.path)}：${a.path}]`)
       : `[文件 ${basename(a.path)}：${a.path}]`
-  const hasImage = attachments.some((a) => a.type === "image")
+  const imgNote = imageAtts.length
+    ? (images.length === imageAtts.length ? "图片已附在请求里。" : images.length ? "部分图片已附在请求里，其余路径见下面的补充说明。" : "图片路径见下面的补充说明。")
+    : ""
   const noteTail = silkVoices.length
-    ? `SILK 语音听不了：可以自己往插件 venv 装解码器（${join(ROOT, "venv/bin/python")} -m pip install pilk），装好让他重发一次；装不了就直说没听清。${hasImage ? "图片已附在请求里。" : ""}其它文件路径可直接用 read 工具读。`
-    : "图片已附在请求里，语音可以用 perceive({ path: \"…\", kind: \"audio\" }) 听，文件路径可直接用 read 工具读。"
+    ? `SILK 语音听不了：可以自己往插件 venv 装解码器（${join(ROOT, "venv/bin/python")} -m pip install pilk），装好让他重发一次；装不了就直说没听清。${imgNote}其它文件路径可直接用 read 工具读。`
+    : `${imgNote}语音可以用 perceive({ path: "…", kind: "audio" }) 听，文件路径可直接用 read 工具读。`
   const notes = attachments.length
     ? `\n（对方发来 ${attachments.length} 个附件：${attachments.map(describe).join("、")}；${noteTail}）`
     : (media.length ? `\n（对方发了 ${media.length} 个附件，但都没下载下来。）` : "")
+  return { images, imagePaths, notes }
+}
+/** AI 处理期间收到的私聊：只缓冲，不各自起一轮，避免过时回复 */
+const privatePending = []
+/** 主人按了 /stop：这一轮结束后不要复核、不要继续派发积压；下一条真实消息来了再清掉 */
+let privateStopRequested = false
+/** /new 的代数：在途的复核/发送发现代数变了就丢弃，避免旧消息跑到新会话里 */
+let privateEpoch = 0
+function bufferPrivate(msg) {
+  userReturned() // 任何私聊（包括纯表情）都算她回来了：取消上一轮的余波
+  const text = textOf(msg)
+  const media = mediaParts(msg)
+  if (!text && !media.length) return
+  privatePending.push({ msg, at: Date.now() })
+  const cap = Math.max(coalesceCfg().maxMessages * 2, 50)
+  while (privatePending.length > cap) privatePending.shift()
+  log("private buffered", text.slice(0, 50), privatePending.length)
+}
+/** 把忙时攒下的几条消息包成一次「投递复核」；有旧回复时只提示它还没发出去，不重复贴正文 */
+async function buildPendingPrompt(batch, hasOld, oldTexts = [], mainText = "") {
+  const cfg = coalesceCfg()
+  const turnStart = Number(pi.turnStartedAt || 0)
+  const ts = (x) => Number(x.msg.time) > 0 ? Number(x.msg.time) * 1000 : Number(x.at || 0)
+  let take = [...batch].sort((a, b) => ts(a) - ts(b))
+  let dropped = 0
+  if (take.length > cfg.maxMessages) {
+    dropped = take.length - cfg.maxMessages
+    take = take.slice(-cfg.maxMessages)
+  }
+  let budget = MAX_TOTAL_BYTES
+  let imageSlots = 6
+  const images = []
+  const extraImages = []
+  const lines = []
+  for (const item of take) {
+    if (privateStopRequested) return null
+    const prep = await prepareIncoming(item.msg, budget)
+    budget = prep.remain
+    const d = Number(item.msg.time) > 0 ? new Date(Number(item.msg.time) * 1000) : new Date(item.at || Date.now())
+    const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+    const early = turnStart && ts(item) < turnStart ? "（更早）" : ""
+    if (!prep.text && !prep.attachments.length) {
+      if (prep.media.length) lines.push(`${lines.length + 1}. [${hm}]${early} （附件没下载下来）`)
+      continue
+    }
+    const sum = summarizeAttachments(prep.attachments, prep.media, imageSlots)
+    imageSlots -= sum.images.length
+    images.push(...sum.images)
+    for (const p of sum.imagePaths.slice(sum.images.length)) extraImages.push(p)
+    lines.push(`${lines.length + 1}. [${hm}]${early} ${prep.text || "（只有附件，没有文字）"}${sum.notes}`)
+  }
+  if (!lines.length) return null
+  const first = take[0]
+  const header = `[私聊｜${nameOf(first.msg)}（QQ ${first.msg.user_id}）] `
+  const mainOne = String(mainText || "").replace(/\s+/g, " ").trim().slice(0, 500)
+  const oldOne = hasOld ? oldTexts.join(" ").replace(/\s+/g, " ").trim().slice(0, 800) : ""
+  const ctx = [mainOne ? `上一条用户消息：「${mainOne}」` : "上一条是附件消息", oldOne ? `你上一条未发出的回复：「${oldOne}」` : ""].filter(Boolean).join("；")
+  const lead = `（投递复核：${ctx}；对方在你处理上一条消息期间或之前又发来下面几条。）`
+  const tail = hasOld
+    ? "（投递复核：你上一条回复已经生成但还没有发到 QQ。请结合这些新消息，输出最终要发到 QQ 的内容：可以沿用/补充刚才的回复，也可以重写；不要解释这个过程，不要调用 reach_out；有新消息时不要用 [SILENT] 当默认。）"
+    : "（投递复核：请直接回复这些消息；不要解释这个过程，不要调用 reach_out；有新消息时不要用 [SILENT] 当默认。）"
+  const droppedNote = dropped ? `\n（投递复核：前面还有 ${dropped} 条更早的消息已折叠，只看了最近 ${take.length} 条。）` : ""
+  const extraNote = extraImages.length ? `\n（投递复核：还有 ${extraImages.length} 张图片没附在请求里：${extraImages.join("、")}）` : ""
+  return { prompt: `${header}${lead}\n${lines.join("\n")}${droppedNote}${extraNote}\n${tail}`, images, dropped }
+}
+async function reviewWithPending(initialTexts, epoch, mainText) {
+  const cfg = coalesceCfg()
+  let texts = initialTexts
+  let droppedTotal = 0
+  const cancelled = () => epoch !== privateEpoch
+  for (let round = 0; round < cfg.maxRounds; round++) {
+    if (privateStopRequested) break
+    if (cancelled()) return { texts: initialTexts, cancelled: true, dropped: droppedTotal }
+    if (!privatePending.length) break
+    await sleep(cfg.graceMs)
+    if (privateStopRequested) break
+    if (cancelled()) return { texts: initialTexts, cancelled: true, dropped: droppedTotal }
+    const batch = privatePending.splice(0)
+    if (!batch.length) break
+    const hasOld = texts.some((t) => String(t).trim() && !/^\[SILENT\]$/i.test(String(t).trim()))
+    const prepared = await buildPendingPrompt(batch, hasOld, texts, mainText)
+    if (!prepared) {
+      if (privateStopRequested) { privatePending.unshift(...batch); break }
+      continue
+    }
+    droppedTotal += prepared.dropped || 0
+    if (privateStopRequested) { privatePending.unshift(...batch); break }
+    if (cancelled()) return { texts: initialTexts, cancelled: true, dropped: droppedTotal }
+    log("private review", `batch=${batch.length}`, `images=${prepared.images.length}`, `round=${round + 1}`)
+    try {
+      texts = await pi.promptWithRecovery(prepared.prompt, prepared.images)
+    } catch (e) {
+      log("private review failed", String(e).slice(0, 200))
+      if (privateStopRequested) { privatePending.unshift(...batch); break }
+      if (cancelled()) return { texts: initialTexts, cancelled: true, dropped: droppedTotal }
+      try {
+        // 复核失败：丢掉旧草稿，按普通新消息重答一次
+        const fresh = await buildPendingPrompt(batch, false, [], mainText)
+        if (!fresh) continue
+        if (privateStopRequested) { privatePending.unshift(...batch); break }
+        if (cancelled()) return { texts: initialTexts, cancelled: true, dropped: droppedTotal }
+        texts = await pi.promptWithRecovery(fresh.prompt, fresh.images)
+      } catch (e2) {
+        log("private review fallback failed", String(e2).slice(0, 200))
+        // 失败的消息放回队首，下一条真实消息来了还能继续复核，别静默丢
+        privatePending.unshift(...batch)
+        return { texts: [], failed: true, batch, dropped: droppedTotal }
+      }
+    }
+    if (privateStopRequested) break
+    if (cancelled()) return { texts: initialTexts, cancelled: true, dropped: droppedTotal }
+  }
+  return { texts, failed: false, dropped: droppedTotal }
+}
+async function handlePrivateNow(msg) {
+  if (Number(msg.user_id) !== ownerQQ) return true
+  userReturned() // 纯表情/空消息也算她回来了，先取消余波
+  const epoch = privateEpoch
+  // 没有文字也没有可下载附件：直接忽略，别误报「附件没下载下来」
+  if (!textOf(msg) && !mediaParts(msg).length) return true
+  const { text, media, attachments, issue } = await prepareIncoming(msg)
+  if (privateStopRequested || epoch !== privateEpoch) return false
+  if (!text && !attachments.length) {
+    const hasVoice = media.some((m) => m.type === "voice")
+    const tip = issue === "too_large"
+      ? (hasVoice ? "（语音太大了：上限 20MB，发短一点的。）" : "（图片太大了：单张上限 8MB，缩一下或截小一点再发；装了 imagemagick 或 ffmpeg 的话我会自动缩。）")
+      : hasVoice ? "（语音没下载下来，再发一次试试？）" : "（附件没下载下来，再发一次试试？）"
+    await call("send_private_msg", { user_id: ownerQQ, message: tip }).catch(() => {})
+    return true
+  }
+  const { images, notes } = summarizeAttachments(attachments, media)
   /** 读主动发送流水：对方隔很久才回时，让会话知道「我之前发过什么」 */
 function recentProactiveNote(hours = 12, max = 5) {
   try {
@@ -955,15 +1119,41 @@ function recentProactiveNote(hours = 12, max = 5) {
     acked = true
     void sendPrivate(t)
   }
+  let overflowNote = ""
+  const takeOverflow = () => {
+    if (!pi.overflowReset) return
+    pi.overflowReset = false
+    if (!overflowNote) overflowNote = pi.lastOverflow
+      ? "上下文超了，开了新会话还是没接上，再发一次试试？"
+      : "上下文超了，我开了个新会话，这条重新接上来了。"
+  }
   try {
-    const texts = await pi.promptWithRecovery(annotated, images)
-    stopTyping()
-    if (pi.overflowReset) {
-      pi.overflowReset = false
-      await sendPrivate(pi.lastOverflow
-        ? "上下文超了，开了新会话还是没接上，再发一次试试？"
-        : "上下文超了，我开了个新会话，这条重新接上来了。")
+    if (privateStopRequested || epoch !== privateEpoch) { stopTyping(); return false }
+    let texts = await pi.promptWithRecovery(annotated, images)
+    takeOverflow()
+    if (privateStopRequested || epoch !== privateEpoch) { stopTyping(); return false }
+    const cfg = coalesceCfg()
+    if (cfg.enabled && cfg.maxRounds > 0 && privatePending.length) {
+      pi.onAck = null // 复核轮的工具前奏不代发，只发最终那份
+      const r = await reviewWithPending(texts, epoch, text)
+      texts = r.texts
+      takeOverflow()
+      if (r.cancelled || privateStopRequested || epoch !== privateEpoch) { stopTyping(); return false }
+      if (r.dropped) {
+        await sendPrivate(`（你前面还有 ${r.dropped} 条更早的消息折叠了，我只看了最近 ${cfg.maxMessages} 条。）`)
+      }
+      if (r.failed) {
+        stopTyping()
+        const n = privatePending.length
+        await sendPrivate(n
+          ? `（刚才没接上，你后面 ${n} 条我先记着了，下一条消息一起回。）`
+          : "（刚才没接上，你后面几条我看到了，再发一次试试？）")
+        return false
+      }
     }
+    if (privateStopRequested || epoch !== privateEpoch) { stopTyping(); return false }
+    stopTyping()
+    if (overflowNote) await sendPrivate(overflowNote)
     const reply = texts.join("\n").trim()
     const replied = !!reply && !/^\[SILENT\]$/i.test(reply)
     if (replied) await sendPrivate(reply)
@@ -973,26 +1163,64 @@ function recentProactiveNote(hours = 12, max = 5) {
       saveState()
     }
     // 她选择 [SILENT] 就别 arm 余波：那不是「对方没回」，是她不想接
-    if (replied && afterglowCfg.enabled && afterglowCfg.maxRounds > 0) armAfterglow(1)
+    const ag = afterglowCfg()
+    if (replied && ag.enabled && ag.maxRounds > 0) armAfterglow(1)
+    return true
   } catch (e) {
     stopTyping()
-    const msg = String(e)
-    log("private prompt failed", msg)
-    // /new 或超限换会话属于正常中止，别再多补一条「没接上」
-    if (!/session reset|watchdog timeout/i.test(msg)) {
-      await call("send_private_msg", { user_id: ownerQQ, message: "（我这边暂时没接上，稍后再发一次试试）" }).catch(() => {})
+    const err = String(e)
+    log("private prompt failed", err)
+    if (privateStopRequested || epoch !== privateEpoch) return false
+    const n = privatePending.length
+    const watchdog = /watchdog timeout/i.test(err)
+    // /new 换会话属于正常中止；watchdog 已经发过「卡住了」，n=0 时别再重复
+    if (!/session reset/i.test(err) && !(watchdog && !n)) {
+      await sendPrivate(n
+        ? `（刚才那轮没跑完，你后面 ${n} 条我先记着了，下一条消息一起回。）`
+        : "（我这边暂时没接上，稍后再发一次试试）")
     }
+    return false
   } finally {
     pi.onAck = null
   }
 }
 
 let privateChain = Promise.resolve()
+let privateBusy = false
 function handlePrivate(msg) {
   // 指令不进串行链：正卡在一轮里的时候，/show /stop 也得能用
   const cmd = String(textOf(msg) || "").trim().toLowerCase()
   if (cmd === "/show" || cmd === "/stop" || cmd === "/new") return handleOwnerCommand(msg, cmd)
-  const run = privateChain.then(() => handlePrivateNow(msg)).catch((e) => log("handle private failed", String(e)))
+  if (Number(msg.user_id) !== ownerQQ) return Promise.resolve()
+  // 新的一条真实消息：上一轮的 /stop 到此为止，允许之后的复核继续处理积压
+  privateStopRequested = false
+  const cfg = coalesceCfg()
+  if (!cfg.enabled) {
+    // 关掉合并：保持原来的逐条排队
+    const run = privateChain.then(() => handlePrivateNow(msg)).catch((e) => log("handle private failed", String(e)))
+    privateChain = run.catch(() => {})
+    return run
+  }
+  // 忙时只缓冲；等这一轮（含复核）结束后再一起处理
+  if (privateBusy) { bufferPrivate(msg); return Promise.resolve() }
+  privateBusy = true
+  const myEpoch = privateEpoch
+  const run = privateChain.then(async () => {
+    let ok = false
+    try {
+      ok = await handlePrivateNow(msg)
+    } catch (e) {
+      log("handle private failed", String(e))
+    } finally {
+      privateBusy = false
+      // 复核轮数用完后还有积压：接着起下一轮，别把消息丢了。
+      // /new 让代数变了也算：旧流程作废，但旧流程期间收到的新消息要接上。
+      if ((ok || privateEpoch !== myEpoch) && coalesceCfg().enabled && privatePending.length) {
+        const next = privatePending.shift()
+        setTimeout(() => { void handlePrivate(next.msg) }, 0)
+      }
+    }
+  })
   privateChain = run.catch(() => {})
   return run
 }
@@ -1002,16 +1230,22 @@ async function handleOwnerCommand(msg, cmd) {
   if (Number(msg.user_id) !== Number(ownerQQ)) return
   const reply = (text) => call("send_private_msg", { user_id: ownerQQ, message: text }).catch(() => {})
   if (cmd === "/new") {
+    privateEpoch++
+    privatePending.length = 0
+    privateStopRequested = false
     await pi.newSession()
     await reply("新对话已开。")
     return
   }
   if (cmd === "/show") {
-    await reply(pi.describeBusy())
+    await reply(!pi.running && privateBusy ? "正在整理你刚发的几条消息（投递复核）。" : pi.describeBusy())
     return
   }
   if (cmd === "/stop") {
-    if (!pi.running) { await reply("没在忙，不用停。"); return }
+    // grace / 复核等待期间 pi.running 可能是 false，但这边还有待处理的积压
+    if (!pi.running && !privateBusy) { await reply("没在忙，不用停。"); return }
+    privateStopRequested = true
+    if (!pi.running) { await reply("好，停了。"); return }
     log("owner stop · abort current turn")
     pi.abortRequested = true
     pi.write(reqAbort())
@@ -1300,10 +1534,11 @@ async function pollOutbox() {
 const BUSY_FILE = join(ROOT, "busy-qq.json")
 function writeBusy() {
   try {
-    const data = pi.running
+    const busy = pi.running || privateBusy
+    const data = busy
       ? {
           running: true,
-          since: pi.turnStartedAt,
+          since: pi.turnStartedAt || Date.now(),
           tool: pi.currentTool ? { name: pi.currentTool.name, args: toolArgSummary(pi.currentTool.args), at: pi.currentTool.at } : null,
           updated: new Date().toISOString(),
         }
@@ -1330,7 +1565,9 @@ async function abortFromBoard(id) {
       writeFileSync(join(ackDir, `${id}-qq.json`), JSON.stringify({ ok, msg }))
     } catch { /* ignore */ }
   }
-  if (!pi.running) { ack(true, "本来就没在忙"); return }
+  if (!pi.running && !privateBusy) { ack(true, "本来就没在忙"); return }
+  privateStopRequested = true
+  if (!pi.running) { ack(true, "已停下，正在整理的消息不回了"); return }
   log("board abort · requested")
   pi.abortRequested = true
   pi.write(reqAbort())
@@ -1426,7 +1663,7 @@ function pollBridgeControl() {
         if (c.action === "wake") {
           if (c.target !== "qq" && c.target !== "all") { bridgeSeen[c.id] = true; changed = true; continue }
           // 忙或断线时不认领：窗口内下一轮再试；过期时上面会回落
-          if (!wsReady || !pi || pi.running || claimedWake) continue
+          if (!wsReady || !pi || pi.running || privateBusy || claimedWake) continue
           bridgeSeen[c.id] = true
           changed = true
           claimedWake = true
@@ -1455,7 +1692,7 @@ setInterval(cleanupGroupSessions, 10 * 60_000).unref?.()
 setInterval(writeBusy, 2000).unref?.()
 setInterval(pollBridgeControl, 2000).unref?.()
 setInterval(idleWatchdog, 30_000).unref?.()
-log("bridge started", { ownerQQ, wsUrl, model: MODEL, afterglow: afterglowCfg })
+log("bridge started", { ownerQQ, wsUrl, model: MODEL, afterglow: afterglowCfg(), coalesce: coalesceCfg() })
 // 兜底：任何漏掉的 Promise 异常只记日志，不要带走整个桥接
 process.on("unhandledRejection", (e) => log("unhandledRejection", String(e).slice(0, 300)))
 // 长期不重启也要轮转日志

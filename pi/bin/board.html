@@ -111,12 +111,14 @@ button.update-on{border-color:var(--accent);color:var(--accent);font-weight:650}
 #tab-ext .dash.single>main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:stretch}
 #tab-ext .dash.single>main>section:nth-child(3),
 #tab-ext .dash.single>main>section:nth-child(4),
-#tab-ext .dash.single>main>section:nth-child(5){grid-column:1 / -1}
+#tab-ext .dash.single>main>section:nth-child(5),
+#tab-ext .dash.single>main>section:nth-child(6){grid-column:1 / -1}
 @media (max-width:900px){
   #tab-ext .dash.single>main{grid-template-columns:minmax(0,1fr)}
   #tab-ext .dash.single>main>section:nth-child(3),
   #tab-ext .dash.single>main>section:nth-child(4),
-  #tab-ext .dash.single>main>section:nth-child(5){grid-column:auto}
+  #tab-ext .dash.single>main>section:nth-child(5),
+  #tab-ext .dash.single>main>section:nth-child(6){grid-column:auto}
 }
 #tab-memory .star{--brain-h:clamp(460px,62vh,720px)}
 @media (max-width:1080px){
@@ -670,6 +672,15 @@ pre.log{margin:0;max-height:320px;overflow:auto;background:var(--panel-2);border
           </div>
         </section>
         <section>
+          <div class="sec-head"><h2>余波 · QQ 私聊</h2><span class="spacer"></span><span class="sec-note" id="ag-note">…</span></div>
+          <label class="check"><input type="checkbox" id="ag-enabled">启用余波</label>
+          <div class="hint">她发完话后你一阵没回，桥接会过一会儿补一拍；回复 [SILENT] 时不发、也不续下一拍。</div>
+          <label class="field" style="margin-top:8px">间隔 <input type="number" id="ag-delay" min="10" max="3600" step="1" style="width:88px"> 秒</label>
+          <label class="field" style="margin-top:8px">轮次 <select id="ag-rounds"><option value="1">1 次</option><option value="2">2 次</option></select></label>
+          <div class="row" style="margin-top:10px"><button class="primary" id="ag-save">保存</button><span class="muted" id="ag-hint"></span></div>
+          <div class="hint">只影响 QQ 私聊；改完约 2 秒生效，不用重启桥接。</div>
+        </section>
+        <section>
           <div class="sec-head"><h2>化形</h2><span class="spacer"></span><span class="sec-note" id="form-note">未启用</span></div>
           <label class="check"><input type="checkbox" id="form-enabled">启用化形</label>
           <div class="hint">开着：每轮消息头显示当前化形，在线跟着模型走，本地/未登记厂商用自选标签。关着：不加任何化形字段，完全由她自己决定。</div>
@@ -1090,6 +1101,44 @@ $("gw-save")?.addEventListener("click", async () => {
   if (r.ok) { $("gw-token").value = ""; $("gw-clear-token").checked = false; gwTouched = false; void loadGateway() }
 })
 
+let agTouched = false
+$("ag-delay")?.addEventListener("input", () => { agTouched = true })
+for (const id of ["ag-enabled", "ag-rounds"]) $(id)?.addEventListener("change", () => { agTouched = true })
+async function loadAfterglow() {
+  const d = await getJson("/api/afterglow").catch(() => null)
+  if (!d) return
+  if (!agTouched) {
+    if (document.activeElement !== $("ag-enabled")) $("ag-enabled").checked = !!d.enabled
+    const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v }
+    set("ag-delay", d.delaySec || 60)
+    set("ag-rounds", String(d.maxRounds || 2))
+  }
+  const note = $("ag-note")
+  if (note) note.textContent = d.enabled ? `已启用 · ${d.delaySec} 秒 · ${d.maxRounds} 次` : "未启用"
+}
+$("ag-save")?.addEventListener("click", async () => {
+  const hint = $("ag-hint")
+  hint.textContent = "保存中…"
+  let r = null
+  let errMsg = ""
+  try {
+    r = await postJson("/api/afterglow", {
+      enabled: $("ag-enabled").checked,
+      delaySec: Number($("ag-delay").value) || 0,
+      maxRounds: Number($("ag-rounds").value) || 2,
+    })
+  } catch (e) {
+    errMsg = String(e?.message || e)
+    try {
+      const j = JSON.parse(errMsg)
+      errMsg = j.msg || j.error || errMsg
+    } catch { /* 不是 JSON 就用原文 */ }
+  }
+  if (!r) { hint.textContent = errMsg || "保存失败，稍后再试"; return }
+  hint.textContent = r.msg || (r.ok ? "已保存" : "保存失败")
+  if (r.ok) { agTouched = false; void loadAfterglow() }
+})
+
 let formsTouched = false
 let formsLoaded = false
 let formsSaving = false
@@ -1244,6 +1293,7 @@ async function loadOverview() {
     void loadDrawerFiles()
     void loadHa()
     void loadGateway()
+    void loadAfterglow()
     void loadForms()
     if (d.modelMode && Date.now() - Date.parse(d.modelMode.updated || 0) < 90_000) {
       const m = d.modelMode.mode

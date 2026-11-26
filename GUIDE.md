@@ -97,7 +97,8 @@ perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })
   "ownerQQ": 你的QQ号,
   "wsUrl": "ws://127.0.0.1:3001",
   "token": "有就填",
-  "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 }
+  "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 },
+  "coalesce": { "enabled": true, "graceMs": 500, "maxMessages": 20, "maxRounds": 2 }
 }
 ```
 
@@ -112,7 +113,8 @@ perceive({ path: "tmp/xxx.mp4", question: "这段视频讲了什么" })
 
 - 私聊：只认 `ownerQQ`；文件 / 语音 / 图片会落到 `worlds/default/tmp/`，语音转 mp3 后可用 `perceive` 听。
 - 群聊：默认关；用户说「打开群聊」→ `group_chat({ enabled: true })`。同一个 QQ 号别再接别的机器人，否则双回复。
-- 余波：发完 60 秒没人回补一拍，最多两拍；`[SILENT]` 不发、不续。
+- 余波：发完 60 秒没人回补一拍，最多两拍；`[SILENT]` 不发、不续。看板「扩展功能 → 余波 · QQ 私聊」可改开关、间隔秒数、轮次（1/2 次），保存约 2 秒生效。
+- 忙时合并：她在处理上一轮时你连发几条，桥接会压住旧回复，等这一轮结束后把这几条打包给她做一次「投递复核」，只发最终那份，不会一叠过时回复。
 - 任务型回复：模型调工具前先应的那句立刻发出去；闷头调工具就不代发提示，安静等最终结果。
 - 私聊指令（不进会话队列，卡住时也能用）：
   - `/show` —— 看她卡在哪：正在跑的工具、参数摘要、这一轮跑了多久；

@@ -29,6 +29,12 @@
       "delayMs": 60000,
       "maxRounds": 2
     },
+    "coalesce": {
+      "enabled": true,
+      "graceMs": 500,
+      "maxMessages": 20,
+      "maxRounds": 2
+    },
     "group": {
       "enabled": false,
       "keywords": [

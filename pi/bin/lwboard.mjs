@@ -1114,6 +1114,50 @@ const server = http.createServer(async (req, res) => {
           : cfg.gateway.enabled === true ? "已保存，网关正在重启" : "已保存，网关已停",
       })
     }
+    if (req.method === "GET" && url.pathname === "/api/afterglow") {
+      const cfg = readJson(CONFIG_FILE, {})
+      const ag = (cfg.bridge && cfg.bridge.afterglow) || {}
+      const delayMs = Number(ag.delayMs)
+      const rounds = Number(ag.maxRounds)
+      const rawRounds = Number.isFinite(rounds) ? Math.round(rounds) : 2
+      // 0 轮 = 关闭；页面只有 1/2 两个轮次，用「启用」开关表示关
+      const roundsOn = rawRounds === 0 ? 0 : Math.max(1, Math.min(2, rawRounds))
+      const delaySec = Math.max(10, Math.min(3600, Math.round((Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 60_000) / 1000)))
+      return json(res, 200, {
+        ok: true,
+        enabled: ag.enabled !== false && roundsOn > 0,
+        delaySec,
+        maxRounds: roundsOn || 2,
+      })
+    }
+    if (req.method === "POST" && url.pathname === "/api/afterglow") {
+      const data = await body(req)
+      const known = ["enabled", "delaySec", "maxRounds"]
+      if (!known.some((k) => k in data)) return json(res, 400, { ok: false, msg: "没有可保存的字段（body 解析失败？）" })
+      let cfg
+      try { cfg = readConfigStrict() } catch (e) { return json(res, 400, { ok: false, msg: String(e?.message || e) }) }
+      cfg.bridge = cfg.bridge && typeof cfg.bridge === "object" && !Array.isArray(cfg.bridge) ? cfg.bridge : {}
+      const ag = cfg.bridge.afterglow && typeof cfg.bridge.afterglow === "object" && !Array.isArray(cfg.bridge.afterglow) ? cfg.bridge.afterglow : {}
+      if (typeof data.enabled === "boolean") ag.enabled = data.enabled
+      if (data.delaySec !== undefined) {
+        const sec = Number(data.delaySec)
+        if (!Number.isFinite(sec) || sec < 10 || sec > 3600) return json(res, 400, { ok: false, msg: "余波间隔要在 10~3600 秒之间" })
+        ag.delayMs = Math.round(sec * 1000)
+      }
+      if (data.maxRounds !== undefined) {
+        const rounds = Number(data.maxRounds)
+        if (!Number.isInteger(rounds) || rounds < 1 || rounds > 2) return json(res, 400, { ok: false, msg: "余波轮次只能是 1 或 2" })
+        ag.maxRounds = rounds
+      }
+      if (ag.enabled === undefined) ag.enabled = true
+      if (ag.delayMs === undefined) ag.delayMs = 60_000
+      if (ag.maxRounds === undefined) ag.maxRounds = 2
+      cfg.bridge.afterglow = ag
+      try { writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2)) } catch (e) {
+        return json(res, 500, { ok: false, msg: `配置写不进去：${String(e)}` })
+      }
+      return json(res, 200, { ok: true, enabled: ag.enabled, delaySec: Math.round(ag.delayMs / 1000), maxRounds: ag.maxRounds, msg: "已保存（桥接 2 秒内生效）" })
+    }
     if (req.method === "GET" && url.pathname === "/api/drawer") {
       const cfg = readJson(CONFIG_FILE, {})
       return json(res, 200, {

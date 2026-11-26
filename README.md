@@ -238,6 +238,7 @@ git fetch origin && git checkout pi-agent-adv && git pull
     "wsUrl": "ws://127.0.0.1:3001",
     "token": "",
     "afterglow": { "enabled": true, "delayMs": 60000, "maxRounds": 2 },
+    "coalesce": { "enabled": true, "graceMs": 500, "maxMessages": 20, "maxRounds": 2 },
     "group": { "enabled": false, "keywords": ["铃"], "interjectChance": 0.05, "cooldownMs": 8000, "sessionIdleMinutes": 120, "maxFileBytes": 104857600, "maxBatchBytes": 209715200 }
   },
   "subagent": { "model": "deepseek-flash" },
@@ -433,7 +434,8 @@ QQ ←→ OneBot v11 正向 WS ←→ pi/bin/qq-bridge.mjs ←→ pi --mode rpc
 - **唤醒落点**：从 QQ 私聊里起的日程 / 心跳，到点回到**那个私聊**里触发一轮（桥接在线时）；
   桥接不在线才回后台窗口、走 `reach_out`；终端 TUI 里起的心跳只回到**那个终端**，窗口关掉后心跳会被结束
   （正常退出立即，异常退出最多一个 tick 内清理）、不回落；其它窗口起的日程照旧回后台。
-- **余波**：发完 60 秒没回补一拍，最多两拍，`[SILENT]` 不发；提示词只做兜底，QQ 常驻提示里要求「尽量一次说完」；生成期间对方回来了这句就作废，没发出去也不续下一拍；
+- **余波**：发完 60 秒没回补一拍，最多两拍，`[SILENT]` 不发；提示词只做兜底，QQ 常驻提示里要求「尽量一次说完」；生成期间对方回来了这句就作废，没发出去也不续下一拍；看板「扩展功能 → 余波 · QQ 私聊」可改开关、间隔秒数和轮次（1/2 次），保存约 2 秒生效；
+- **忙时合并**：她在处理上一轮时你连发几条，桥接先把旧回复压住，等这一轮结束后把这些消息打包给她做一次「投递复核」；她可以沿用/补充旧回复，也可以重写，桥接只发最终那份，不再一叠过时回复；
 - **outbox**：`reach_out` 写文件，桥接补发最近 3 天；状态文件丢了只补 `since` 之后的新条目，不会把当天已发过的整段重发；
 - **先应一声就先发**：模型调工具前先说了话，桥接把这句立刻发出去（一条用户消息只放行一次）；模型闷头调工具时桥接不代发任何提示，安静等最终结果。
 - **卡死自愈**：一轮超过 `bridge.idleTimeoutSec`（默认 600 秒，设 0 关闭）没有任何动静，桥接自动 `abort` 并在 QQ 说一句「刚才那轮卡住了，我掐了重来」。

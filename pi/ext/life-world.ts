@@ -865,6 +865,8 @@ function cleanUserText(text: string): string {
       if (t.startsWith("（最近 10 分钟，别的窗口有对话")) return false
       if (t.startsWith("（这是 QQ 私聊")) return false
       if (t.startsWith("（这是 QQ 群聊")) return false
+      // 只删桥接固定句式的系统注记，不误删以「（投递复核：」开头的普通用户消息
+      if (/^（投递复核：(?:上一条用户消息|上一条是附件消息|你在处理上一条|这些是对方在你上一轮|你上一条回复已经生成|请直接回复这些消息|前面还有|还有 )/.test(t)) return false
       return true
     })
     .join("\n")
